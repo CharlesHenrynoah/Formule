@@ -72,6 +72,8 @@ export default function App() {
   const [codeFile, setCodeFile] = useState<string>('__html');
 
   const [running, setRunning] = useState(false);
+  const [offer, setOffer] = useState<{ text: string; canBuild: boolean; prompt: string } | null>(null);
+  const briefRef = useRef('');
   const [phases, setPhases] = useState<PhaseState[]>([]);
   const [plan, setPlan] = useState('');
   const [planStreaming, setPlanStreaming] = useState(false);
@@ -108,7 +110,7 @@ export default function App() {
   const wakeArmed = useRef(0);        // « Jarvis » seul → la phrase suivante est un ordre
   // Évolution demandée au contremaître (evolve_app) → pipeline Data Engineer → PO → Dev, suivi dans le chat
   const pipeRef = useRef<((e: { status: string; steps: Array<{ label: string; ok?: boolean; detail?: string }> }) => void) | null>(null);
-  const runRef = useRef<(text: string, iterate: boolean) => Promise<void>>(async () => {});
+  const runRef = useRef<(text: string, iterate: boolean, phase?: 'source' | 'build') => Promise<void>>(async () => {});
 
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -482,7 +484,7 @@ export default function App() {
       iframeRef.current?.contentWindow?.postMessage({ __es: 'pipeline:event', event: msg }, '*');
       setChat(projId, upsertPipeline(normalizeChat(loadChat(projId)), msg));
     };
-    void runRef.current(req, true);
+    void runRef.current(req, true, 'source');
   };
   /** Création : la demande et les étapes neutres ouvrent le fil de la nouvelle interface (historique conservé). */
   const agentEventsRef = useRef<AgentEvent[]>([]); agentEventsRef.current = agentEvents;
@@ -499,11 +501,11 @@ export default function App() {
     if (!text || running || chatBusy) return;
     if (chatMode === 'ask') { toast.message('Mode Ask : lecture seule. Passe en mode Agent pour créer ou modifier une interface.'); return; }
     setPrompt('');
-    if (!previewCode || !project) { void run(text, false); return; }
+    if (!previewCode || !project) { void run(text, false, 'source'); return; }
     startEvolution(text, project.id);
   };
 
-  const run = async (text: string, iterate: boolean) => {
+  const run = async (text: string, iterate: boolean, phase: 'source' | 'build' = 'build') => {
     if (!text.trim() || running) return;
     const pipe = iterate ? pipeRef.current : null; pipeRef.current = null;
     const steps: Array<{ label: string; ok?: boolean; detail?: string }> = [];
@@ -519,11 +521,14 @@ export default function App() {
     else setBoard(null);
     let savedProject: string | null = iterate ? project?.id ?? null : null;
     let savedNumber: number | null = null;
+    let hold = false;
+    const sourcing = agentMode && phase === 'source';
     try {
-      await streamGenerate({ prompt: text, projectId: iterate ? project?.id : undefined, diffusing: agentMode ? false : diffusing, useTools: true, mode: agentMode ? 'agent' : 'direct', datasets: !iterate && datasets.length ? datasets.map(({ name, rows }) => ({ name, rows })) : undefined }, (e) => {
+      await streamGenerate({ prompt: text, projectId: iterate ? project?.id : undefined, diffusing: agentMode ? false : diffusing, useTools: true, mode: agentMode ? 'agent' : 'direct', phase: sourcing ? 'source' : 'build', sourceBrief: phase === 'build' ? briefRef.current : undefined, datasets: !iterate && datasets.length ? datasets.map(({ name, rows }) => ({ name, rows })) : undefined }, (e) => {
         switch (e.type) {
           case 'phase': { const l = neutral(e.label); if (steps.at(-1)?.label !== l) { steps.forEach((x) => { if (x.ok === undefined) x.ok = true; }); steps.push({ label: l }); emitPipe('running'); } } setPhase(e.phase, e.label); if (e.phase === 'code' || e.phase === 'fix') { codeBuf.current = ''; setPlanStreaming(false); } break;
           case 'agent': setAgentEvents((l) => [...l, e]); break;
+          case 'source': hold = true; briefRef.current = String(e.brief ?? ''); setOffer({ text: String(e.text ?? ''), canBuild: e.canBuild !== false, prompt: text }); steps.push({ label: 'sourcing', ok: true, detail: String(e.text ?? '').slice(0, 180) }); emitPipe('source'); break;
           case 'plan_delta': planBuf.current += e.text; scheduleFlush(); break;
           case 'plan_done': planBuf.current = e.plan; setPlan(e.plan); setPlanStreaming(false); break;
           case 'tool_call': setToolEvents((l) => [...l, { id: e.id, name: e.name, args: e.args, source: 'génération', status: 'en cours' }]); break;
@@ -549,7 +554,7 @@ export default function App() {
       else setPhases((l) => l.map((p) => (p.status === 'running' ? { ...p, status: 'error', label: `${p.label} (annulé)` } : p)));
     } finally {
       steps.forEach((x) => { if (x.ok === undefined) x.ok = true; });
-      emitPipe(savedNumber ? 'done' : 'failed');
+      emitPipe(hold ? 'source' : savedNumber ? 'done' : 'failed');
       setPlanStreaming(false);
       if (savedProject) {
         // L'aperçu est déjà affiché. On garde l'attente jusqu'à ce que le projet soit posé,
@@ -702,7 +707,7 @@ export default function App() {
                 </SelectContent>
               </Select>
             ) : current ? <Badge variant="outline" className="font-mono">v{current.number}</Badge> : null}
-            events={agentEvents} showBuild={running} buildTitle={running && board ? 'Construction du tableau' : project ? 'Mise à jour de l’interface' : 'Création de l’interface'}
+            events={agentEvents} showBuild={running} offer={offer} onOffer={(ok) => { const next = offer; setOffer(null); if (!next) return; if (!ok) { if (project) setChat(project.id, normalizeChat(loadChat(project.id)).map((m) => m.role === 'pipeline' && m.status === 'source' ? { ...m, status: 'rejected' } : m)); return; } void run(next.prompt, !!project, 'build'); }} buildTitle={running && board ? 'Construction du tableau' : project ? 'Mise à jour de l’interface' : 'Création de l’interface'}
             hint={chatEmptyReason({ hasProject: !!project, running, appError: null, capable: hasApp ? chatCapable : null })}
             commands={hasApp && !running ? chatShell.commands : []} voice={voiceState} confirm={hostedConfirm}
             mode={chatMode} onModeChange={setChatModeAndSync}

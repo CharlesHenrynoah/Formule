@@ -81,13 +81,14 @@ export function BuildSteps({ events, running, title }: { events: AgentEvent[]; r
 type Props = {
   msgs: ChatMsg[]; busy: boolean; running: boolean; appTitle?: string; versionPicker?: ReactNode;
   events: AgentEvent[]; buildTitle: string; showBuild: boolean;
+  offer?: { text: string; canBuild: boolean } | null; onOffer?: (ok: boolean) => void;
   hint: string | null; commands: string[]; voice: VoiceState | null; confirm: HostedConfirm | null;
   mode: ChatMode; onModeChange: (m: ChatMode) => void;
   onSend: (text: string) => void; onVoice: (cmd: 'ptt-down' | 'ptt-up' | 'toggle' | 'stop') => void;
   composer: ReactNode;
 };
 
-export function FormuleAgentPanel({ msgs, busy, running, appTitle, versionPicker, events, buildTitle, showBuild, hint, commands, voice, confirm, mode, onModeChange, onSend, onVoice, composer }: Props) {
+export function FormuleAgentPanel({ msgs, busy, running, appTitle, versionPicker, events, buildTitle, showBuild, offer, onOffer, hint, commands, voice, confirm, mode, onModeChange, onSend, onVoice, composer }: Props) {
   const endRef = useRef<HTMLDivElement>(null);
   useEffect(() => { endRef.current?.scrollIntoView({ block: 'end' }); }, [msgs, busy, confirm, events.length]);
   const send = (t: string) => { if (!t.trim() || busy) return; onSend(t.trim()); };
@@ -145,7 +146,7 @@ export function FormuleAgentPanel({ msgs, busy, running, appTitle, versionPicker
               <summary className="flex cursor-pointer list-none items-center gap-1.5 font-medium [&::-webkit-details-marker]:hidden">
                 <Mark running={m.status === 'running'} ok={m.status !== 'failed'} />
                 <span className="min-w-0 flex-1 truncate">{neutral(m.title)}</span>
-                <span className="text-[10px] font-normal text-muted-foreground">{m.status === 'running' ? 'en cours' : m.status === 'done' ? 'terminé' : 'échec'}</span>
+                <span className="text-[10px] font-normal text-muted-foreground">{m.status === 'running' ? 'en cours' : m.status === 'done' ? 'terminé' : m.status === 'source' ? 'à valider' : m.status === 'rejected' ? 'rejeté' : 'échec'}</span>
                 <ChevronRight className="size-3 transition group-open:rotate-90" />
               </summary>
               <ul className="mt-1 ml-4 space-y-0.5 border-l pl-2">{m.steps.map((s, i) => <li key={i} className="text-[11px] text-muted-foreground">{s.ok === false ? '✕' : s.ok ? '✓' : '·'} {neutral(s.label)}{s.detail ? <span className="opacity-70"> — {neutral(s.detail)}</span> : null}</li>)}</ul>
@@ -181,6 +182,15 @@ export function FormuleAgentPanel({ msgs, busy, running, appTitle, versionPicker
           );
         })}
         {showBuild && <BuildSteps events={events} running={running} title={buildTitle} />}
+        {offer && (
+          <div className="rounded-lg border bg-muted/30 p-3 text-xs" data-testid="fa-source">
+            <div className="whitespace-pre-wrap text-foreground">{offer.text}</div>
+            <div className="mt-2 flex gap-2">
+              <Button size="sm" className="flex-1" disabled={!offer.canBuild || busy || running} onClick={() => onOffer?.(true)} data-testid="fa-source-yes">Valider</Button>
+              <Button size="sm" variant="outline" className="flex-1" disabled={busy || running} onClick={() => onOffer?.(false)} data-testid="fa-source-no">Rejeter</Button>
+            </div>
+          </div>
+        )}
         {confirm && (
           <div className="rounded-lg border border-zinc-700 bg-white/5 p-3 text-xs" data-testid="app-chat-confirm">
             <div className="flex items-center gap-1 font-semibold text-zinc-300"><AlertTriangle className="size-3.5" /> Action à confirmer : {confirm.tool}</div>

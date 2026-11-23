@@ -279,7 +279,7 @@ function openSse(reply: FastifyReply) {
 }
 
 type Dataset = { name: string; rows: Json[] };
-type GenBody = { fullRebuild?: boolean; prompt: string; projectId?: string; diffusing?: boolean; useTools?: boolean; mode?: 'agent' | 'direct'; datasets?: Dataset[] };
+type GenBody = { fullRebuild?: boolean; prompt: string; projectId?: string; diffusing?: boolean; useTools?: boolean; mode?: 'agent' | 'direct'; phase?: 'source' | 'build'; sourceBrief?: string; datasets?: Dataset[] };
 /** Données personnelles importées (CSV/JSON parsés dans le studio) : bornées, noms de collection sûrs. */
 function cleanDatasets(ds: unknown): Dataset[] {
   if (!Array.isArray(ds)) return [];
@@ -311,7 +311,9 @@ app.post<{ Body: GenBody }>('/api/generate', async (req, reply) => {
       prompt, diffusing, useTools, mode, previousCode: previous?.code, previousPlan: previous?.plan,
       previousFiles: previous?.files ?? undefined, previousComponents: previous?.agent?.components, previousBrief: previous?.agent?.brief,
       previousContract: previous?.app?.contract, datasets: datasets.length ? datasets : undefined, projectId: projectId ?? undefined, previousVersion: previous?.number, fullRebuild: req.body?.fullRebuild === true,
+      phase: req.body?.phase, sourceBrief: req.body?.sourceBrief,
     }, (e) => { if (e.type === 'agent' && trace.length < 500) trace.push(e); s.send(e); }, s.signal);
+    if (gen.sourced) { s.send({ type: 'source_ready' }); s.end(); return; }
     const isAgent = gen.mode === 'agent';
     let code: string = gen.code;
 

@@ -15,6 +15,7 @@ import { collectionsInScreen, readsForCollections, type SourceTool } from '../..
 import { runAgentLoop } from './loop.ts';
 import { bindCharts } from './bind-charts.ts';
 import { dropIncomplete, liaisonMission, poseRequest, repairDateSort, routeDemand } from './pose.ts';
+import { collectSource } from './source-offer.ts';
 import type { SpawnAgent } from './tools/types.ts';
 
 const MAIN_STEPS = 24;
@@ -40,6 +41,22 @@ function providerFor(cfg: CrewConfig): LLMProvider {
  */
 export async function runEngine(input: CrewInput, cfg: CrewConfig, ctx: { mcp?: ConstructorParameters<typeof Toolbox>[1]; emit: (event: AgentEvent | Record<string, unknown>) => void; signal?: AbortSignal }) {
   const emit = ctx.emit as (event: AgentEvent) => void;
+  if (input.phase === 'source' && ctx.mcp) {
+    emit({ type: 'agent', kind: 'role', role: 'data', label: 'Routeur' });
+    const page = input.previous?.files?.['src/App.tsx'] ?? '';
+    const offer = await collectSource(
+      input.prompt,
+      page,
+      () => ctx.mcp!.listTools(),
+      async (tool, args) => (await ctx.mcp!.call(tool, args)).data,
+    );
+    emit({ type: 'agent', kind: 'message', role: 'data', text: offer.text.slice(0, 500) });
+    ctx.emit({ type: 'source', canBuild: offer.canBuild, text: offer.text, brief: offer.brief });
+    return {
+      sourced: true, code: '', plan: input.prompt, brief: offer.brief, files: {}, components: [], workspace: '',
+      iterations: 0, reviews: [] as Array<{ iteration: number; verdict: string; remarks: string[] }>, toolResults: [], framework: 'sourcing',
+    };
+  }
   const t0 = Date.now();
   const ws = await Workspace.create({ files: input.previous?.files, components: input.previous?.components });
   const tb = new Toolbox(ws, input.useTools === false ? undefined : ctx.mcp, emit);
@@ -98,7 +115,9 @@ export async function runEngine(input: CrewInput, cfg: CrewConfig, ctx: { mcp?: 
     const route = routeDemand(input.prompt);
     const subject = route.collections.length > 1 ? `collections ${route.collections.join(', ')}` : `collection ${route.collection}`;
     counted({ type: 'agent', kind: 'message', role: 'data', text: `Routeur : ${route.kind} « ${route.title} », ${subject}${route.data ? '' : ', sans lecture'}.` });
-    if (!route.data) {
+    if (input.sourceBrief) {
+      liaisonReport = input.sourceBrief;
+    } else if (!route.data) {
       liaisonReport = `Routeur : ${route.kind} « ${route.title} ». Aucune collection à lire.`;
     } else {
     let reads: Array<{ tool: string; args: Record<string, unknown> }> = [];

@@ -33,6 +33,9 @@ export type CrewInput = {
   appId?: string; previousVersion?: number;
   /** Forcer le mode complet (ignorer la mémoire). */
   fullRebuild?: boolean;
+  /** source : lire et proposer, sans écrire. build : développer après validation, avec le brief déjà lu. */
+  phase?: 'source' | 'build';
+  sourceBrief?: string;
 };
 
 /** Lignes ajoutées/modifiées d'un fichier (diff ligne à ligne grossier, pour la revue incrémentale). */
