@@ -34,6 +34,22 @@ test('la page sans enveloppe reçoit AppShell une seule fois', () => {
   assert.equal(ensureAppShell(fixed.code).changed, false);
 });
 
+test('le return () => d\'un effet n\'avale pas AppShell', () => {
+  const src = `import { useEffect } from 'react';\nexport default function App() {\n  useEffect(() => {\n    let cancelled = false;\n    return () => { cancelled = true; };\n  }, []);\n  return (\n    <div>Pilotage</div>\n  );\n}\n`;
+  const fixed = ensureAppShell(src);
+  assert.match(fixed.code, /return \(\) => \{ cancelled = true; \}/);
+  assert.match(fixed.code, /<AppShell title="Pilotage">\s*<div>Pilotage<\/div>\s*<\/AppShell>/);
+  assert.doesNotMatch(fixed.code, /<\/AppShell>\)\s*=>/);
+});
+
+test('un AppShell déjà glissé dans le nettoyage est retiré', () => {
+  const src = `import { AppShell } from '@/components/es/app-shell';\nexport default function App() {\n  return (<AppShell title="Pilotage"></AppShell>) => {\n    cancelled = true\n  }\n  return (\n    <div>Pilotage</div>\n  );\n}\n`;
+  const fixed = ensureAppShell(src);
+  assert.match(fixed.code, /return \(\) =>/);
+  assert.match(fixed.code, /<AppShell title="Pilotage">\s*<div>Pilotage<\/div>\s*<\/AppShell>/);
+  assert.doesNotMatch(fixed.code, /<\/AppShell>\)\s*=>/);
+});
+
 test('le ChartContainer fictif devient un graphique recharts', () => {
   const src = `import { Bar, BarChart, CartesianGrid, XAxis } from 'recharts';\nexport function ChartPanel({ data, xKey, yKey }) {\n  return <ChartContainer data={data} xKey={xKey} yKey={yKey} type="area" />;\n}\n`;
   const fixed = repairChartUsage(src);

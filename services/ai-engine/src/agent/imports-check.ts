@@ -193,30 +193,55 @@ function ensureNamedImport(src: string, module: string, names: string[]): string
   return src.replace(re, `import { ${[...have, ...missing].join(', ')} } from ${match[2]}${module}${match[2]}`);
 }
 
-/** Pose l'enveloppe dashboard + chat si la page l'a oubliée. Une revue ne doit pas relancer un correcteur pour ça. */
-export function ensureAppShell(src: string): { code: string; changed: boolean } {
-  if (/@\/components\/es\/app-shell/.test(src)) return { code: src, changed: false };
-  const imported = /^(import\s)/m.test(src)
-    ? src.replace(/^(import\s)/m, `import { AppShell } from '@/components/es/app-shell';\n$1`)
-    : `import { AppShell } from '@/components/es/app-shell';\n${src}`;
-  const start = imported.search(/export\s+default\s+function/);
-  const head = start >= 0 ? imported.slice(0, start) : '';
-  const body = start >= 0 ? imported.slice(start) : imported;
-  const paren = /return\s*\(/.exec(body);
-  if (!paren || paren.index === undefined) return { code: imported, changed: true };
-  const open = body.indexOf('(', paren.index);
+function matchingParen(body: string, open: number): number {
   let depth = 0;
   for (let i = open; i < body.length; i++) {
     if (body[i] === '(') depth++;
     else if (body[i] === ')') {
       depth--;
-      if (depth === 0) {
-        const wrapped = body.slice(0, open + 1) + '<AppShell title="Pilotage">' + body.slice(open + 1, i) + '</AppShell>' + body.slice(i);
-        return { code: head + wrapped, changed: true };
-      }
+      if (depth === 0) return i;
     }
   }
-  return { code: imported, changed: true };
+  return -1;
+}
+
+/** Le return JSX de la page. Un `return () =>` de useEffect n'est pas ce return. */
+function wrapJsxReturn(body: string): string | null {
+  const re = /return\s*\(/g;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(body))) {
+    const open = body.indexOf('(', match.index);
+    const close = matchingParen(body, open);
+    if (close < 0) return null;
+    const inner = body.slice(open + 1, close);
+    const rest = body.slice(close + 1).replace(/^\s*/, '');
+    if (rest.startsWith('=>') || !/^\s*</.test(inner)) {
+      re.lastIndex = close + 1;
+      continue;
+    }
+    return body.slice(0, open + 1) + '<AppShell title="Pilotage">' + inner + '</AppShell>' + body.slice(close);
+  }
+  return null;
+}
+
+/** Pose l'enveloppe dashboard + chat si la page l'a oubliée. Une revue ne doit pas relancer un correcteur pour ça. */
+export function ensureAppShell(src: string): { code: string; changed: boolean } {
+  const undone = src.replace(/return\s*\(\s*<AppShell\b[^>]*>\s*<\/AppShell>\s*\)\s*=>/g, 'return () =>');
+  let changed = undone !== src;
+  if (/<AppShell\b/.test(undone) && /@\/components\/es\/app-shell/.test(undone)) return { code: undone, changed };
+  let code = undone;
+  if (!/@\/components\/es\/app-shell/.test(code)) {
+    code = /^(import\s)/m.test(code)
+      ? code.replace(/^(import\s)/m, `import { AppShell } from '@/components/es/app-shell';\n$1`)
+      : `import { AppShell } from '@/components/es/app-shell';\n${code}`;
+    changed = true;
+  }
+  const start = code.search(/export\s+default\s+function/);
+  const head = start >= 0 ? code.slice(0, start) : '';
+  const body = start >= 0 ? code.slice(start) : code;
+  const wrapped = wrapJsxReturn(body);
+  if (!wrapped) return { code, changed };
+  return { code: head + wrapped, changed: true };
 }
 
 /** <ChartContainer data xKey yKey /> n'existe pas : le vrai composant attend config et un graphique recharts. */
