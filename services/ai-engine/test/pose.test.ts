@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { collectionForPrompt, dropIncomplete, liaisonMission, poseRequest, routeDemand } from '../src/agent/engine/pose.ts';
+import { collectionForPrompt, dropIncomplete, liaisonMission, poseRequest, repairDateSort, routeDemand } from '../src/agent/engine/pose.ts';
 
 const page = `import { useState, useEffect } from 'react';
 export default function App() {
@@ -98,6 +98,16 @@ test('une courbe qui croise deux collections pose deux séries', () => {
   assert.match(releases.code, /at \+= 7 \* 86400000/);
   const again = poseRequest(releases.code, 'Ajoute une courbe des releases publiées par semaine sur les 3 derniers mois. Une seule série, en sable.');
   assert.equal(again.changed, false);
+});
+
+test('la plus récente se trie sur la date, pas sur le tag', () => {
+  const bad = `const at = new Date(String(row.tag_name ?? row.name ?? row.createdAt ?? row.publishedAt ?? row.date ?? '')).getTime();`
+  const fixed = repairDateSort(bad);
+  assert.equal(fixed.changed, true);
+  assert.match(fixed.code, /row\.publishedAt \?\? row\.date \?\? row\.createdAt/);
+  assert.doesNotMatch(fixed.code, /tag_name/);
+  const good = `new Date(String(row.publishedAt ?? row.date ?? '')).getTime()`;
+  assert.equal(repairDateSort(good).changed, false);
 });
 
 test('si la page est inchangée, le tableau est posé avant BoardStack', () => {

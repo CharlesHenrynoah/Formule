@@ -366,6 +366,21 @@ function formFn(name: string, title: string): string {
 `;
 }
 
+const DATE_FIELD = /date|created|published|updated|merged|closed/i;
+
+/** Une date se lit sur un champ date. Un tag ou un nom ne sert jamais à trier la plus récente. */
+export function repairDateSort(source: string): { code: string; changed: boolean } {
+  const code = source.replace(/new Date\(String\((row(?:\?\.\w+|\.\w+)?(?:\s*\?\?\s*row(?:\?\.\w+|\.\w+)?)*)(?:\s*\?\?\s*['"]{2})?\)\)/g, (full, chain: string) => {
+    const parts = chain.split(/\s*\?\?\s*/);
+    const dates = parts.filter((part) => DATE_FIELD.test(part));
+    if (dates.length === parts.length || !dates.length || dates[0] === parts[0]) return full;
+    const rank = (part: string) => /published/i.test(part) ? 0 : /\bdate\b/i.test(part) ? 1 : /created/i.test(part) ? 2 : 3;
+    dates.sort((a, b) => rank(a) - rank(b));
+    return `new Date(String(${dates.join(' ?? ')} ?? ''))`;
+  });
+  return { code, changed: code !== source };
+}
+
 /** Pose l'élément routé dans le return. Le titre n'est jamais la demande brute. Sans ancre, rien n'est écrit. */
 export function poseRequest(source: string, prompt: string): { code: string; changed: boolean } {
   const route = routeDemand(prompt);

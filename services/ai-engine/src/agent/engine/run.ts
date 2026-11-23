@@ -14,7 +14,7 @@ import type { AgentName } from './agents/types.ts';
 import { collectionsInScreen, readsForCollections, type SourceTool } from '../../app-agents/ingest.ts';
 import { runAgentLoop } from './loop.ts';
 import { bindCharts } from './bind-charts.ts';
-import { dropIncomplete, liaisonMission, poseRequest, routeDemand } from './pose.ts';
+import { dropIncomplete, liaisonMission, poseRequest, repairDateSort, routeDemand } from './pose.ts';
 import type { SpawnAgent } from './tools/types.ts';
 
 const MAIN_STEPS = 24;
@@ -87,6 +87,8 @@ export async function runEngine(input: CrewInput, cfg: CrewConfig, ctx: { mcp?: 
     }
     const bound = bindCharts(ws.files.get('src/App.tsx') ?? '');
     if (bound.changed) { await ws.write('src/App.tsx', bound.code); patched = true; }
+    const dated = repairDateSort(ws.files.get('src/App.tsx') ?? '');
+    if (dated.changed) { await ws.write('src/App.tsx', dated.code); patched = true; }
     if (incremental && (ws.files.get('src/App.tsx') ?? '') === pageBefore) throw new Error("L'élément demandé n'a pas été posé : la page est inchangée.");
     if (patched || !tb.lastBuild?.ok) await tb.build();
     if (!tb.lastBuild?.ok || !tb.lastBuild.html) throw new Error(`Build final en échec : ${tb.lastBuild?.output.slice(-600) ?? 'aucun build'}`);
