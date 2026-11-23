@@ -96,10 +96,28 @@ window.addEventListener('keyup',function(e){if(e.code==='Space'&&!editable(e.tar
 window.addEventListener('error',function(e){var m=String((e.error&&e.error.message)||e.message||e);post({__es:'app:error',message:m});});
 })();</script>`;
 
+/** Chart.js ne dessine pas dans un div : l'hôte des new Chart devient un canvas. */
+export function repairChartHosts(html: string): string {
+  const ids = new Set<string>();
+  for (const match of html.matchAll(/(?:const|let|var)\s+(\w+)\s*=\s*document\.getElementById\(\s*['"]([^'"]+)['"]\s*\)/g)) {
+    if (new RegExp(`new\\s+Chart\\(\\s*${match[1]}\\b`).test(html)) ids.add(match[2]);
+  }
+  for (const match of html.matchAll(/new\s+Chart\(\s*document\.getElementById\(\s*['"]([^'"]+)['"]\s*\)/g)) ids.add(match[1]);
+  let out = html;
+  for (const id of ids) {
+    const open = new RegExp(`<div(\\s[^>]*\\bid=["']${id}["'][^>]*)>`, 'i');
+    if (!open.test(out)) continue;
+    out = out.replace(open, '<canvas$1>');
+    out = out.replace(new RegExp(`(<canvas\\s[^>]*\\bid=["']${id}["'][^>]*>)\\s*</div>`, 'i'), '$1</canvas>');
+  }
+  return out;
+}
+
 export function withBridge(html: string) {
   if (!html) return '';
-  if (/<head[^>]*>/i.test(html)) return html.replace(/<head[^>]*>/i, (m) => `${m}\n${BRIDGE}`);
-  return BRIDGE + html;
+  const page = repairChartHosts(html);
+  if (/<head[^>]*>/i.test(page)) return page.replace(/<head[^>]*>/i, (m) => `${m}\n${BRIDGE}`);
+  return BRIDGE + page;
 }
 
 export const SANDBOX = 'allow-scripts allow-forms allow-modals';

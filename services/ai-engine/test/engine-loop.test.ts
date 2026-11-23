@@ -72,6 +72,9 @@ test('le tableau suit la composition shadcn-admin, sans sidebar', () => {
   assert.match(text, /sans sa barre latérale/);
   assert.match(text, /data_list/);
   assert.match(text, /compile_backend/);
+  assert.match(text, /h-\[260px\]/);
+  assert.match(text, /var\(--chart-1\)/);
+  assert.match(text, /Pas de Chart\.js/);
 });
 
 test('task refuse un agent inconnu et un appel hors du principal', async () => {

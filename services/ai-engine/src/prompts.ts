@@ -20,6 +20,7 @@ export const CODE_RULES = `Règles de sortie :
 - Réponds UNIQUEMENT avec un fichier HTML complet et autonome, de <!doctype html> à </html>, sans texte autour ni balises Markdown.
 - CSS et JS inline. Bibliothèques externes autorisées seulement depuis unpkg.com, cdn.jsdelivr.net, cdnjs.cloudflare.com, cdn.tailwindcss.com ou esm.sh (React via CDN + Babel possible).
 - Interface en français, design moderne sombre, responsive, accessible.
+- GRAPHIQUE : l'hôte est un <canvas> avec une hauteur fixe (260px), jamais un div. new Chart reçoit ce canvas. Chaque série a une couleur lisible sur le panneau : #38bdf8, #fbbf24, #34d399, #a78bfa, dans cet ordre. Les axes sont #94a3b8, la grille au moins rgba(148,163,184,.35). Pas de trait de la couleur du fond. Pas de graphique sans points quand les lignes existent.
 - Interdits : document.cookie, accès à window.top / window.parent (sauf via window.mcp), redirections, formulaires vers des sites externes, appels réseau vers des API tierces.
 - localStorage autorisé pour persister l'état (avec try/catch).`;
 
@@ -40,7 +41,24 @@ export function extractHtml(raw: string): string {
   if (start > 0) s = s.slice(start);
   const end = s.toLowerCase().lastIndexOf('</html>');
   if (end >= 0) s = s.slice(0, end + 7);
-  return s.trim();
+  return repairChartHosts(s.trim());
+}
+
+/** Chart.js ne dessine pas dans un div : l'hôte des new Chart devient un canvas. */
+export function repairChartHosts(html: string): string {
+  const ids = new Set<string>();
+  for (const match of html.matchAll(/(?:const|let|var)\s+(\w+)\s*=\s*document\.getElementById\(\s*['"]([^'"]+)['"]\s*\)/g)) {
+    if (new RegExp(`new\\s+Chart\\(\\s*${match[1]}\\b`).test(html)) ids.add(match[2]);
+  }
+  for (const match of html.matchAll(/new\s+Chart\(\s*document\.getElementById\(\s*['"]([^'"]+)['"]\s*\)/g)) ids.add(match[1]);
+  let out = html;
+  for (const id of ids) {
+    const open = new RegExp(`<div(\\s[^>]*\\bid=["']${id}["'][^>]*)>`, 'i');
+    if (!open.test(out)) continue;
+    out = out.replace(open, '<canvas$1>');
+    out = out.replace(new RegExp(`(<canvas\\s[^>]*\\bid=["']${id}["'][^>]*>)\\s*</div>`, 'i'), '$1</canvas>');
+  }
+  return out;
 }
 
 export const titleFromPlan = (plan: string, fallback: string) =>
