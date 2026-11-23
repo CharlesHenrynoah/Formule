@@ -40,12 +40,14 @@ const hexGray = (hex: string) => {
 /** Classes colorées et hex chromatiques deviennent des gris. Le noir et le blanc restent. */
 export function achromeSource(src: string): { code: string; changed: number } {
   let changed = 0;
-  const classes = new RegExp(`((?:[a-z]+:)*(?:text|bg|border(?:-[trblxy])?|ring|fill|stroke|from|via|to)-)(${CHROMA})(-\\d{2,3})?(?=[/\\s'"\`}]|$)`, 'g');
+  const classes = new RegExp(`((?:[a-z]+:)*(?:text|bg|border(?:-[trblxy])?|ring|from|via|to)-)(${CHROMA})(-\\d{2,3})?(?=[/\\s'"\`}]|$)`, 'g');
   let code = src.replace(classes, (full, pre: string, _pal: string, shade: string) => {
     changed++;
     return `${pre}neutral${shade ?? ''}`;
   });
-  code = code.replace(/#([0-9a-fA-F]{6}|[0-9a-fA-F]{3})\b/g, (full, hex: string) => {
+  code = code.replace(/#([0-9a-fA-F]{6}|[0-9a-fA-F]{3})\b/g, (full, hex: string, offset: number, src: string) => {
+    const before = src.slice(Math.max(0, offset - 28), offset);
+    if (/(?:stroke|fill|borderColor|backgroundColor|color)\s*[:=]\s*['"]?$/.test(before)) return full;
     const next = hexGray(hex);
     if (next.toLowerCase() !== `#${hex.length === 3 ? hex.split('').map((c) => c + c).join('') : hex}`.toLowerCase() && next.toLowerCase() !== full.toLowerCase()) changed++;
     return next;

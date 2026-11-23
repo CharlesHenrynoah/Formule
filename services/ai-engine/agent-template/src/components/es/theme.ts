@@ -1,8 +1,8 @@
 /**
- * Thème des apps générées : noir dominant, noir et blanc.
- * Les séries sont des gris, du plus clair au plus sombre, lisibles sur le fond noir.
+ * Thème des apps générées : interface noire.
+ * Les séries reprennent la palette des graphiques : bleu, menthe, sable, puis les suivantes.
  */
-export const VIZ = [0xf2f2f2, 0xb5b5b5, 0x8a8a8a, 0x666666, 0xd0d0d0, 0x9a9a9a, 0x555555, 0x3a3a3a] as const;
+export const VIZ = [0x6eacd7, 0x79bb9e, 0xd5ba82, 0x9f8fbe, 0xd18882, 0x68abb6, 0x86a277, 0x78879f] as const;
 export const VIZ_CSS = ['var(--chart-1)', 'var(--chart-2)', 'var(--chart-3)', 'var(--chart-4)', 'var(--chart-5)', 'var(--chart-6)', 'var(--chart-7)', 'var(--chart-8)'] as const;
 /** Couleur de donnée n°i (cyclique). */
 export const viz = (i: number) => VIZ[((i % VIZ.length) + VIZ.length) % VIZ.length];

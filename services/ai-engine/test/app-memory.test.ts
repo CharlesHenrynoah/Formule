@@ -122,12 +122,14 @@ test('prompts : spec delta, consignes monochrome', () => {
   assert.match(PRODUCT_OWNER, /fond blanc/);
 });
 
-test('thème des apps : noir dominant, séries grises', () => {
+test('thème des apps : noir dominant, séries bleu menthe sable', () => {
   const css = readFileSync(new URL('../agent-template/src/index.css', import.meta.url), 'utf8');
   const room = css.slice(css.indexOf('.control-room {'));
   assert.match(room, /--background: oklch\(0\.13 0 0\)/);
   assert.match(room, /--foreground: oklch\(0\.96 0 0\)/);
-  assert.match(room, /--chart-1: oklch\(0\.95 0 0\)/);
+  assert.match(room, /--chart-1: oklch\(0\.72 0\.09 240\)/);
+  assert.match(room, /--chart-2: oklch\(0\.74 0\.08 165\)/);
+  assert.match(room, /--chart-3: oklch\(0\.80 0\.08 85\)/);
   assert.match(room, /--chart-8:/);
   assert.doesNotMatch(room, /--color-white/); // pas d'inversion pour les nouvelles apps
   assert.doesNotMatch(css, /data-es-legacy/); // pas d'inversion globale : elle casserait les composants plateforme clairs
@@ -140,9 +142,10 @@ test('thème des apps : noir dominant, séries grises', () => {
   assert.doesNotMatch(shell, /(cyan|violet|fuchsia|sky)-\d{2,3}|text-(zinc|slate)-[1-3]00|border-white|'dark control-room/);
 });
 
-test('une série bleue devient un gris', () => {
-  const r = achromeSource(`<Area stroke="#38bdf8" className="text-blue-400" />`);
+test('le fond coloré devient gris, le trait de série garde sa couleur', () => {
+  const r = achromeSource(`<Area stroke="#6eacd7" className="text-blue-400 bg-[#38bdf8]" />`);
   assert.equal(r.changed > 0, true);
+  assert.match(r.code, /stroke="#6eacd7"/);
   assert.match(r.code, /text-neutral-400/);
   assert.doesNotMatch(r.code, /#38bdf8|text-blue/);
 });
