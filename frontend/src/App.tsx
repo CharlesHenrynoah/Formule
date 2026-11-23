@@ -524,6 +524,8 @@ export default function App() {
     let savedNumber: number | null = null;
     let hold = false;
     const sourcing = agentMode && phase === 'source';
+    // L'aperçu actuel reste jusqu'à la fin : le nouvel écran ne s'ouvre qu'une fois les lectures MCP versées.
+    const deferView = iterate && phase !== 'source';
     try {
       await streamGenerate({ prompt: text, projectId: iterate ? project?.id : undefined, diffusing: agentMode ? false : diffusing, useTools: true, mode: agentMode ? 'agent' : 'direct', phase: sourcing ? 'source' : 'build', sourceBrief: phase === 'build' ? briefRef.current : undefined, datasets: !iterate && datasets.length ? datasets.map(({ name, rows }) => ({ name, rows })) : undefined }, (e) => {
         switch (e.type) {
@@ -537,16 +539,16 @@ export default function App() {
           case 'code_delta': {
             codeBuf.current += e.text; scheduleFlush();
             const now = Date.now();
-            if (now - lastPreview.current > 700) { lastPreview.current = now; setPreviewCode(codeBuf.current); }
+            if (!deferView && now - lastPreview.current > 700) { lastPreview.current = now; setPreviewCode(codeBuf.current); }
             break;
           }
           case 'code_snapshot': if (e.text) { codeBuf.current = e.text; setDiffStep(e.step); scheduleFlush(); } break;
-          case 'code_done': if (!e.code) break; codeBuf.current = e.code; setStreamCode(e.code); setPreviewCode(e.code); setDraft(e.code); break;
+          case 'code_done': if (!e.code) break; codeBuf.current = e.code; setStreamCode(e.code); setDraft(e.code); if (!deferView) setPreviewCode(e.code); break;
           case 'validation': setValidation({ ok: e.ok, errors: e.errors, warnings: e.warnings, fixed: e.attempt > 1 }); break;
           case 'app_ready': toast.success(`Interface prête · ${e.tools?.length ?? 0} outils`); break;
           case 'app_warning': toast.warning(e.message); break;
           case 'saved': steps.forEach((x) => { if (x.ok === undefined) x.ok = true; }); steps.push({ label: `version v${e.number} enregistrée`, ok: true }); savedProject = e.projectId; savedNumber = e.number; if (!iterate) recordCreation(e.projectId, text); toast.success(`Version v${e.number} enregistrée`); break;
-          case 'done': setPhases((l) => l.map((p) => ({ ...p, status: 'done' }))); setElapsed(e.ms); if (e.code) { setPreviewCode(e.code); setDraft(e.code); } setFiles(e.files ?? null); setCodeFile(e.files?.['src/App.tsx'] ? 'src/App.tsx' : '__html'); break;
+          case 'done': setPhases((l) => l.map((p) => ({ ...p, status: 'done' }))); setElapsed(e.ms); if (e.code) { codeBuf.current = e.code; setDraft(e.code); if (!deferView) setPreviewCode(e.code); } setFiles(e.files ?? null); setCodeFile(e.files?.['src/App.tsx'] ? 'src/App.tsx' : '__html'); break;
           case 'error': steps.push({ label: 'échec', ok: false, detail: String(e.message).slice(0, 160) }); setError(e.message); toast.error(e.message); setPhases((l) => l.map((p) => (p.status === 'running' ? { ...p, status: 'error' } : p))); break;
         }
       }, ac.signal);
@@ -563,7 +565,9 @@ export default function App() {
         bootingRef.current = true;
         try {
           const p = (await api.project(savedProject)) as Project;
-          setProject(p); setVersionNo(savedNumber ?? p.versions.at(-1)?.number ?? null);
+          const number = savedNumber ?? p.versions.at(-1)?.number ?? null;
+          setProject(p); setVersionNo(number);
+          if (deferView && codeBuf.current) setPreviewCode(codeBuf.current);
         } catch { bootingRef.current = false; }
       }
       setRunning(false);
@@ -656,7 +660,7 @@ export default function App() {
                 className="absolute right-4 bottom-4 z-10 opacity-80 hover:opacity-100" data-testid="fullscreen-exit"><Minimize2 /><span>Quitter · Échap</span></Button>
             )}
             {board && <div className="absolute inset-0 overflow-hidden bg-background"><LiveDashboard spec={board.spec} building={running} pendingChartId={board.pendingChartId} /></div>}
-            {hasApp && !board && <iframe ref={iframeRef} title="Aperçu de l'interface" sandbox={SANDBOX} srcDoc={withBridge(previewCode)}
+            {hasApp && !board && <iframe key={`${project?.id ?? 'new'}-${versionNo ?? 0}`} ref={iframeRef} title="Aperçu de l'interface" sandbox={SANDBOX} srcDoc={withBridge(previewCode)}
               className={`absolute inset-0 h-full w-full bg-background ${faDrag ? 'pointer-events-none' : ''}`} data-testid="preview" />}
             {hasApp && fullscreen === 'off' && (
               <Tooltip>
