@@ -13,10 +13,31 @@ const FAMILIES: Array<[RegExp, string]> = [
   [/alert/i, 'alerts'],
 ];
 
+function familyOf(text: string): string {
+  for (const [pattern, name] of FAMILIES) if (pattern.test(text)) return name;
+  return '';
+}
+
 export function collectionForPrompt(prompt: string): string {
-  for (const [pattern, name] of FAMILIES) if (pattern.test(prompt)) return name;
-  const word = prompt.toLowerCase().split(/[^a-z0-9]+/).find((part) => part.length > 3 && !/ajoute|tableau|dernier|dernieres|avec|dans|pour|sous|vers|element/.test(part));
+  const mentions = [...prompt.matchAll(/(?:(sous|dans|près|avant|après|apres)(?:\s+(?:le|la|les|l['’]))?\s+)?((?:courbe|graphique|tableau|liste|série|serie|carte)s?)\s+(?:de |des |du |d['’])?(?:la |le |les |l['’])?([a-zàâäéèêëïîôùûüç0-9]+)/gi)];
+  for (const match of mentions) {
+    if (match[1]) continue;
+    const named = familyOf(match[3] ?? '');
+    if (named) return named;
+  }
+  const fromPrompt = familyOf(prompt);
+  if (fromPrompt) return fromPrompt;
+  const word = prompt.toLowerCase().split(/[^a-z0-9]+/).find((part) => part.length > 3 && !/ajoute|tableau|dernier|dernieres|avec|dans|pour|sous|vers|element|courbe|graphique/.test(part));
   return (word ?? 'lignes').slice(0, 24);
+}
+
+/** La mission nomme l'outil à appeler. Le Data Engineer ne part pas chercher un autre serveur. */
+export function liaisonMission(prompt: string, read?: { tool: string; args: Record<string, unknown> }): string {
+  const collection = collectionForPrompt(prompt);
+  const call = read
+    ? `Le premier mcp_call est exactement ${read.tool} avec les arguments ${JSON.stringify(read.args)}. Tu n'appelles aucun autre serveur.`
+    : `Échantillonne l'outil en lecture dont le nom contient ${collection}. Tu n'appelles pas un outil de recherche de workflows.`;
+  return `L'interface existe déjà. On ajoute un élément ou des données.\nDemande : ${prompt}\nCollection visée : ${collection}.\n${call}\nRapport court : outil, arguments, champs observés. N'invente aucun champ. Tu n'écris pas la page.`;
 }
 
 function componentName(collection: string): string {

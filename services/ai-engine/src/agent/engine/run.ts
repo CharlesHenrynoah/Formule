@@ -11,10 +11,10 @@ import type { AppBundle, CrewConfig, CrewInput } from '../crew.ts';
 import { buildAgents } from './agents/all.ts';
 import { textOf } from './agents/shared.ts';
 import type { AgentName } from './agents/types.ts';
-import { collectionsInScreen } from '../../app-agents/ingest.ts';
+import { collectionsInScreen, readsForCollections, type SourceTool } from '../../app-agents/ingest.ts';
 import { runAgentLoop } from './loop.ts';
 import { bindCharts } from './bind-charts.ts';
-import { collectionForPrompt, poseRequest } from './pose.ts';
+import { collectionForPrompt, liaisonMission, poseRequest } from './pose.ts';
 import type { SpawnAgent } from './tools/types.ts';
 
 const MAIN_STEPS = 24;
@@ -92,10 +92,21 @@ export async function runEngine(input: CrewInput, cfg: CrewConfig, ctx: { mcp?: 
 
   if (incremental) {
     const collection = collectionForPrompt(input.prompt);
+    let read: { tool: string; args: Record<string, unknown> } | undefined;
+    try {
+      const listed = await tb.listMcpTools('data');
+      const catalog: SourceTool[] = listed.filter((tool) => !tool.ecriture).map((tool) => ({
+        id: tool.id,
+        name: tool.id.includes('__') ? tool.id.split('__').slice(1).join('__') : tool.id,
+        write: false,
+        inputSchema: (tool.schema ?? {}) as SourceTool['inputSchema'],
+      }));
+      read = readsForCollections([collection], `${input.prompt}\n${pageBefore.slice(0, 2500)}`, catalog)[0];
+    } catch { /* la mission reste sans outil imposé */ }
     try {
       await spawnAgent({
         agentName: 'liaison',
-        prompt: `L'interface existe déjà. On ajoute un élément ou des données : ce n'est pas seulement de la conception.\nDemande : ${input.prompt}\nCollection visée : ${collection}.\nÉchantillonne l'outil MCP en lecture qui alimente cette collection. Rapport court : outil, arguments, champs observés. N'invente aucun champ. Tu n'écris pas la page.`,
+        prompt: liaisonMission(input.prompt, read),
         signal: ctx.signal ?? new AbortController().signal,
       });
     } catch (error) {
