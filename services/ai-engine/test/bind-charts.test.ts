@@ -22,6 +22,29 @@ function Dashboard() {
 }
 `;
 
+test('une courbe sans helper, sur un autre projet, lit sa collection', () => {
+  const other = `function Page() {
+  const [orders, setOrders] = useState([]);
+  const ordersByWeek = useMemo(() => {
+    return notes.map((n) => n.points);
+  }, [notes]);
+  return <h3>Commandes par semaine</h3>;
+}`;
+  const bound = bindCharts(other + '\n<Chart data={ordersByWeek} />');
+  assert.equal(bound.changed, true);
+  assert.match(bound.code, /for \(const row of orders\)/);
+  assert.match(bound.code, /new Date\(String\(row\.date/);
+});
+
+test('un classement sans date n\'est pas rebranché', () => {
+  const rank = `function Page() {
+  const [authors, setAuthors] = useState([]);
+  const topAuthors = useMemo(() => authors.map((a) => a.login), [authors]);
+  return <h3>Top auteurs</h3>;
+}`;
+  assert.equal(bindCharts(rank + '\n<Chart data={topAuthors} />').changed, false);
+});
+
 test('une courbe de commits qui lit les releases est rebranchée sur commits', () => {
   const bound = bindCharts(page);
   assert.equal(bound.changed, true);

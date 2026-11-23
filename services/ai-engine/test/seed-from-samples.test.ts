@@ -56,6 +56,15 @@ test('pull_requests et pullRequests reçoivent les mêmes lignes', () => {
   assert.equal(seed.pullRequests[0].author, 'ada');
 });
 
+test('une date nichée sous un autre nom que commit est gardée', () => {
+  const seed = seedFromSamples(`export const tools = { a: { run: (_a, db) => db.list('alerts') } };`, [
+    { tool: 'demo__list_alerts', result: [{ id: '1', node: { created_at: '2026-04-01T00:00:00Z', title: 'Alerte' } }] },
+  ]);
+  assert.equal(seed.alerts[0].title, 'Alerte');
+  assert.equal(seed.alerts[0].date, '2026-04-01T00:00:00Z');
+  assert.equal(seed.alerts[0].createdAt, '2026-04-01T00:00:00Z');
+});
+
 test('un commit garde la date et le message nichés dans commit', () => {
   const seed = seedFromSamples(`export const tools = { a: { run: (_a, db) => db.list('commits') } };`, [
     { tool: 'github__list_commits', args: { owner: 'facebook', repo: 'react' }, result: [{ sha: 'abc', author: { login: 'ada' }, commit: { message: 'Fix le graphique', author: { name: 'Ada', date: '2026-11-23T14:31:37Z' } } }] },

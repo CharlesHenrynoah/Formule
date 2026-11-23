@@ -12,11 +12,20 @@ export function collectionsInBackend(src: string): string[] {
   return [...names];
 }
 
-function nestedDate(value: Record<string, unknown>): string | null {
-  if (typeof value.date === 'string') return value.date;
-  for (const key of ['author', 'committer']) {
-    const child = value[key];
-    if (child && typeof child === 'object' && typeof (child as { date?: unknown }).date === 'string') return (child as { date: string }).date;
+const NESTED_DATES = ['date', 'created_at', 'createdAt', 'published_at', 'publishedAt', 'updated_at', 'updatedAt', 'pushed_at', 'committed_at', 'authored_at', 'closed_at', 'merged_at', 'mergedAt'];
+
+/** Première date ISO dans l'objet ou un niveau en dessous. Vaut pour commit, node, ou tout autre enrobage. */
+function nestedDate(value: Record<string, unknown>, depth = 0): string | null {
+  for (const key of NESTED_DATES) {
+    const found = value[key];
+    if (typeof found === 'string' && /\d{4}-\d{2}-\d{2}/.test(found)) return found;
+  }
+  if (depth >= 2) return null;
+  for (const child of Object.values(value)) {
+    if (child && typeof child === 'object' && !Array.isArray(child)) {
+      const found = nestedDate(child as Record<string, unknown>, depth + 1);
+      if (found) return found;
+    }
   }
   return null;
 }
@@ -40,12 +49,10 @@ function asRow(value: unknown): Record<string, unknown> | null {
       if (names.length) row[key] = names.slice(0, 8);
     }     else if (typeof field === 'object') {
       const nested = field as Record<string, unknown>;
-      if (key === 'commit') {
-        const dated = nestedDate(nested);
-        const message = typeof nested.message === 'string' ? nested.message : null;
-        if (dated && row.date == null) row.date = dated;
-        if (message && row.message == null) row.message = message.length > 180 ? message.slice(0, 180) : message;
-      }
+      const dated = nestedDate(nested);
+      if (dated && row.date == null) row.date = dated;
+      if (row.message == null && typeof nested.message === 'string') row.message = nested.message.length > 180 ? nested.message.slice(0, 180) : nested.message;
+      if (row.title == null && typeof nested.title === 'string') row.title = nested.title.length > 180 ? nested.title.slice(0, 180) : nested.title;
       if (typeof nested.login === 'string') row[key] = { login: nested.login };
       else if (typeof nested.name === 'string' && key !== 'commit') row[key] = nested.name;
     }
