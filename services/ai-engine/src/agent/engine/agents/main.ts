@@ -29,7 +29,7 @@ Un graphique a une hauteur fixe : className "h-[260px] w-full". Le config nomme 
 Avant d'écrire la page, lis src/components/es/board.tsx et compose avec ces pièces : BoardStack, BoardHeader, MetricGrid (quatre MetricCard), BoardSplit (graphique en 4/7, liste en 3/7). C'est la composition de shadcn-admin, sans sa barre latérale.
 Interdit dans la page : Sidebar, SidebarTrigger, AppSidebar, menu latéral.
 N'invente aucune donnée. Pas de vocabulaire de platine. Les noms de biais ne s'affichent pas.
-Si l'interface existe déjà, tu ajoutes ou retires des composants. Tu ne réécris pas tout.`;
+Si l'interface existe déjà, l'ordre 1 à 3 ne s'applique pas : tu n'appelles pas task, ni compile_backend, ni write_file. Tu lis la zone du return avec read_file from et to, puis un seul edit_file pose l'élément demandé à côté de ce qui est déjà là. find est un extrait exact de cette lecture. Ensuite build une fois.`;
 
 export function mainAgent(emit: (event: AgentEvent) => void): Agent {
   return setupAgent({ name: 'main', tools: MAIN_TOOLS }).create({
@@ -38,7 +38,7 @@ export function mainAgent(emit: (event: AgentEvent) => void): Agent {
       return [
         systemMessage('main', SYSTEM),
         contextMessage('main', [
-          incremental ? '<mode>Incrémental : ajoute ou retire des composants du tableau. Ne réécris pas l\'interface.</mode>' : '<mode>Première construction.</mode>',
+          incremental ? '<mode>Incrémental. La page existe. read_file src/App.tsx avec from et to sur le return, un edit_file, un build. Sans edit_file, l\'ajout est raté.</mode>' : '<mode>Première construction.</mode>',
           `<project_layout>\n${layout}\n</project_layout>`,
           datasets ? `<datasets>\n${datasets}\n</datasets>` : '',
           `<demande>\n${prompt}\n</demande>`,

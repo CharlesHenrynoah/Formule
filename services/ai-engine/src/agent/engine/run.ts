@@ -42,6 +42,7 @@ export async function runEngine(input: CrewInput, cfg: CrewConfig, ctx: { mcp?: 
   const tb = new Toolbox(ws, input.useTools === false ? undefined : ctx.mcp, emit);
   const llm = providerFor(cfg);
   const incremental = !!input.previous?.files && !input.fullRebuild;
+  const pageBefore = ws.files.get('src/App.tsx') ?? '';
   const datasets = profileDatasets((input.datasets ?? []) as Dataset[]);
   let liaisonReport = '';
   let toolCalls = 0;
@@ -74,6 +75,7 @@ export async function runEngine(input: CrewInput, cfg: CrewConfig, ctx: { mcp?: 
     if (!ws.files.has('server/tools.ts')) throw new Error("Le backend n'a pas été écrit (server/tools.ts)");
     await tb.testBackend('dev', null);
     if (!tb.lastBackendTest?.ok) throw new Error(`Backend non conforme : ${(tb.lastBackendTest?.problems ?? []).slice(0, 3).join(' ; ') || '0 outil'}`);
+    if (incremental && (ws.files.get('src/App.tsx') ?? '') === pageBefore) throw new Error("L'élément demandé n'a pas été posé : la page est inchangée.");
     if (shell.changed || !tb.lastBuild?.ok) await tb.build();
     if (!tb.lastBuild?.ok || !tb.lastBuild.html) throw new Error(`Build final en échec : ${tb.lastBuild?.output.slice(-600) ?? 'aucun build'}`);
   };

@@ -9,12 +9,25 @@ export const ReadFile: AgentTool = setupTool({
   readOnly: true,
   timeoutMs: 30_000,
   agents: ['main', 'liaison'],
-  description: () => 'Lit un fichier du projet (chemin relatif, ex. src/App.tsx).',
-  parameters: { properties: { path: { type: 'string' } }, required: ['path'] },
+  description: () => 'Lit un fichier. Pour une page déjà longue, passe from et to (lignes) : une lecture sans plage ne montre que les bords.',
+  parameters: { properties: { path: { type: 'string' }, from: { type: 'number' }, to: { type: 'number' } }, required: ['path'] },
   execute: async ({ agentName, toolbox, input }) => {
     try {
-      const body = await toolbox.readFile(roleOf(agentName), String(input.path ?? ''));
-      return { ok: true, output: body.slice(0, 12_000) };
+      const path = String(input.path ?? '');
+      const from = Number(input.from);
+      const to = Number(input.to);
+      if (Number.isFinite(from)) {
+        const end = Number.isFinite(to) ? to : from + 119;
+        const range = await toolbox.readRange(roleOf(agentName), path, from, Math.min(end, from + 119));
+        return { ok: true, output: { text: range.text, total: range.total, from: range.from, to: range.to } };
+      }
+      const body = await toolbox.readFile(roleOf(agentName), path);
+      const lines = body.split('\n');
+      if (lines.length <= 160 && body.length <= 7000) return { ok: true, output: body };
+      const head = lines.slice(0, 40).map((line, i) => `${i + 1}| ${line}`).join('\n');
+      const tailFrom = Math.max(41, lines.length - 39);
+      const tail = lines.slice(tailFrom - 1).map((line, i) => `${tailFrom + i}| ${line}`).join('\n');
+      return { ok: true, output: { text: `${head}\n…\n${tail}`, total: lines.length, note: `fichier de ${lines.length} lignes : relis la zone avec from et to` } };
     } catch (e) { return { ok: false, error: (e as Error).message }; }
   },
   toModelOutput: text,
@@ -57,7 +70,7 @@ export const Grep: AgentTool = setupTool({
   readOnly: true,
   timeoutMs: 30_000,
   agents: ['main'],
-  description: () => 'Cherche un motif dans les fichiers du projet.',
+  description: () => 'Cherche un texte littéral, pas une expression régulière.',
   parameters: { properties: { pattern: { type: 'string' } }, required: ['pattern'] },
   execute: async ({ agentName, toolbox, input }) => {
     try {

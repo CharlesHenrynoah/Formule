@@ -4,6 +4,7 @@ import type { LLMProvider, ToolCall } from '../src/types.ts';
 import type { Toolbox } from '../src/agent/toolbox.ts';
 import { shouldContinueWithToolCalls } from '../src/agent/engine/agents/shared.ts';
 import { mainAgent } from '../src/agent/engine/agents/main.ts';
+import { ReadFile } from '../src/agent/engine/tools/workspace.ts';
 import { runAgentLoop } from '../src/agent/engine/loop.ts';
 import { Task } from '../src/agent/engine/tools/task.ts';
 import type { SessionMessage } from '../src/agent/engine/agents/types.ts';
@@ -75,6 +76,32 @@ test('le tableau suit la composition shadcn-admin, sans sidebar', () => {
   assert.match(text, /h-\[260px\]/);
   assert.match(text, /var\(--chart-1\)/);
   assert.match(text, /Pas de Chart\.js/);
+});
+
+test('une page longue se relit par plage de lignes', async () => {
+  const lines = Array.from({ length: 400 }, (_, i) => `ligne ${i + 1} du tableau`);
+  const toolbox = {
+    readFile: async () => lines.join('\n'),
+    readRange: async (_role: string, _path: string, from: number, to: number) => ({
+      text: lines.slice(from - 1, to).map((line, i) => `${from + i}| ${line}`).join('\n'),
+      total: lines.length, from, to,
+    }),
+  };
+  const ctx = { agentName: 'main' as const, toolbox: toolbox as never, signal: new AbortController().signal, spawnAgent: async () => ({ text: '', messages: [] }) };
+  const wide = await ReadFile.execute({ ...ctx, input: { path: 'src/App.tsx' } });
+  assert.equal(wide.ok, true);
+  if (wide.ok) assert.match(JSON.stringify(wide.output), /from et to/);
+  const slice = await ReadFile.execute({ ...ctx, input: { path: 'src/App.tsx', from: 330, to: 360 } });
+  assert.equal(slice.ok, true);
+  if (slice.ok) assert.match(JSON.stringify(slice.output), /330\| ligne 330/);
+});
+
+test('une demande sur une page ouverte passe par edit_file', () => {
+  const agent = mainAgent(() => {});
+  const text = agent.getMessages({ prompt: 'ajoute un graphique', files: ['src/App.tsx'], incremental: true, datasets: '' }).map((message) => message.parts.map((part) => part.type === 'text' ? part.text : '').join('\n')).join('\n');
+  assert.match(text, /edit_file/);
+  assert.match(text, /from et to/);
+  assert.match(text, /n'appelles pas task/);
 });
 
 test('task refuse un agent inconnu et un appel hors du principal', async () => {
