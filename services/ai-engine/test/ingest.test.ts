@@ -44,6 +44,25 @@ test('une collection hors GitHub est remplie par l\'outil en lecture du même no
   assert.equal((db.notes as Array<{ title: string }>)[0].title, 'Rappel');
 });
 
+test('les releases lues par l\'écran arrivent avec version, date, auteur et pull requests', async () => {
+  const db: Record<string, unknown> = { issues: [{ id: '1' }], pullRequests: [{ id: '2' }] };
+  const screen = `app.call('data_list', { collection: 'releases' })`;
+  const tool: SourceTool = { id: 'github__list_releases', name: 'list_releases', write: false, inputSchema: { required: ['owner', 'repo'], properties: { perPage: {} } } };
+  const filled = await ingestEmptyCollections(source, db, 'facebook/react', async (toolName, args) => {
+    assert.equal(toolName, 'github__list_releases');
+    assert.equal(args.owner, 'facebook');
+    assert.equal(args.repo, 'react');
+    return [{ id: 9, tag_name: 'v19.3.1', name: '19.3.1', published_at: '2026-10-14T17:06:15Z', author: { login: 'eps1lon' }, body: 'Fix ([#37845](https://github.com/facebook/react/pull/37845))' }];
+  }, { tools: [tool], screen });
+  assert.equal(filled, true);
+  const row = (db.releases as Array<Record<string, unknown>>)[0];
+  assert.equal(row.tagName, 'v19.3.1');
+  assert.equal(row.publishedAt, '2026-10-14T17:06:15Z');
+  assert.equal(row.author, 'eps1lon');
+  assert.equal(row.prCount, 1);
+  assert.equal((db.issues as unknown[]).length, 1);
+});
+
 test('l\'écran qui lit data_list nomme la collection même si le backend ne l\'écrit pas', () => {
   const screen = `window.app.call('data_list', { collection: 'alerts' })`;
   assert.deepEqual(collectionsInScreen(screen), ['alerts']);

@@ -118,7 +118,7 @@ export async function ingestEmptyCollections(
     } catch { /* une lecture en échec laisse les autres continuer */ }
   }
   if (!samples.length) return false;
-  const seeded = seedFromSamples(source, samples);
+  const seeded = seedFromSamples(source, samples, missing);
   let filled = false;
   for (const [name, rows] of Object.entries(seeded)) {
     if (!missing.includes(name) || !rows.length) continue;

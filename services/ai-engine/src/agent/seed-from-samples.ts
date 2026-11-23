@@ -19,7 +19,13 @@ function asRow(value: unknown): Record<string, unknown> | null {
   const row: Record<string, unknown> = {};
   for (const [key, field] of Object.entries(raw)) {
     if (field == null || typeof field === 'number' || typeof field === 'boolean') row[key] = field;
-    else if (typeof field === 'string') row[key] = field.length > 180 ? field.slice(0, 180) : field;
+    else if (typeof field === 'string') {
+      if ((key === 'body' || key === 'body_text' || key === 'bodyText') && row.prCount == null) {
+        const pulls = field.match(/\/pull\/\d+/g);
+        row.prCount = pulls ? new Set(pulls).size : 0;
+      }
+      row[key] = field.length > 180 ? field.slice(0, 180) : field;
+    }
     else if (Array.isArray(field)) {
       const names = field.map((item) => (typeof item === 'string' ? item : item && typeof item === 'object' && typeof (item as { name?: unknown }).name === 'string' ? (item as { name: string }).name : null)).filter((name): name is string => !!name);
       if (names.length) row[key] = names.slice(0, 8);
@@ -35,7 +41,7 @@ function asRow(value: unknown): Record<string, unknown> | null {
   if (typeof row.owner === 'string' && typeof row.repo === 'string' && !row.repo.includes('/')) row.repository = row.repository ?? `${row.owner}/${row.repo}`;
   if ((row.merged_at || row.mergedAt) && (row.state == null || row.state === 'closed')) row.state = 'merged';
   if (row.id == null && row.number != null) row.id = String(row.number);
-  for (const [snake, camel] of [['created_at', 'createdAt'], ['updated_at', 'updatedAt'], ['merged_at', 'mergedAt'], ['closed_at', 'closedAt']] as const) {
+  for (const [snake, camel] of [['created_at', 'createdAt'], ['updated_at', 'updatedAt'], ['merged_at', 'mergedAt'], ['closed_at', 'closedAt'], ['published_at', 'publishedAt'], ['tag_name', 'tagName']] as const) {
     if (row[camel] == null && typeof row[snake] === 'string') row[camel] = row[snake];
     if (row[snake] == null && typeof row[camel] === 'string') row[snake] = row[camel];
   }
@@ -120,9 +126,9 @@ const CANONICAL = ['issues', 'pullRequests', 'commits', 'depots', 'profil'];
 
 /** Colections → lignes. state passe en minuscules pour que `=== "open"` voie les "OPEN" de GitHub.
  *  data_list lit ces noms même si tools.ts ne les a pas écrits : la porte de lecture reste stable. */
-export function seedFromSamples(toolsSource: string, samples: McpSample[]): Record<string, Array<Record<string, unknown>>> {
+export function seedFromSamples(toolsSource: string, samples: McpSample[], extra: string[] = []): Record<string, Array<Record<string, unknown>>> {
   const fromBackend = collectionsInBackend(toolsSource);
-  const collections = [...new Set([...fromBackend, ...CANONICAL])];
+  const collections = [...new Set([...fromBackend, ...CANONICAL, ...extra])];
   const seed: Record<string, Array<Record<string, unknown>>> = {};
   const seen = new Map<string, Set<string>>();
   for (const sample of samples) {
