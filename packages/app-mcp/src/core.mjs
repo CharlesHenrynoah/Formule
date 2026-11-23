@@ -82,10 +82,22 @@ function alignRow(row) {
     if (row[camel] == null && typeof row[snake] === 'string') row[camel] = row[snake];
     if (row[snake] == null && typeof row[camel] === 'string') row[snake] = row[camel];
   }
-  if (typeof row.user === 'string') row.user = { login: row.user };
-  if (typeof row.author === 'string') row.author = { login: row.author };
-  if (row.user == null && row.author && typeof row.author === 'object' && row.author.login) row.user = { login: row.author.login };
-  if (row.author == null && row.user && typeof row.user === 'object' && row.user.login) row.author = { login: row.user.login };
+  const login = typeof row.author === 'string' ? row.author
+    : (row.author && typeof row.author === 'object' && row.author.login ? String(row.author.login) : '')
+    || (typeof row.user === 'string' ? row.user : (row.user && typeof row.user === 'object' && row.user.login ? String(row.user.login) : ''));
+  if (login) {
+    row.author = login;
+    if (row.user == null || typeof row.user !== 'object') row.user = { login };
+    else if (!row.user.login) row.user.login = login;
+  }
+  if (row.author == null && typeof row.key === 'string') row.author = row.key;
+  if (row.count == null && row.key != null && typeof row.total === 'number') row.count = row.total;
+  if (typeof row.owner === 'string' && typeof row.repo === 'string' && !String(row.repo).includes('/')) {
+    const full = `${row.owner}/${row.repo}`;
+    if (row.repository == null) row.repository = full;
+    if (row.full_name == null) row.full_name = full;
+  }
+  if ((typeof row.merged_at === 'string' || typeof row.mergedAt === 'string') && (row.state == null || String(row.state).toLowerCase() === 'closed')) row.state = 'merged';
   for (const [left, right] of FIELD_PAIRS) {
     if (row[right] == null && (typeof row[left] === 'string' || typeof row[left] === 'number')) row[right] = row[left];
     if (row[left] == null && (typeof row[right] === 'string' || typeof row[right] === 'number')) row[left] = row[right];

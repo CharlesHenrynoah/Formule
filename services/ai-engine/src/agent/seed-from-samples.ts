@@ -8,6 +8,7 @@ export type McpSample = { tool: string; args?: unknown; result: unknown };
 export function collectionsInBackend(src: string): string[] {
   const names = new Set<string>();
   for (const match of src.matchAll(/db\.(?:list|insert|find|count|get|update|remove|clear)\(\s*['"]([A-Za-z][\w-]{0,40})['"]/g)) names.add(match[1]);
+  for (const match of src.matchAll(/__rows\(\s*db\s*,\s*['"]([A-Za-z][\w-]{0,40})['"]/g)) names.add(match[1]);
   return [...names];
 }
 
@@ -29,6 +30,10 @@ function asRow(value: unknown): Record<string, unknown> | null {
     }
   }
   if (typeof row.state === 'string') row.state = row.state.toLowerCase();
+  const login = typeof row.author === 'string' ? row.author : (row.author && typeof row.author === 'object' ? String((row.author as { login?: unknown }).login ?? '') : typeof row.user === 'string' ? row.user : (row.user && typeof row.user === 'object' ? String((row.user as { login?: unknown }).login ?? '') : ''));
+  if (login) { row.author = login; row.user = { login }; }
+  if (typeof row.owner === 'string' && typeof row.repo === 'string' && !row.repo.includes('/')) row.repository = row.repository ?? `${row.owner}/${row.repo}`;
+  if ((row.merged_at || row.mergedAt) && (row.state == null || row.state === 'closed')) row.state = 'merged';
   if (row.id == null && row.number != null) row.id = String(row.number);
   for (const [snake, camel] of [['created_at', 'createdAt'], ['updated_at', 'updatedAt'], ['merged_at', 'mergedAt'], ['closed_at', 'closedAt']] as const) {
     if (row[camel] == null && typeof row[snake] === 'string') row[camel] = row[snake];
@@ -108,6 +113,7 @@ function stampScope(row: Record<string, unknown>, args: unknown) {
   const scope = args as Record<string, unknown>;
   if (row.repo == null && typeof scope.repo === 'string') row.repo = scope.repo;
   if (row.owner == null && typeof scope.owner === 'string') row.owner = scope.owner;
+  if (typeof row.owner === 'string' && typeof row.repo === 'string' && !row.repo.includes('/') && row.repository == null) row.repository = `${row.owner}/${row.repo}`;
 }
 
 const CANONICAL = ['issues', 'pullRequests', 'commits', 'depots', 'profil'];
@@ -121,33 +127,32 @@ export function seedFromSamples(toolsSource: string, samples: McpSample[]): Reco
   const seen = new Map<string, Set<string>>();
   for (const sample of samples) {
     for (const group of sampleGroups(sample.result)) {
-      let target = '';
-      let best = 0;
-      for (const collection of collections) {
-        const score = affinity(collection, sample.tool, group.key);
-        const prefer = score === best && score > 0 && CANONICAL.includes(collection) && !CANONICAL.includes(target);
-        if (score > best || prefer) { target = collection; best = score; }
-      }
-      if (!target && fromBackend.length === 1) target = fromBackend[0];
-      if (!target || (best === 0 && fromBackend.length !== 1)) continue;
-      const rows = seed[target] ?? [];
-      const ids = seen.get(target) ?? new Set<string>();
-      for (const row of group.rows) {
-        if (rows.length >= 40) break;
-        const id = String(row.id ?? row.number ?? '');
-        if (id && ids.has(id)) continue;
-        if (id) ids.add(id);
-        stampScope(row, sample.args);
-        rows.push(row);
-      }
-      seed[target] = rows;
-      seen.set(target, ids);
-      const id = lookupId(toolsSource, target);
-      if (id && rows.length === 1) rows[0].id = id;
-      if (rows.length === 1 && /\.details|details\./.test(toolsSource) && !rows[0].details) {
-        const details: Record<string, unknown> = {};
-        for (const key of DETAIL_KEYS) if (rows[0][key] != null) details[key] = rows[0][key];
-        if (Object.keys(details).length) rows[0].details = details;
+      const ranked = collections.map((collection) => ({ collection, score: affinity(collection, sample.tool, group.key) }));
+      const best = ranked.reduce((max, item) => Math.max(max, item.score), 0);
+      let targets = ranked.filter((item) => item.score === best && best > 0).map((item) => item.collection);
+      if (!targets.length && fromBackend.length === 1) targets = [fromBackend[0]];
+      if (!targets.length || (best === 0 && fromBackend.length !== 1)) continue;
+      for (const target of targets) {
+        const rows = seed[target] ?? [];
+        const ids = seen.get(target) ?? new Set<string>();
+        for (const row of group.rows) {
+          if (rows.length >= 40) break;
+          const id = String(row.id ?? row.number ?? '');
+          if (id && ids.has(id)) continue;
+          if (id) ids.add(id);
+          const copy = { ...row };
+          stampScope(copy, sample.args);
+          rows.push(copy);
+        }
+        seed[target] = rows;
+        seen.set(target, ids);
+        const id = lookupId(toolsSource, target);
+        if (id && rows.length === 1) rows[0].id = id;
+        if (rows.length === 1 && /\.details|details\./.test(toolsSource) && !rows[0].details) {
+          const details: Record<string, unknown> = {};
+          for (const key of DETAIL_KEYS) if (rows[0][key] != null) details[key] = rows[0][key];
+          if (Object.keys(details).length) rows[0].details = details;
+        }
       }
     }
   }

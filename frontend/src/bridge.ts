@@ -57,9 +57,12 @@ function align(row){if(!row||typeof row!=='object')return;var pairs=[['created_a
 for(var i=0;i<pairs.length;i++){var a=pairs[i][0],b=pairs[i][1];var av=row[a],bv=row[b];
 if(bv==null&&(typeof av==='string'||typeof av==='number'))row[b]=av;if(av==null&&(typeof bv==='string'||typeof bv==='number'))row[a]=bv;}
 if(row.date==null&&typeof row.week==='string')row.date=row.week;
-if(typeof row.user==='string')row.user={login:row.user};if(typeof row.author==='string')row.author={login:row.author};
-if(row.user==null&&row.author&&typeof row.author==='object'&&row.author.login)row.user={login:row.author.login};
-if(row.author==null&&row.user&&typeof row.user==='object'&&row.user.login)row.author={login:row.user.login};
+var login=typeof row.author==='string'?row.author:(row.author&&row.author.login?String(row.author.login):(typeof row.user==='string'?row.user:(row.user&&row.user.login?String(row.user.login):'')));
+if(login){row.author=login;if(row.user==null||typeof row.user!=='object')row.user={login:login};else if(!row.user.login)row.user.login=login;}
+if(row.author==null&&typeof row.key==='string')row.author=row.key;
+if(row.count==null&&row.key!=null&&typeof row.total==='number')row.count=row.total;
+if(typeof row.owner==='string'&&typeof row.repo==='string'&&row.repo.indexOf('/')<0){var full=row.owner+'/'+row.repo;if(row.repository==null)row.repository=full;if(row.full_name==null)row.full_name=full;}
+if((typeof row.merged_at==='string'||typeof row.mergedAt==='string')&&(row.state==null||String(row.state).toLowerCase()==='closed'))row.state='merged';
 var dotted=Object.keys(row);for(var d=0;d<dotted.length;d++){var key=dotted[d];if(key.indexOf('.')<0)continue;var parts=key.split('.'),cur=row;
 for(var j=0;j<parts.length-1;j++){if(!cur[parts[j]]||typeof cur[parts[j]]!=='object')cur[parts[j]]={};cur=cur[parts[j]];}
 if(cur[parts[parts.length-1]]==null)cur[parts[parts.length-1]]=row[key];}}

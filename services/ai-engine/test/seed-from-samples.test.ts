@@ -18,6 +18,8 @@ test('les issues GitHub remplissent la collection lue par le backend', () => {
   assert.equal(seed.issues[0].state, 'open');
   assert.equal(seed.issues[0].id, '38335');
   assert.equal(seed.issues[0].repo, 'react');
+  assert.equal(seed.issues[0].repository, 'facebook/react');
+  assert.equal(seed.issues[0].author, 'ada');
   assert.equal(seed.issues[0].createdAt, '2026-11-21T04:14:50Z');
   assert.equal(seed.pullRequests[0].state, 'open');
   assert.equal(seed.pullRequests[0].repo, 'react');
@@ -42,6 +44,16 @@ export const tools = {
   assert.equal(seed.depots[0].full_name, 'CharlesHenrynoah/formule');
   assert.equal(seed.issues[0].state, 'open');
   assert.equal(seed.issues[0].repo, 'formule');
+});
+
+test('pull_requests et pullRequests reçoivent les mêmes lignes', () => {
+  const src = `export const tools = { a: { run: (_a, db) => db.list('pull_requests') }, b: { run: (_a, db) => __rows(db, "pullRequests", {}, {}) } };`;
+  const seed = seedFromSamples(src, [
+    { tool: 'github__list_pull_requests', args: { owner: 'facebook', repo: 'react' }, result: { pull_requests: [{ number: 9, title: 'PR', state: 'closed', merged_at: '2026-11-01T00:00:00Z', user: { login: 'ada' } }] } },
+  ]);
+  assert.equal(seed.pull_requests[0].repository, 'facebook/react');
+  assert.equal(seed.pullRequests[0].state, 'merged');
+  assert.equal(seed.pullRequests[0].author, 'ada');
 });
 
 test('les issues arrivent dans data_list même si le backend ne nomme pas la collection', () => {

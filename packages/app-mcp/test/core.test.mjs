@@ -100,7 +100,8 @@ test('une liste nommée est recopiée sous chaque nom que l’écran peut lire',
   assert.equal(issues.pullRequests[0].number, 285);
   assert.equal(issues.commits[0].createdAt, '2013-08-21T21:41:26Z');
   assert.equal(issues.items[0].created_at, '2013-08-21T21:41:26Z');
-  assert.equal(issues.items[0].author.login, 'sophiebits');
+  assert.equal(issues.items[0].author, 'sophiebits');
+  assert.equal(issues.items[0].user.login, 'sophiebits');
   const commits = b.call('get_commits', {});
   assert.equal(commits.items[0].sha, 'abc');
   assert.equal(commits.issues[0].user.login, 'acdlite');

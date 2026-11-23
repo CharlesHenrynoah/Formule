@@ -8,6 +8,7 @@ import { appendFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { compileTools, type AgentDef, type Contract } from '../../../../packages/app-mcp/src/core.mjs';
+import { ingestEmptyCollections } from './ingest.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
 export const ROOT = resolve(here, '../../../..');
@@ -51,28 +52,30 @@ export async function ensureApp(appId: string, version?: number): Promise<Ensure
     await writeFile(join(vdir, 'contract.json'), JSON.stringify(app.contract, null, 2));
     await writeFile(join(vdir, 'agent.json'), JSON.stringify(app.agent, null, 2));
   }
-  // Amorçage : lignes de la liaison ou fichiers importés. On complète une collection vide, on n'écrase pas des lignes déjà là.
+  // Amorçage : lignes de la liaison, puis GitHub si une collection lue par le backend est encore vide.
   const dbFile = join(APPS_DIR, appId, 'data', 'db.json');
   let refilled = false;
+  await mkdir(dirname(dbFile), { recursive: true });
+  let current: Record<string, unknown> = {};
+  if (existsSync(dbFile)) { try { current = JSON.parse(await readFile(dbFile, 'utf8')); } catch { current = {}; } }
+  let seq = Number(current.__seq) || 0;
   if (app.seed && Object.keys(app.seed).length) {
-    await mkdir(dirname(dbFile), { recursive: true });
-    let current: Record<string, unknown> = {};
-    if (existsSync(dbFile)) { try { current = JSON.parse(await readFile(dbFile, 'utf8')); } catch { current = {}; } }
-    let seq = Number(current.__seq) || 0;
     for (const [col, rows] of Object.entries(app.seed)) {
       const have = current[col];
       if (Array.isArray(have) && have.length) continue;
       current[col] = rows.map((r) => ({ ...r, id: r.id !== undefined ? String(r.id) : String(++seq) }));
       refilled = true;
     }
-    if (refilled) {
-      const ids = Object.values(current).flatMap((rows) => Array.isArray(rows) ? rows.map((r) => Number((r as { id?: string }).id) || 0) : []);
-      current.__seq = Math.max(seq, ...ids, 0);
-      await writeFile(dbFile, JSON.stringify(current));
-      // Le processus déjà lancé a lu l'ancien fichier au démarrage. On l'arrête pour qu'il relise.
-      await json(`${HUB}/apps/${appId}`, { method: 'DELETE' }).catch(() => {});
-      forget(appId);
-    }
+  }
+  const prompt = [p.body.title, ...versions.map((item) => item.prompt)].filter(Boolean).join('\n');
+  if (await ingestEmptyCollections(src, current, prompt, async (tool, args) => (await callHub(tool, args, false)).data)) refilled = true;
+  if (refilled) {
+    const ids = Object.values(current).flatMap((rows) => Array.isArray(rows) ? rows.map((r) => Number((r as { id?: string }).id) || 0) : []);
+    current.__seq = Math.max(seq, ...ids, 0);
+    await writeFile(dbFile, JSON.stringify(current));
+    // Le processus déjà lancé a lu l'ancien fichier au démarrage. On l'arrête pour qu'il relise.
+    await json(`${HUB}/apps/${appId}`, { method: 'DELETE' }).catch(() => {});
+    forget(appId);
   }
   // Mémoire personnelle : chaque demande (génération / itérations) alimente le contexte de l'agent.
   await syncRequests(appId, versions.filter((x) => x.kind !== 'edit').map((x) => ({ at: x.created_at, version: x.number, prompt: x.prompt })));
