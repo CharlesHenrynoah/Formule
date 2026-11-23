@@ -4,7 +4,7 @@ import { setupTool } from './create-tool.ts';
 import type { AgentTool } from './types.ts';
 
 const DESCRIPTIONS: Record<TaskAgentName, string> = {
-  liaison: `Agent de liaison MCP. Il liste et échantillonne les sources (3 appels maximum). Utilise-le avant d'écrire le backend. Il ne écrit pas l'interface. Le prompt doit dire quelles données chercher, et interdire state all.`,
+  router: `Agent routeur. Il est le seul à parler au MCP : il choisit l'outil de lecture et l'échantillonne (3 appels maximum). Il ne écrit pas l'interface. Le prompt dit la collection et l'outil, et interdit les autres serveurs.`,
 };
 
 export const Task: AgentTool = setupTool({

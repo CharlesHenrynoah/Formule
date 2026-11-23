@@ -6,11 +6,11 @@ import type { AgentTool } from '../tools/types.ts';
  * Les bibliothèques et les API restent les nôtres.
  */
 
-export const AGENT_NAMES = ['main', 'liaison'] as const;
+export const AGENT_NAMES = ['main', 'router', 'liaison'] as const;
 export type AgentName = (typeof AGENT_NAMES)[number];
 
 /** Sous-agents que l'outil task peut lancer. Le principal n'en fait pas partie. */
-export const TASK_AGENT_NAMES = ['liaison'] as const satisfies readonly AgentName[];
+export const TASK_AGENT_NAMES = ['router'] as const satisfies readonly AgentName[];
 export type TaskAgentName = (typeof TASK_AGENT_NAMES)[number];
 
 export type TextPart = { type: 'text'; text: string };

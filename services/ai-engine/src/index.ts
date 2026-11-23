@@ -36,7 +36,7 @@ function sse(reply: FastifyReply) {
 app.get('/health', async () => ({
   service: 'ai-engine', status: 'ok', provider: choice.provider.name, model: choice.provider.model,
   requested: choice.requested, fallback: choice.fallback ?? null, supportsDiffusion: choice.provider.supportsDiffusion,
-  agent: { available: backend.kind !== 'unavailable', kind: backend.kind, framework: backend.kind === 'llm' ? 'moteur agentique' : backend.kind === 'scripted' ? 'scripté (démo)' : null, roles: ['principal', 'liaison'], defaultMode: DEFAULT_MODE },
+  agent: { available: backend.kind !== 'unavailable', kind: backend.kind, framework: backend.kind === 'llm' ? 'moteur agentique' : backend.kind === 'scripted' ? 'scripté (démo)' : null, roles: ['principal', 'routeur'], defaultMode: DEFAULT_MODE },
 }));
 
 type AgentBody = GenerateInput & { mode?: 'agent' | 'direct'; previousFiles?: Record<string, string>; previousComponents?: string[]; previousBrief?: string; previousContract?: any; projectId?: string; previousVersion?: number; fullRebuild?: boolean; datasets?: Array<{ name: string; rows: Array<Record<string, unknown>> }> };

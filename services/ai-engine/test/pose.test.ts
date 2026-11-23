@@ -29,6 +29,25 @@ test('une courbe de commits placée sous les releases vise commits, et l\'outil 
   assert.match(mission, /aucun autre serveur/);
 });
 
+test('le routeur classe une demande qui n\'est pas un dépôt', () => {
+  const orders = routeDemand('Ajoute une page de suivi des commandes du jour');
+  assert.equal(orders.kind, 'page');
+  assert.equal(orders.collection, 'commandes');
+  assert.equal(orders.data, true);
+  const form = routeDemand('Ajoute un formulaire de contact');
+  assert.equal(form.kind, 'formulaire');
+  assert.equal(form.collection, 'contact');
+  assert.equal(form.data, false);
+  const color = routeDemand('Change la couleur du bouton Envoyer');
+  assert.equal(color.kind, 'action');
+  assert.equal(color.data, false);
+  const bills = routeDemand('Ajoute un tableau des factures impayées');
+  assert.equal(bills.kind, 'tableau');
+  assert.equal(bills.collection, 'factures');
+  assert.equal(bills.data, true);
+  assert.equal(poseRequest(page, 'Ajoute un formulaire de contact').changed, false);
+});
+
 test('une courbe ne pose pas un tableau titré par la demande', () => {
   const prompt = 'Ajoute sous le tableau des releases une courbe des commits par semaine sur les 3 derniers mois.';
   const posed = poseRequest(page, prompt);

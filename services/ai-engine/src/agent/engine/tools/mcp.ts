@@ -5,7 +5,7 @@ export const McpListTools: AgentTool = setupTool({
   name: 'mcp_list_tools',
   readOnly: true,
   timeoutMs: 30_000,
-  agents: ['liaison'],
+  agents: ['router'],
   description: () => 'Liste les outils MCP autorisés, en lecture.',
   parameters: { properties: {}, required: [] },
   execute: async ({ toolbox }) => {
@@ -21,7 +21,7 @@ export const McpCall: AgentTool = setupTool({
   name: 'mcp_call',
   readOnly: true,
   timeoutMs: 60_000,
-  agents: ['liaison'],
+  agents: ['router'],
   description: () => 'Échantillonne un outil MCP en lecture. Au plus 3 appels. Jamais state all. GitHub : state open, perPage 20, sort created, direction desc.',
   parameters: {
     properties: {

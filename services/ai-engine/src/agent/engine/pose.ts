@@ -18,32 +18,53 @@ function familyOf(text: string): string {
   return '';
 }
 
-export function collectionForPrompt(prompt: string): string {
-  const mentions = [...prompt.matchAll(/(?:(sous|dans|près|avant|après|apres)(?:\s+(?:le|la|les|l['’]))?\s+)?((?:courbe|graphique|tableau|liste|série|serie|carte)s?)\s+(?:de |des |du |d['’])?(?:la |le |les |l['’])?([a-zàâäéèêëïîôùûüç0-9]+)/gi)];
-  for (const match of mentions) {
-    if (match[1]) continue;
-    const named = familyOf(match[3] ?? '');
-    if (named) return named;
-  }
-  const fromPrompt = familyOf(prompt);
-  if (fromPrompt) return fromPrompt;
-  const word = prompt.toLowerCase().split(/[^a-z0-9]+/).find((part) => part.length > 3 && !/ajoute|tableau|dernier|dernieres|avec|dans|pour|sous|vers|element|courbe|graphique/.test(part));
-  return (word ?? 'lignes').slice(0, 24);
+const STOP = new Set(['ajoute', 'ajouter', 'modifie', 'modifier', 'change', 'changer', 'supprime', 'supprimer', 'retire', 'retirer', 'mets', 'mettre', 'faire', 'fais', 'montre', 'voir', 'avec', 'dans', 'pour', 'sous', 'vers', 'chez', 'sur', 'par', 'les', 'des', 'une', 'aux', 'son', 'ses', 'est', 'pas', 'plus', 'tout', 'tous', 'toutes', 'cette', 'cet', 'mois', 'semaine', 'semaines', 'jour', 'jours', 'dernier', 'derniers', 'dernieres', 'trois', 'depuis', 'entre', 'sans', 'logiciel', 'demande', 'element', 'couleur', 'couleurs', 'titre', 'texte', 'fond', 'style', 'suivi', 'affichage', 'detail', 'details']);
+
+const KIND_WORD = 'courbe|graphique|histogramme|camembert|série|serie|tableau|liste|grille|formulaire|saisie|filtre|sélecteur|selecteur|recherche|bouton|action|page|écran|ecran|panneau|onglet|carte';
+
+function nouns(text: string): string[] {
+  return text.toLowerCase().split(/[^a-z0-9àâäéèêëïîôùûüç]+/).filter((word) => word.length > 2 && !STOP.has(word));
 }
 
-export type DemandRoute = { kind: 'courbe' | 'tableau' | 'element'; collection: string; title: string };
+function collectionFrom(words: string[]): string {
+  for (const word of words) {
+    const named = familyOf(word);
+    if (named) return named;
+  }
+  const first = words.find((word) => !/courbe|graphique|tableau|liste|page|ecran|écran|panneau|carte|bouton|formulaire|filtre/.test(word));
+  return (first ?? 'lignes').slice(0, 24);
+}
 
-/** Décide avant le Data Engineer : quoi poser, sur quelle collection, avec quel titre. */
+export function collectionForPrompt(prompt: string): string {
+  return routeDemand(prompt).collection;
+}
+
+export type DemandKind = 'courbe' | 'tableau' | 'formulaire' | 'filtre' | 'action' | 'page' | 'element';
+export type DemandRoute = { kind: DemandKind; collection: string; title: string; data: boolean };
+
+function kindOf(word: string): DemandKind {
+  if (/courbe|graphique|histogramme|camembert|série|serie/.test(word)) return 'courbe';
+  if (/tableau|liste|grille/.test(word)) return 'tableau';
+  if (/formulaire|saisie/.test(word)) return 'formulaire';
+  if (/filtre|sélecteur|selecteur|recherche/.test(word)) return 'filtre';
+  if (/bouton|action/.test(word)) return 'action';
+  if (/page|écran|ecran|panneau|onglet|carte/.test(word)) return 'page';
+  return 'element';
+}
+
+/** Décide avant le Data Engineer, pour n'importe quel logiciel : l'élément, le sujet, et s'il faut lire des données. */
 export function routeDemand(prompt: string): DemandRoute {
-  const collection = collectionForPrompt(prompt);
-  const mentions = [...prompt.matchAll(/(?:(sous|dans|près|avant|après|apres)(?:\s+(?:le|la|les|l['’]))?\s+)?((?:courbe|graphique|tableau|liste|série|serie|carte)s?)\s+/gi)];
+  const mentions = [...prompt.matchAll(new RegExp(`(?:(sous|dans|près|avant|après|apres)(?:\\s+(?:le|la|les|l['’]))?\\s+)?(${KIND_WORD})s?\\s+((?:(?!\\s+un(?:e)?\\s)[^.;\\n]){0,80})`, 'gi'))];
   const added = mentions.find((match) => !match[1]);
-  const word = (added?.[2] ?? '').toLowerCase();
-  const kind: DemandRoute['kind'] = /courbe|graphique|série|serie/.test(word) ? 'courbe' : /tableau|liste/.test(word) ? 'tableau' : 'element';
+  const kind = added ? kindOf((added[2] ?? '').toLowerCase()) : 'element';
+  const clause = added?.[3] || prompt;
+  const collection = collectionFrom(nouns(clause).length ? nouns(clause) : nouns(prompt));
+  const reads = kind === 'courbe' || kind === 'tableau' || kind === 'page' || /montre|affiche|nombre|compte|données|donnees|par semaine|par jour|par mois|derni[eè]r/i.test(prompt);
+  const data = reads && kind !== 'formulaire' && kind !== 'filtre' && kind !== 'action' && !(/couleur|déplace|deplace|renomme|retire|supprime/i.test(prompt) && kind !== 'courbe' && kind !== 'tableau');
   const label = collection === 'pullRequests' ? 'Pull requests' : collection.charAt(0).toUpperCase() + collection.slice(1);
   const span = /3 derniers mois/i.test(prompt) ? ' (3 derniers mois)' : '';
-  const title = kind === 'courbe' ? `${label} par semaine${span}` : kind === 'tableau' && collection === 'releases' ? 'Dernières releases' : label;
-  return { kind, collection, title };
+  const title = kind === 'courbe' && /semaine/i.test(prompt) ? `${label} par semaine${span}` : kind === 'tableau' && /derni/i.test(prompt) ? `Dernières ${label.toLowerCase()}` : label;
+  return { kind, collection, title, data };
 }
 
 /** La mission nomme l'outil à appeler. Le Data Engineer ne part pas chercher un autre serveur. */
@@ -77,7 +98,7 @@ function componentName(collection: string): string {
 /** Pose l'élément routé. Une courbe n'est jamais un tableau d'une colonne, et le titre n'est jamais la demande brute. */
 export function poseRequest(source: string, prompt: string): { code: string; changed: boolean } {
   const route = routeDemand(prompt);
-  if (route.kind === 'courbe') return { code: source, changed: false };
+  if (route.kind !== 'tableau' || !route.data) return { code: source, changed: false };
   const collection = route.collection;
   const name = componentName(collection);
   if (source.includes(`function ${name}(`) || source.includes(route.title)) return { code: source, changed: false };

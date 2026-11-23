@@ -1,21 +1,14 @@
 import type { AgentEvent } from '../../events.ts';
-import { TOOLS } from '../tools/all.ts';
 import { setupAgent } from './create-agent.ts';
 import { contextMessage, shouldContinueWithToolCalls, systemMessage } from './shared.ts';
 import type { Agent } from './types.ts';
 
-const SYSTEM = `Tu es l'agent de liaison. Tu cherches et tu échantillons les outils MCP en lecture. Tu n'écris pas de code.
+const SYSTEM = `Tu es l'agent de liaison. Tu ne parles pas au MCP : c'est le routeur qui échantillonne. Tu n'écris pas de code.
 
-mcp_list_tools, puis au plus 3 mcp_call. Si la liste échoue, relance-la une fois. Tu n'inventes pas de nom d'outil.
-Si la mission nomme un identifiant d'outil, le premier mcp_call est celui-là. Tu n'appelles aucun autre serveur.
-GitHub : state "open", perPage 20, sort "created", direction "desc". Jamais state "all".
-Un second appel state "closed" est permis s'il reste du quota.
-Les arguments sont un objet, pas une chaîne.
-
-Réponds par un court rapport : outil, arguments, noms des champs, et la collection. Si la mission nomme une collection nouvelle, utilise ce nom. Sinon issues, pullRequests, commits, depots ou profil. Pas de dump.`;
+Tu reçois le rapport du routeur. Tu le résumes : collection, champs observés, ce que l'écran peut lire. Tu n'inventes aucun champ. Pas de dump.`;
 
 export function liaisonAgent(emit: (event: AgentEvent) => void): Agent {
-  return setupAgent({ name: 'liaison', tools: [TOOLS.mcp_list_tools, TOOLS.mcp_call] }).create({
+  return setupAgent({ name: 'liaison', tools: [] }).create({
     getMessages: ({ prompt }) => [
       systemMessage('liaison', SYSTEM),
       contextMessage('liaison', `<mission>\n${prompt}\n</mission>`),

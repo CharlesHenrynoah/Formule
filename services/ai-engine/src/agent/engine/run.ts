@@ -66,7 +66,7 @@ export async function runEngine(input: CrewInput, cfg: CrewConfig, ctx: { mcp?: 
     });
     const last = [...result.messages].reverse().find((message) => message.role === 'assistant');
     const text = last ? textOf(last) : '';
-    if (agentName === 'liaison') liaisonReport = text;
+    if (agentName === 'router' || agentName === 'liaison') liaisonReport = text;
     return { text, messages: result.messages };
   };
 
@@ -94,7 +94,10 @@ export async function runEngine(input: CrewInput, cfg: CrewConfig, ctx: { mcp?: 
 
   if (incremental) {
     const route = routeDemand(input.prompt);
-    counted({ type: 'agent', kind: 'message', role: 'data', text: `Routeur : ${route.kind} « ${route.title} », collection ${route.collection}.` });
+    counted({ type: 'agent', kind: 'message', role: 'data', text: `Routeur : ${route.kind} « ${route.title} », collection ${route.collection}${route.data ? '' : ', sans lecture'}.` });
+    if (!route.data) {
+      liaisonReport = `Routeur : ${route.kind} « ${route.title} ». Aucune collection à lire.`;
+    } else {
     const collection = route.collection;
     let read: { tool: string; args: Record<string, unknown> } | undefined;
     try {
@@ -109,12 +112,13 @@ export async function runEngine(input: CrewInput, cfg: CrewConfig, ctx: { mcp?: 
     } catch { /* la mission reste sans outil imposé */ }
     try {
       await spawnAgent({
-        agentName: 'liaison',
+        agentName: 'router',
         prompt: liaisonMission(input.prompt, read),
         signal: ctx.signal ?? new AbortController().signal,
       });
     } catch (error) {
       liaisonReport = liaisonReport || `La liaison n'a pas pu échantillonner : ${(error as Error).message}`;
+    }
     }
   }
 

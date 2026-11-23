@@ -2,7 +2,7 @@ import { setupTool } from './create-tool.ts';
 import type { AgentTool } from './types.ts';
 
 const text = (output: unknown) => (typeof output === 'string' ? output : JSON.stringify(output));
-const roleOf = (name: string) => (name === 'liaison' ? 'data' : 'dev') as 'data' | 'dev';
+const roleOf = (name: string) => (name === 'liaison' || name === 'router' ? 'data' : 'dev') as 'data' | 'dev';
 
 export const ReadFile: AgentTool = setupTool({
   name: 'read_file',
