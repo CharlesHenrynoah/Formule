@@ -30,8 +30,46 @@ function fieldsOf(row: Record<string, unknown> | undefined): string {
   return Object.entries(row).slice(0, 8).map(([key, value]) => `${key} (${roleOf(key, value)})`).join(', ');
 }
 
+function norm(value: string): string {
+  return value.toLowerCase().normalize('NFD').replace(/\p{M}/gu, '').replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+function labelsOn(page: string): string[] {
+  const labels: string[] = [];
+  for (const match of page.matchAll(/<h[1-3][^>]*>([\s\S]*?)<\/h[1-3]>/gi)) {
+    const text = match[1].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    if (text) labels.push(text);
+  }
+  for (const match of page.matchAll(/\blabel=["']([^"']+)["']/gi)) labels.push(match[1]);
+  return labels;
+}
+
+/** Titre déjà affiché sur la page, pour n'importe quel projet. Un mot trop court ne bloque pas une autre vue. */
+export function presentLabel(prompt: string, page: string): string | null {
+  if (!page.trim()) return null;
+  const route = routeDemand(prompt);
+  const quoted = [...prompt.matchAll(/[«"]([^»"]{2,80})[»"]/g)].map((match) => match[1].trim());
+  const names = [...quoted, route.title].filter(Boolean);
+  for (const label of labelsOn(page)) {
+    const shown = norm(label);
+    if (shown.length < 4) continue;
+    for (const name of names) {
+      const asked = norm(name);
+      const words = asked.split(' ').filter(Boolean);
+      if (asked.length < 4) continue;
+      if (shown === asked || (words.length >= 2 && shown.includes(asked))) return label.replace(/\s+/g, ' ').trim();
+    }
+  }
+  return null;
+}
+
 /** Texte montré à l'utilisateur, et le brief que le développement réutilise s'il valide. */
-export function offerFromReads(prompt: string, reads: SourceRead[]): SourceOffer {
+export function offerFromReads(prompt: string, reads: SourceRead[], page = ''): SourceOffer {
+  const present = presentLabel(prompt, page);
+  if (present) {
+    const text = `Cet élément est déjà présent sur l'interface : « ${present} ».\nRien de nouveau ne sera généré.`;
+    return { canBuild: false, text, brief: text };
+  }
   const route = routeDemand(prompt);
   const lines = !route.data
     ? ['Aucune collection à lire pour cette demande.']
@@ -58,7 +96,8 @@ type Listed = { id: string; write?: boolean; ecriture?: boolean; schema?: unknow
 /** Lit les outils imposés par la demande. N'appelle pas le modèle. */
 export async function collectSource(prompt: string, page: string, list: () => Promise<Listed[]>, call: (tool: string, args: Record<string, unknown>) => Promise<unknown>): Promise<SourceOffer> {
   const route = routeDemand(prompt);
-  if (!route.data) return offerFromReads(prompt, []);
+  if (presentLabel(prompt, page)) return offerFromReads(prompt, [], page);
+  if (!route.data) return offerFromReads(prompt, [], page);
   let reads: Array<{ tool: string; args: Record<string, unknown> }> = [];
   try {
     const listed = await list();
@@ -82,5 +121,5 @@ export async function collectSource(prompt: string, page: string, list: () => Pr
       done.push({ ...read, ok: false, error: (error as Error).message, rows: [] });
     }
   }
-  return offerFromReads(prompt, done);
+  return offerFromReads(prompt, done, page);
 }

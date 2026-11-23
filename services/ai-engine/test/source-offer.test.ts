@@ -14,6 +14,21 @@ test('le sourcing montre les champs et ce qui peut être généré', () => {
   assert.match(offer.brief, /Sourcing validé/);
 });
 
+test('un élément déjà affiché ne part pas en développement', () => {
+  const page = `function Board() {\n  return (\n    <h3 className="text-sm font-semibold">Dernier commit</h3>\n    <h3>Commits par semaine (3 derniers mois)</h3>\n  );\n}`;
+  const same = offerFromReads('Ajoute une carte « Dernier commit ». Elle affiche le message du commit le plus récent.', [], page);
+  assert.equal(same.canBuild, false);
+  assert.match(same.text, /déjà présent/);
+  assert.match(same.text, /Dernier commit/);
+  const other = offerFromReads('Ajoute un tableau « Branches ». Il liste les branches du dépôt.', [
+    { tool: 'github__list_branches', args: { owner: 'facebook', repo: 'react' }, ok: true, rows: [{ name: 'main' }] },
+  ], page);
+  assert.equal(other.canBuild, true);
+  const curve = offerFromReads('Ajoute une courbe des commits par semaine sur les 3 derniers mois.', [], page);
+  assert.equal(curve.canBuild, false);
+  assert.match(curve.text, /Commits par semaine/);
+});
+
 test('une lecture vide ne lance pas le développement', () => {
   const offer = offerFromReads('Ajoute une carte « Dernier commit ».', [
     { tool: 'github__list_commits', args: { owner: 'inception-ai', repo: 'website' }, ok: false, error: '404', rows: [] },
