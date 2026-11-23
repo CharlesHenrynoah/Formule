@@ -54,7 +54,7 @@ export function bindCharts(source: string): { code: string; changed: boolean } {
   let changed = false;
   const code = source.replace(/const ([A-Za-z][\w]*) = useMemo\(\(\) => \{[\s\S]*?\}, \[[^\]]*\]\);/g, (full, name: string) => {
     const body = full.slice(full.indexOf('=>'), full.lastIndexOf('}, ['));
-    if (!timeSeries(name, body, source) || DATE_READ.test(body)) return full;
+    if (!timeSeries(name, body, source) || (DATE_READ.test(body) && !/\.points\b|\.valeur\b/.test(body))) return full;
     const state = intendedState(name, source, states);
     if (!state) return full;
     changed = true;

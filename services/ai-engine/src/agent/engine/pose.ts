@@ -31,13 +31,42 @@ export function collectionForPrompt(prompt: string): string {
   return (word ?? 'lignes').slice(0, 24);
 }
 
+export type DemandRoute = { kind: 'courbe' | 'tableau' | 'element'; collection: string; title: string };
+
+/** Décide avant le Data Engineer : quoi poser, sur quelle collection, avec quel titre. */
+export function routeDemand(prompt: string): DemandRoute {
+  const collection = collectionForPrompt(prompt);
+  const mentions = [...prompt.matchAll(/(?:(sous|dans|près|avant|après|apres)(?:\s+(?:le|la|les|l['’]))?\s+)?((?:courbe|graphique|tableau|liste|série|serie|carte)s?)\s+/gi)];
+  const added = mentions.find((match) => !match[1]);
+  const word = (added?.[2] ?? '').toLowerCase();
+  const kind: DemandRoute['kind'] = /courbe|graphique|série|serie/.test(word) ? 'courbe' : /tableau|liste/.test(word) ? 'tableau' : 'element';
+  const label = collection === 'pullRequests' ? 'Pull requests' : collection.charAt(0).toUpperCase() + collection.slice(1);
+  const span = /3 derniers mois/i.test(prompt) ? ' (3 derniers mois)' : '';
+  const title = kind === 'courbe' ? `${label} par semaine${span}` : kind === 'tableau' && collection === 'releases' ? 'Dernières releases' : label;
+  return { kind, collection, title };
+}
+
 /** La mission nomme l'outil à appeler. Le Data Engineer ne part pas chercher un autre serveur. */
 export function liaisonMission(prompt: string, read?: { tool: string; args: Record<string, unknown> }): string {
-  const collection = collectionForPrompt(prompt);
+  const route = routeDemand(prompt);
   const call = read
     ? `Le premier mcp_call est exactement ${read.tool} avec les arguments ${JSON.stringify(read.args)}. Tu n'appelles aucun autre serveur.`
-    : `Échantillonne l'outil en lecture dont le nom contient ${collection}. Tu n'appelles pas un outil de recherche de workflows.`;
-  return `L'interface existe déjà. On ajoute un élément ou des données.\nDemande : ${prompt}\nCollection visée : ${collection}.\n${call}\nRapport court : outil, arguments, champs observés. N'invente aucun champ. Tu n'écris pas la page.`;
+    : `Échantillonne l'outil en lecture dont le nom contient ${route.collection}. Tu n'appelles pas un outil de recherche de workflows.`;
+  return `Routeur : ${route.kind}, collection ${route.collection}, titre « ${route.title} ».\nDemande : ${prompt}\n${call}\nTu n'échantillons pas une autre collection. Rapport court : outil, arguments, champs observés. N'invente aucun champ. Tu n'écris pas la page.`;
+}
+
+/** Retire un tableau dont le titre est la demande brute. */
+export function dropIncomplete(source: string): { code: string; changed: boolean } {
+  let code = source;
+  let changed = false;
+  for (const match of source.matchAll(/function (Added[A-Za-z0-9]+)\(\)/g)) {
+    const name = match[1];
+    const block = code.match(new RegExp(`function ${name}\\(\\) \\{[\\s\\S]*?\\n\\}\\n`));
+    if (!block || !/<h3[^>]*>\s*Ajoute /.test(block[0])) continue;
+    code = code.replace(block[0], '').replace(new RegExp(`\\s*<${name} />\\n?`), '\n');
+    changed = true;
+  }
+  return { code, changed };
 }
 
 function componentName(collection: string): string {
@@ -45,18 +74,16 @@ function componentName(collection: string): string {
   return `Added${stem.charAt(0).toUpperCase()}${stem.slice(1)}`;
 }
 
-function titleOf(prompt: string): string {
-  return prompt.replace(/\s+/g, ' ').replace(/[{}<>&]/g, ' ').trim().slice(0, 90) || 'Élément ajouté';
-}
-
-/** Pose un tableau branché sur data_list juste avant la fin du tableau de bord. */
+/** Pose l'élément routé. Une courbe n'est jamais un tableau d'une colonne, et le titre n'est jamais la demande brute. */
 export function poseRequest(source: string, prompt: string): { code: string; changed: boolean } {
-  const collection = collectionForPrompt(prompt);
+  const route = routeDemand(prompt);
+  if (route.kind === 'courbe') return { code: source, changed: false };
+  const collection = route.collection;
   const name = componentName(collection);
-  if (source.includes(`function ${name}(`)) return { code: source, changed: false };
+  if (source.includes(`function ${name}(`) || source.includes(route.title)) return { code: source, changed: false };
   const anchor = source.includes('</BoardStack>') ? '</BoardStack>' : source.includes('</AppShell>') ? '</AppShell>' : '';
   if (!anchor) return { code: source, changed: false };
-  const title = titleOf(prompt);
+  const title = route.title;
   const fn = `function ${name}() {
   const [rows, setRows] = useState<Array<Record<string, unknown>>>([]);
   useEffect(() => {

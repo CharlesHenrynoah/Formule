@@ -14,7 +14,7 @@ import type { AgentName } from './agents/types.ts';
 import { collectionsInScreen, readsForCollections, type SourceTool } from '../../app-agents/ingest.ts';
 import { runAgentLoop } from './loop.ts';
 import { bindCharts } from './bind-charts.ts';
-import { collectionForPrompt, liaisonMission, poseRequest } from './pose.ts';
+import { collectionForPrompt, dropIncomplete, liaisonMission, poseRequest, routeDemand } from './pose.ts';
 import type { SpawnAgent } from './tools/types.ts';
 
 const MAIN_STEPS = 24;
@@ -79,6 +79,8 @@ export async function runEngine(input: CrewInput, cfg: CrewConfig, ctx: { mcp?: 
     await tb.testBackend('dev', null);
     if (!tb.lastBackendTest?.ok) throw new Error(`Backend non conforme : ${(tb.lastBackendTest?.problems ?? []).slice(0, 3).join(' ; ') || '0 outil'}`);
     let patched = shell.changed;
+    const cleaned = dropIncomplete(ws.files.get('src/App.tsx') ?? '');
+    if (cleaned.changed) { await ws.write('src/App.tsx', cleaned.code); patched = true; }
     if (incremental && (ws.files.get('src/App.tsx') ?? '') === pageBefore) {
       const posed = poseRequest(ws.files.get('src/App.tsx') ?? '', input.prompt);
       if (posed.changed) { await ws.write('src/App.tsx', posed.code); patched = true; }
@@ -91,7 +93,9 @@ export async function runEngine(input: CrewInput, cfg: CrewConfig, ctx: { mcp?: 
   };
 
   if (incremental) {
-    const collection = collectionForPrompt(input.prompt);
+    const route = routeDemand(input.prompt);
+    counted({ type: 'agent', kind: 'message', role: 'data', text: `Routeur : ${route.kind} « ${route.title} », collection ${route.collection}.` });
+    const collection = route.collection;
     let read: { tool: string; args: Record<string, unknown> } | undefined;
     try {
       const listed = await tb.listMcpTools('data');

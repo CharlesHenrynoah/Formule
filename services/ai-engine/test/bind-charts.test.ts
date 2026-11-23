@@ -45,6 +45,13 @@ test('un classement sans date n\'est pas rebranché', () => {
   assert.equal(bindCharts(rank + '\n<Chart data={topAuthors} />').changed, false);
 });
 
+test('une date lue dans points ne compte pas comme une date réelle', () => {
+  const dated = page.replace('if (!Array.isArray(points)) continue;', 'const d = asDate(p?.date); if (!d) continue;');
+  const bound = bindCharts(dated);
+  assert.equal(bound.changed, true);
+  assert.match(bound.code, /for \(const row of commits\)/);
+});
+
 test('une courbe de commits qui lit les releases est rebranchée sur commits', () => {
   const bound = bindCharts(page);
   assert.equal(bound.changed, true);
