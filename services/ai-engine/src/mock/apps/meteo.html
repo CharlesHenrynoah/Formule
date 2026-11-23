@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="fr" class="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Météo (outils MCP)</title>
+<script src="/runtime/es-runtime.js"></script>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/jsx">
+import { useEffect, useState } from 'react';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Input } from '@/components/ui/input';
+import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { Skeleton } from '@/components/ui/skeleton';
+import { CloudSun, Search, Save, Plug } from 'lucide-react';
+import { toast } from 'sonner';
+
+const ICONS: Record<string, string> = { 'Ensoleillé': '☀️', 'Nuageux': '☁️', 'Averses': '🌧️', 'Orageux': '⛈️', 'Brumeux': '🌫️', 'Venteux': '💨', 'Neige légère': '🌨️' };
+const DAYS = ['Auj.', 'Dem.', 'J+2', 'J+3', 'J+4'];
+const mcp = (window as any).mcp;
+const hasBridge = () => !!mcp && typeof mcp.call === 'function';
+
+export default function App() {
+  const [city, setCity] = useState('Paris');
+  const [w, setW] = useState<any>(null);
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  async function load(name: string) {
+    if (!hasBridge()) { setError("Pont MCP indisponible (ouvrez l'app dans Everything Software)."); return; }
+    setLoading(true); setError('');
+    try { setW(await mcp.call('demo__get_weather', { city: name })); }
+    catch (e: any) { setError('Erreur MCP : ' + e.message); }
+    finally { setLoading(false); }
+  }
+  async function save() {
+    if (!w || !hasBridge()) return;
+    setSaving(true);
+    try {
+      const r = await mcp.call('demo__add_note', { text: `Météo ${w.ville} : ${w.temperature_c}°, ${w.condition}` });
+      toast.success(`Note n°${r.ajoutee.id} enregistrée (${r.total} au total)`);
+    } catch (e: any) { toast.error(e.message); }
+    finally { setSaving(false); }
+  }
+  useEffect(() => { load('Paris'); }, []);
+
+  return (
+    <div className="flex min-h-screen justify-center bg-gradient-to-b from-background to-sky-950/40 p-6">
+      <div className="w-full max-w-lg space-y-4">
+        <div>
+          <h1 className="flex items-center gap-2 text-2xl font-semibold"><CloudSun className="size-6 text-sky-400" />Météo</h1>
+          <p className="mt-1 text-sm text-muted-foreground">Données fournies à l'exécution par l'outil MCP <Badge variant="outline" className="font-mono text-sky-300"><Plug />demo__get_weather</Badge></p>
+        </div>
+        <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); load(city.trim() || 'Paris'); }}>
+          <Input value={city} onChange={(e) => setCity(e.target.value)} placeholder="Ville…" aria-label="Ville" />
+          <Button type="submit"><Search /> Rechercher</Button>
+        </form>
+        {error && <Alert variant="destructive"><AlertTitle>Impossible de charger la météo</AlertTitle><AlertDescription>{error}</AlertDescription></Alert>}
+        <Card>
+          <CardHeader>
+            <CardTitle>{w ? w.ville : 'Maintenant'}</CardTitle>
+            <CardDescription>{w ? w.source : 'Appel de l\'outil MCP…'}</CardDescription>
+          </CardHeader>
+          <CardContent>
+            {loading || !w ? <Skeleton className="h-20 w-full" /> : (
+              <div className="flex items-center justify-between">
+                <div><div className="text-6xl font-bold">{w.temperature_c}°</div><div className="text-lg">{ICONS[w.condition] ?? ''} {w.condition}</div></div>
+                <div className="space-y-1 text-right text-sm text-muted-foreground">
+                  <div>Ressenti {w.ressenti_c}°</div><div>Humidité {w.humidite_pct} %</div><div>Vent {w.vent_kmh} km/h</div>
+                </div>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+        {w && (
+          <div className="grid grid-cols-5 gap-2">
+            {w.previsions.map((d: any, i: number) => (
+              <Card key={i} size="sm" className="items-center gap-1 text-center">
+                <div className="text-xs text-muted-foreground">{DAYS[i]}</div>
+                <div className="text-2xl">{ICONS[d.condition] ?? ''}</div>
+                <div className="font-semibold">{d.max_c}°</div><div className="text-xs text-muted-foreground">{d.min_c}°</div>
+              </Card>
+            ))}
+          </div>
+        )}
+        <Button variant="outline" disabled={!w || saving} onClick={save}><Save /> {saving ? 'En attente de votre confirmation…' : 'Enregistrer en note (MCP, écriture)'}</Button>
+      </div>
+    </div>
+  );
+}
+</script>
+</body>
+</html>

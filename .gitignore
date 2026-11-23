@@ -1,0 +1,12 @@
+node_modules
+dist
+.env
+data
+*.db
+.access
+.access-public
+.public-url
+
+# Secrets des serveurs MCP (jetons Bearer, en-têtes) — chmod 600
+data/secrets/
+.mcp-secrets*

@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="fr" class="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Minuteur Pomodoro</title>
+<script src="/runtime/es-runtime.js"></script>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/jsx">
+import { useEffect, useRef, useState } from 'react';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
+import { Progress } from '@/components/ui/progress';
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
+import { Play, Pause, RotateCcw, Timer } from 'lucide-react';
+import { toast } from 'sonner';
+
+const MODES = { focus: { label: 'Focus', min: 25 }, short: { label: 'Pause', min: 5 }, long: { label: 'Longue pause', min: 15 } } as const;
+type Mode = keyof typeof MODES;
+const mmss = (s: number) => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+
+function beep() {
+  try {
+    const ctx = new AudioContext(); const o = ctx.createOscillator(); const g = ctx.createGain();
+    o.connect(g); g.connect(ctx.destination); o.frequency.value = 880; g.gain.value = 0.15; o.start(); o.stop(ctx.currentTime + 0.4);
+  } catch {}
+}
+
+export default function App() {
+  const [mode, setMode] = useState<Mode>('focus');
+  const [left, setLeft] = useState(MODES.focus.min * 60);
+  const [running, setRunning] = useState(false);
+  const [sessions, setSessions] = useState(0);
+  const total = MODES[mode].min * 60;
+  const tick = useRef<number | undefined>(undefined);
+
+  useEffect(() => {
+    if (!running) return;
+    tick.current = window.setInterval(() => setLeft((l) => Math.max(0, l - 1)), 1000);
+    return () => clearInterval(tick.current);
+  }, [running]);
+  useEffect(() => {
+    document.title = `${mmss(left)} · ${MODES[mode].label}`;
+    if (left === 0 && running) {
+      setRunning(false); beep();
+      if (mode === 'focus') setSessions((s) => s + 1);
+      toast.success(`${MODES[mode].label} terminé !`);
+    }
+  }, [left]);
+
+  const switchMode = (m: string) => { if (!m) return; setMode(m as Mode); setRunning(false); setLeft(MODES[m as Mode].min * 60); };
+  const pct = ((total - left) / total) * 100;
+  const R = 90, C = 2 * Math.PI * R;
+
+  return (
+    <div className="flex min-h-screen justify-center bg-background p-6">
+      <Card className="w-full max-w-sm self-start text-center">
+        <CardHeader>
+          <CardTitle className="flex items-center justify-center gap-2 text-xl"><Timer className="size-5 text-primary" />Minuteur Pomodoro</CardTitle>
+          <CardDescription>Sessions de focus terminées : <Badge variant="secondary">{sessions}</Badge></CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-col items-center gap-5">
+          <ToggleGroup type="single" variant="outline" value={mode} onValueChange={switchMode}>
+            {Object.entries(MODES).map(([k, m]) => <ToggleGroupItem key={k} value={k}>{m.label}</ToggleGroupItem>)}
+          </ToggleGroup>
+          <div className="relative size-56">
+            <svg viewBox="0 0 200 200" className="size-full -rotate-90">
+              <circle cx="100" cy="100" r={R} fill="none" stroke="var(--muted)" strokeWidth="10" />
+              <circle cx="100" cy="100" r={R} fill="none" stroke="var(--primary)" strokeWidth="10" strokeLinecap="round" strokeDasharray={C} strokeDashoffset={C * (1 - pct / 100)} style={{ transition: 'stroke-dashoffset 1s linear' }} />
+            </svg>
+            <div className="absolute inset-0 grid place-items-center text-5xl font-semibold tabular-nums">{mmss(left)}</div>
+          </div>
+          <Progress value={pct} className="w-full" />
+          <div className="flex gap-2">
+            <Button size="lg" onClick={() => setRunning(!running)}>{running ? <><Pause /> Pause</> : <><Play /> Démarrer</>}</Button>
+            <Button size="lg" variant="outline" onClick={() => { setRunning(false); setLeft(total); }}><RotateCcw /> Réinitialiser</Button>
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="fr" class="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Convertisseur d'unités</title>
+<script src="/runtime/es-runtime.js"></script>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/jsx">
+import { useState } from 'react';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Button } from '@/components/ui/button';
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { ArrowLeftRight, Ruler } from 'lucide-react';
+
+type Cat = { label: string; units: Record<string, number> };
+const CATS: Record<string, Cat> = {
+  longueur: { label: 'Longueur', units: { 'mètre (m)': 1, 'kilomètre (km)': 1000, 'centimètre (cm)': 0.01, 'millimètre (mm)': 0.001, 'mile (mi)': 1609.344, 'pied (ft)': 0.3048, 'pouce (in)': 0.0254 } },
+  masse: { label: 'Masse', units: { 'kilogramme (kg)': 1, 'gramme (g)': 0.001, 'tonne (t)': 1000, 'livre (lb)': 0.45359237, 'once (oz)': 0.028349523 } },
+  volume: { label: 'Volume', units: { 'litre (L)': 1, 'millilitre (mL)': 0.001, 'mètre cube (m³)': 1000, 'gallon US (gal)': 3.785411784, 'tasse US': 0.2365882365 } },
+  vitesse: { label: 'Vitesse', units: { 'km/h': 1, 'm/s': 3.6, 'mph': 1.609344, 'nœud (kn)': 1.852 } },
+  temperature: { label: 'Température', units: { 'Celsius (°C)': 0, 'Fahrenheit (°F)': 0, 'Kelvin (K)': 0 } },
+};
+const toC = (v: number, u: string) => (u.startsWith('Fahrenheit') ? ((v - 32) * 5) / 9 : u.startsWith('Kelvin') ? v - 273.15 : v);
+const fromC = (v: number, u: string) => (u.startsWith('Fahrenheit') ? (v * 9) / 5 + 32 : u.startsWith('Kelvin') ? v + 273.15 : v);
+const fmt = (n: number) => (isFinite(n) ? n.toLocaleString('fr-FR', { maximumFractionDigits: 6 }) : '—');
+
+export default function App() {
+  const [cat, setCat] = useState('longueur');
+  const units = Object.keys(CATS[cat].units);
+  const [from, setFrom] = useState(units[0]);
+  const [to, setTo] = useState(units[1]);
+  const [value, setValue] = useState('1');
+  const changeCat = (c: string) => { setCat(c); const u = Object.keys(CATS[c].units); setFrom(u[0]); setTo(u[1]); };
+  const v = parseFloat(value.replace(',', '.'));
+  const result = cat === 'temperature' ? fromC(toC(v, from), to) : (v * CATS[cat].units[from]) / CATS[cat].units[to];
+
+  const UnitSelect = ({ value: val, onChange }: { value: string; onChange: (s: string) => void }) => (
+    <Select value={val} onValueChange={onChange}>
+      <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+      <SelectContent>{units.map((u) => <SelectItem key={u} value={u}>{u}</SelectItem>)}</SelectContent>
+    </Select>
+  );
+
+  return (
+    <div className="flex min-h-screen justify-center bg-background p-6">
+      <Card className="w-full max-w-lg self-start">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-xl"><Ruler className="size-5 text-primary" />Convertisseur d'unités</CardTitle>
+          <CardDescription>Conversion instantanée, format numérique français.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-5">
+          <Tabs value={cat} onValueChange={changeCat}>
+            <TabsList className="w-full flex-wrap">{Object.entries(CATS).map(([k, c]) => <TabsTrigger key={k} value={k}>{c.label}</TabsTrigger>)}</TabsList>
+          </Tabs>
+          <div className="grid grid-cols-[1fr_auto_1fr] items-end gap-3">
+            <div className="space-y-2"><Label>De</Label><Input inputMode="decimal" value={value} onChange={(e) => setValue(e.target.value)} /><UnitSelect value={from} onChange={setFrom} /></div>
+            <Button variant="outline" size="icon" aria-label="Inverser" onClick={() => { setFrom(to); setTo(from); }}><ArrowLeftRight /></Button>
+            <div className="space-y-2"><Label>Vers</Label><div className="flex h-9 items-center rounded-md border bg-muted/40 px-3 font-semibold tabular-nums">{fmt(result)}</div><UnitSelect value={to} onChange={setTo} /></div>
+          </div>
+          <p className="rounded-lg bg-muted/40 p-3 text-center text-sm text-muted-foreground">{fmt(v)} {from} = <span className="font-medium text-foreground">{fmt(result)} {to}</span></p>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+</script>
+</body>
+</html>
