@@ -2,13 +2,19 @@
  * Étape de sourcing, avant tout développement.
  * Lecture déterministe : le dépôt vient de la page et de la demande, pas d'un essai du modèle.
  */
-import { readsForCollections, type SourceTool } from '../../app-agents/ingest.ts';
+import { readsForCollections, readsForUnmatched, type SourceTool } from '../../app-agents/ingest.ts';
+import { readsFromSelector, selectorPrompt } from './select-mcp.ts';
 import { routeDemand } from './pose.ts';
 
 export type SourceRead = { tool: string; args: Record<string, unknown>; ok: boolean; error?: string; rows: Array<Record<string, unknown>> };
 export type SourceOffer = { canBuild: boolean; text: string; brief: string };
 
 function rowsOf(data: unknown): Array<Record<string, unknown>> {
+  if (typeof data === 'string' && data.trim()) {
+    const lines = data.split('\n').map((line) => line.replace(/^\s*[-*]\s*/, '').replace(/^\d+(?:\.\d+)*\s+/, '').trim()).filter((line) => line.length > 2 && line.length < 120 && !line.endsWith(':'));
+    if (lines.length > 1) return lines.slice(0, 20).map((titre) => ({ titre }));
+    return [{ texte: data.trim().slice(0, 280) }];
+  }
   if (Array.isArray(data)) return data.filter((row) => row && typeof row === 'object').slice(0, 20) as Array<Record<string, unknown>>;
   if (data && typeof data === 'object') {
     for (const value of Object.values(data as Record<string, unknown>)) {
@@ -75,7 +81,7 @@ export function offerFromReads(prompt: string, reads: SourceRead[], page = ''): 
     ? ['Aucune collection à lire pour cette demande.']
     : reads.length
     ? reads.map((read) => {
-      const where = [read.args.owner, read.args.repo].filter(Boolean).join('/');
+      const where = [read.args.owner, read.args.repo].filter(Boolean).join('/') || String(Object.values(read.args).find((value) => typeof value === 'string' && value.length > 0 && value.length < 80) ?? '');
       if (!read.ok) return `${read.tool}${where ? ` sur ${where}` : ''} a échoué : ${read.error ?? 'lecture impossible'}.`;
       return `${read.tool}${where ? ` sur ${where}` : ''} : ${read.rows.length} ligne${read.rows.length > 1 ? 's' : ''}. Champs : ${fieldsOf(read.rows[0])}.`;
     })
@@ -91,10 +97,16 @@ export function offerFromReads(prompt: string, reads: SourceRead[], page = ''): 
   return { canBuild: ready, text, brief };
 }
 
-type Listed = { id: string; write?: boolean; ecriture?: boolean; schema?: unknown; inputSchema?: unknown };
+type Listed = { id: string; description?: string; serverName?: string; write?: boolean; ecriture?: boolean; schema?: unknown; inputSchema?: unknown };
 
-/** Lit les outils imposés par la demande. N'appelle pas le modèle. */
-export async function collectSource(prompt: string, page: string, list: () => Promise<Listed[]>, call: (tool: string, args: Record<string, unknown>) => Promise<unknown>): Promise<SourceOffer> {
+/** Lit les outils. Le sélecteur, un agent, choisit le serveur quand aucune collection connue ne suffit. */
+export async function collectSource(
+  prompt: string,
+  page: string,
+  list: () => Promise<Listed[]>,
+  call: (tool: string, args: Record<string, unknown>) => Promise<unknown>,
+  select?: (mission: string) => Promise<string>,
+): Promise<SourceOffer> {
   const route = routeDemand(prompt);
   if (presentLabel(prompt, page)) return offerFromReads(prompt, [], page);
   if (!route.data) return offerFromReads(prompt, [], page);
@@ -104,10 +116,18 @@ export async function collectSource(prompt: string, page: string, list: () => Pr
     const catalog: SourceTool[] = listed.filter((tool) => !(tool.write || tool.ecriture)).map((tool) => ({
       id: tool.id,
       name: tool.id.includes('__') ? tool.id.split('__').slice(1).join('__') : tool.id,
+      description: tool.description,
+      serverName: tool.serverName,
       write: false,
       inputSchema: (tool.schema ?? tool.inputSchema) as SourceTool['inputSchema'],
     }));
-    reads = readsForCollections(route.collections, `${prompt}\n${page}`, catalog).slice(0, 3);
+    const demand = `${prompt}\n${page}`;
+    const known = readsForCollections(route.collections, demand, catalog);
+    if (known.length) reads = known.slice(0, 3);
+    else if (select) {
+      try { reads = readsFromSelector(await select(selectorPrompt(demand, catalog)), catalog, demand); } catch { /* le repli déterministe suit */ }
+    }
+    if (!reads.length) reads = readsForUnmatched(demand, catalog).slice(0, 3);
   } catch (error) {
     return offerFromReads(prompt, [{ tool: 'mcp', args: {}, ok: false, error: (error as Error).message, rows: [] }]);
   }

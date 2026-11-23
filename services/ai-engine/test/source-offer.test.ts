@@ -29,6 +29,15 @@ test('un élément déjà affiché ne part pas en développement', () => {
   assert.match(curve.text, /Commits par semaine/);
 });
 
+test('un texte renvoyé par un MCP compte comme des lignes', () => {
+  const offer = offerFromReads('Crée un tableau des sujets.', [
+    { tool: 'atlas__list_topics', args: { repoName: 'vercel/next.js' }, ok: true, rows: [{ titre: 'Build System' }, { titre: 'Server Runtime' }] },
+  ]);
+  assert.equal(offer.canBuild, true);
+  assert.match(offer.text, /vercel\/next\.js/);
+  assert.match(offer.text, /titre \(libellé\)/);
+});
+
 test('une lecture vide ne lance pas le développement', () => {
   const offer = offerFromReads('Ajoute une carte « Dernier commit ».', [
     { tool: 'github__list_commits', args: { owner: 'inception-ai', repo: 'website' }, ok: false, error: '404', rows: [] },

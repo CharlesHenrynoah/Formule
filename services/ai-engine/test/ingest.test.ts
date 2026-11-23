@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { collectionsInScreen, datelessCollections, ingestEmptyCollections, readsForCollections, repoInText, type SourceTool } from '../src/app-agents/ingest.ts';
+import { collectionsInScreen, datelessCollections, ingestEmptyCollections, readsForCollections, readsForUnmatched, repoInText, type SourceTool } from '../src/app-agents/ingest.ts';
 
 const source = `export const tools = {
   lire: { run: (_a, db) => __rows(db, "issues", {}, {}) },
@@ -86,6 +86,37 @@ test('des commits sans date sont rechargés, une collection datée reste', async
   const row = (db.commits as Array<Record<string, unknown>>)[0];
   assert.equal(row.date, '2026-11-23T14:31:37Z');
   assert.equal((db.issues as unknown[]).length, 1);
+});
+
+test('une application neuve lit le serveur nommé, même si la collection est inconnue', () => {
+  const atlas: SourceTool = {
+    id: 'atlas__list_topics', name: 'list_topics', description: 'Sujets documentés', write: false,
+    inputSchema: { required: ['repoName'], properties: { repoName: { description: 'Repository owner/repo' } } },
+  };
+  const github: SourceTool = { id: 'github__list_issues', name: 'list_issues', write: false, inputSchema: { required: ['owner', 'repo'], properties: {} } };
+  const reads = readsForUnmatched("Crée une interface uniquement avec Atlas, sans GitHub. Dépôt vercel/next.js.", [github, atlas]);
+  assert.equal(reads.length, 1);
+  assert.equal(reads[0]?.tool, 'atlas__list_topics');
+  assert.equal(reads[0]?.args.repoName, 'vercel/next.js');
+});
+
+test('un nom approché retrouve le serveur, même écrit en deux mots', () => {
+  const wiki: SourceTool = {
+    id: 'deepwiki__read_wiki_structure', name: 'read_wiki_structure', serverName: 'DeepWiki', write: false,
+    inputSchema: { required: ['repoName'], properties: { repoName: { description: 'Repository owner/repo' } } },
+  };
+  const github: SourceTool = { id: 'github__list_issues', name: 'list_issues', serverName: 'GitHub', write: false, inputSchema: { required: ['owner', 'repo'], properties: {} } };
+  const reads = readsForUnmatched('Crée une interface uniquement avec Deep Weki, sans GitHub. Dépôt vercel/next.js.', [github, wiki]);
+  assert.equal(reads[0]?.tool, 'deepwiki__read_wiki_structure');
+  assert.equal(reads[0]?.args.repoName, 'vercel/next.js');
+});
+
+test('sans serveur nommé, le texte de la demande choisit l\'outil lisible', () => {
+  const shop: SourceTool = { id: 'shop__search_products', name: 'search_products', description: 'Produits du catalogue', write: false, inputSchema: { required: ['query'], properties: {} } };
+  const other: SourceTool = { id: 'clock__get_time', name: 'get_time', description: 'Heure courante', write: false, inputSchema: { properties: {} } };
+  const reads = readsForUnmatched('Crée un tableau des produits.', [other, shop]);
+  assert.equal(reads[0]?.tool, 'shop__search_products');
+  assert.equal(reads[0]?.args.query, 'Crée un tableau des produits.');
 });
 
 test('l\'écran qui lit data_list nomme la collection même si le backend ne l\'écrit pas', () => {

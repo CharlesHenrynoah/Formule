@@ -42,13 +42,18 @@ function providerFor(cfg: CrewConfig): LLMProvider {
 export async function runEngine(input: CrewInput, cfg: CrewConfig, ctx: { mcp?: ConstructorParameters<typeof Toolbox>[1]; emit: (event: AgentEvent | Record<string, unknown>) => void; signal?: AbortSignal }) {
   const emit = ctx.emit as (event: AgentEvent) => void;
   if (input.phase === 'source' && ctx.mcp) {
-    emit({ type: 'agent', kind: 'role', role: 'data', label: 'Routeur' });
+    emit({ type: 'agent', kind: 'role', role: 'data', label: 'Sélecteur' });
     const page = input.previous?.files?.['src/App.tsx'] ?? '';
+    const llm = providerFor(cfg);
     const offer = await collectSource(
       input.prompt,
       page,
       () => ctx.mcp!.listTools(),
       async (tool, args) => (await ctx.mcp!.call(tool, args)).data,
+      (mission) => llm.stream(
+        [{ role: 'system', content: 'Tu es le sélecteur. Tu réponds uniquement par le JSON demandé.' }, { role: 'user', content: mission }],
+        { hint: { task: 'tools', prompt: input.prompt }, maxTokens: 500, signal: ctx.signal },
+      ),
     );
     emit({ type: 'agent', kind: 'message', role: 'data', text: offer.text.slice(0, 500) });
     ctx.emit({ type: 'source', canBuild: offer.canBuild, text: offer.text, brief: offer.brief });
