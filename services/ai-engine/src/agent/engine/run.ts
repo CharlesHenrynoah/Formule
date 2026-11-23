@@ -11,8 +11,9 @@ import type { AppBundle, CrewConfig, CrewInput } from '../crew.ts';
 import { buildAgents } from './agents/all.ts';
 import { textOf } from './agents/shared.ts';
 import type { AgentName } from './agents/types.ts';
+import { collectionsInScreen } from '../../app-agents/ingest.ts';
 import { runAgentLoop } from './loop.ts';
-import { poseRequest } from './pose.ts';
+import { collectionForPrompt, poseRequest } from './pose.ts';
 import type { SpawnAgent } from './tools/types.ts';
 
 const MAIN_STEPS = 24;
@@ -85,11 +86,25 @@ export async function runEngine(input: CrewInput, cfg: CrewConfig, ctx: { mcp?: 
     if (!tb.lastBuild?.ok || !tb.lastBuild.html) throw new Error(`Build final en échec : ${tb.lastBuild?.output.slice(-600) ?? 'aucun build'}`);
   };
 
+  if (incremental) {
+    const collection = collectionForPrompt(input.prompt);
+    try {
+      await spawnAgent({
+        agentName: 'liaison',
+        prompt: `L'interface existe déjà. On ajoute un élément ou des données : ce n'est pas seulement de la conception.\nDemande : ${input.prompt}\nCollection visée : ${collection}.\nÉchantillonne l'outil MCP en lecture qui alimente cette collection. Rapport court : outil, arguments, champs observés. N'invente aucun champ. Tu n'écris pas la page.`,
+        signal: ctx.signal ?? new AbortController().signal,
+      });
+    } catch (error) {
+      liaisonReport = liaisonReport || `La liaison n'a pas pu échantillonner : ${(error as Error).message}`;
+    }
+  }
+
   const result = await runAgentLoop({
     agent: agentsLive.main,
     opening: agentsLive.main.getMessages({
       prompt: input.prompt, files: [...ws.files.keys()], incremental, datasets,
       page: incremental ? pageBefore.split('\n').slice(-160).join('\n').slice(-7000) : '',
+      liaison: liaisonReport,
     }),
     llm, toolbox: tb, spawnAgent, signal: ctx.signal, maxStepCount: MAIN_STEPS,
     onText: (text) => counted({ type: 'agent', kind: 'message', role: 'dev', text: text.slice(0, 500) }),
@@ -107,7 +122,11 @@ export async function runEngine(input: CrewInput, cfg: CrewConfig, ctx: { mcp?: 
   counted({ type: 'agent', kind: 'contract', role: 'po', contract, ok: true });
   counted({ type: 'agent', kind: 'app_agent', role: 'po', agent: agentDef });
 
-  const sampled = seedFromSamples(ws.files.get('server/tools.ts') ?? '', tb.mcpSamples.map((sample) => ({ tool: sample.tool, args: sample.args, result: sample.full ?? sample.result })));
+  const sampled = seedFromSamples(
+    ws.files.get('server/tools.ts') ?? '',
+    tb.mcpSamples.map((sample) => ({ tool: sample.tool, args: sample.args, result: sample.full ?? sample.result })),
+    [...new Set([...collectionsInScreen(ws.files.get('src/App.tsx') ?? ''), collectionForPrompt(input.prompt)])],
+  );
   const app: AppBundle = { contract, agent: agentDef, backend: 'server/tools.ts', backendOk: !!tb.lastBackendTest?.ok, title };
   if (Object.keys(sampled).length) app.seed = sampled;
   const files = Object.fromEntries(ws.files);

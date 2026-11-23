@@ -37,6 +37,8 @@ export type Opening = {
   datasets: string;
   /** Fin exacte de src/App.tsx, sans numéros de ligne, quand la page existe déjà. */
   page?: string;
+  /** Rapport du Data Engineer, déjà produit quand la page existe. */
+  liaison?: string;
 };
 
 export interface Agent {

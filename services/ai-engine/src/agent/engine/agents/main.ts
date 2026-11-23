@@ -30,18 +30,19 @@ L'interface est noir et blanc, noir dominant : fond noir, texte blanc, cartes gr
 Avant d'écrire la page, lis src/components/es/board.tsx et compose avec ces pièces : BoardStack, BoardHeader, MetricGrid (quatre MetricCard), BoardSplit (graphique en 4/7, liste en 3/7). C'est la composition de shadcn-admin, sans sa barre latérale.
 Interdit dans la page : Sidebar, SidebarTrigger, AppSidebar, menu latéral.
 N'invente aucune donnée. Pas de vocabulaire de platine. Les noms de biais ne s'affichent pas.
-Si l'interface existe déjà, l'ordre 1 à 3 ne s'applique pas : tu n'appelles pas task, ni compile_backend, ni write_file. La fin exacte de src/App.tsx est déjà dans le message. Le premier outil est edit_file. find est une courte phrase exacte de cet extrait, sans numéro de ligne. replace garde cette phrase et ajoute l'élément demandé juste après. Un second edit_file est permis pour une fonction au-dessus du return. Ensuite build une fois.`;
+Si l'interface existe déjà, l'ordre 1 à 3 ne s'applique pas. Le Data Engineer a déjà échantillonné l'ajout : son rapport est dans le message. Tu n'appelles pas task une seconde fois, ni compile_backend, ni write_file. Les champs de l'élément viennent de ce rapport. Tu n'inventes aucun champ absent. La fin exacte de src/App.tsx est déjà dans le message. Le premier outil est edit_file. find est une courte phrase exacte de cet extrait, sans numéro de ligne. replace garde cette phrase et ajoute l'élément demandé juste après. Un second edit_file est permis pour une fonction au-dessus du return. Ensuite build une fois.`;
 
 export function mainAgent(emit: (event: AgentEvent) => void): Agent {
   return setupAgent({ name: 'main', tools: MAIN_TOOLS }).create({
-    getMessages: ({ prompt, files, incremental, datasets, page }) => {
+    getMessages: ({ prompt, files, incremental, datasets, page, liaison }) => {
       const layout = files.slice(0, 80).join('\n') || '(projet vide)';
       return [
         systemMessage('main', SYSTEM),
         contextMessage('main', [
-          incremental ? '<mode>Incrémental. La page existe. Le premier outil est edit_file, find est une phrase exacte de page_return, sans numéro de ligne. Puis build. Sans edit_file, l\'ajout est raté. Tu n\'appelles pas task.</mode>' : '<mode>Première construction.</mode>',
+          incremental ? '<mode>Incrémental. La page existe. Le Data Engineer a échantillonné. Le premier outil est edit_file, find est une phrase exacte de page_return, sans numéro de ligne. Puis build. Sans edit_file, l\'ajout est raté. Tu n\'appelles pas task une seconde fois.</mode>' : '<mode>Première construction.</mode>',
           `<project_layout>\n${layout}\n</project_layout>`,
           page ? `<page_return>\n${page}\n</page_return>` : '',
+          liaison ? `<rapport_data>\n${liaison}\n</rapport_data>` : '',
           datasets ? `<datasets>\n${datasets}\n</datasets>` : '',
           `<demande>\n${prompt}\n</demande>`,
         ].filter(Boolean).join('\n\n')),

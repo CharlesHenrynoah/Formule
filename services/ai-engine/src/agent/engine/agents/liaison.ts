@@ -11,7 +11,7 @@ GitHub : state "open", perPage 20, sort "created", direction "desc". Jamais stat
 Un second appel state "closed" est permis s'il reste du quota.
 Les arguments sont un objet, pas une chaîne.
 
-Réponds par un court rapport : outil, arguments, noms des champs, et la collection parmi issues, pullRequests, commits, depots, profil. Pas de dump.`;
+Réponds par un court rapport : outil, arguments, noms des champs, et la collection. Si la mission nomme une collection nouvelle, utilise ce nom. Sinon issues, pullRequests, commits, depots ou profil. Pas de dump.`;
 
 export function liaisonAgent(emit: (event: AgentEvent) => void): Agent {
   return setupAgent({ name: 'liaison', tools: [TOOLS.mcp_list_tools, TOOLS.mcp_call] }).create({
