@@ -63,6 +63,15 @@ test('le plafond d\'étapes arrête la boucle', async () => {
   assert.match(closing && closing.type === 'text' ? closing.text : '', /étapes/);
 });
 
+test('le tableau suit la composition shadcn-admin, sans sidebar', () => {
+  const agent = mainAgent(() => {});
+  const text = agent.getMessages({ prompt: 'activité', files: [], incremental: false, datasets: '' }).map((message) => message.parts.map((part) => part.type === 'text' ? part.text : '').join('\n')).join('\n');
+  assert.match(text, /BoardStack/);
+  assert.match(text, /src\/components\/es\/board\.tsx/);
+  assert.match(text, /Sidebar/);
+  assert.match(text, /sans sa barre latérale/);
+});
+
 test('task refuse un agent inconnu et un appel hors du principal', async () => {
   const unknown = await Task.execute({
     agentName: 'main', toolbox: {} as Toolbox, signal: new AbortController().signal,

@@ -20,7 +20,10 @@ Ordre :
 4. shadcn_add seulement si un composant shadcn manque.
 5. test_backend, puis build. S'ils échouent, corrige et relance. Arrête-toi seulement après un build réussi.
 
-Bibliothèques du projet : React, shadcn/ui, graphiques via @/components/ui/chart, enveloppe @/components/es/app-shell. Pas d'autre kit.
+Bibliothèques du projet : React, shadcn/ui, graphiques via ChartContainer de @/components/ui/chart, enveloppe @/components/es/app-shell. Pas d'autre kit.
+
+Avant d'écrire la page, lis src/components/es/board.tsx et compose avec ces pièces : BoardStack, BoardHeader, MetricGrid (quatre MetricCard), BoardSplit (graphique en 4/7, liste en 3/7). C'est la composition de shadcn-admin, sans sa barre latérale.
+Interdit dans la page : Sidebar, SidebarTrigger, AppSidebar, menu latéral.
 N'invente aucune donnée. Pas de vocabulaire de platine. Les noms de biais ne s'affichent pas.
 Si l'interface existe déjà, tu ajoutes ou retires des composants. Tu ne réécris pas tout.`;
 
