@@ -75,7 +75,7 @@ function tokens(value: string): Set<string> {
   return new Set(value.toLowerCase().split(/[^a-z0-9]+/).filter((part) => part.length > 1));
 }
 
-function affinity(collection: string, tool: string, key: string): number {
+export function affinity(collection: string, tool: string, key: string): number {
   const flat = (value: string) => value.toLowerCase().replace(/[_-]/g, '');
   const bag = flat(`${tool} ${key}`);
   const name = flat(collection);

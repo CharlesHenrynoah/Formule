@@ -8,7 +8,7 @@ import { appendFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { compileTools, type AgentDef, type Contract } from '../../../../packages/app-mcp/src/core.mjs';
-import { ingestEmptyCollections } from './ingest.ts';
+import { emptyCollections, ingestEmptyCollections } from './ingest.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
 export const ROOT = resolve(here, '../../../..');
@@ -68,7 +68,12 @@ export async function ensureApp(appId: string, version?: number): Promise<Ensure
     }
   }
   const prompt = [p.body.title, ...versions.map((item) => item.prompt)].filter(Boolean).join('\n');
-  if (await ingestEmptyCollections(src, current, prompt, async (tool, args) => (await callHub(tool, args, false)).data)) refilled = true;
+  const screen = v.files?.['src/App.tsx'] ?? '';
+  const needsLive = emptyCollections(src, current, screen).length > 0;
+  const catalog = needsLive
+    ? (await externalTools().catch(() => [])).filter((tool) => !tool.write && !tool.id.startsWith('app-'))
+    : [];
+  if (await ingestEmptyCollections(src, current, prompt, async (tool, args) => (await callHub(tool, args, false)).data, { screen, tools: catalog })) refilled = true;
   if (refilled) {
     const ids = Object.values(current).flatMap((rows) => Array.isArray(rows) ? rows.map((r) => Number((r as { id?: string }).id) || 0) : []);
     current.__seq = Math.max(seq, ...ids, 0);
