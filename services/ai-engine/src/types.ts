@@ -39,7 +39,7 @@ export interface LLMProvider {
   /** Génère en streaming et renvoie le texte final. */
   stream(messages: ChatMessage[], opts: StreamOptions): Promise<string>;
   /** Un tour de tool calling (non streamé). */
-  chatWithTools(messages: ChatMessage[], tools: ToolDef[], opts: { hint: TaskHint; signal?: AbortSignal }): Promise<{ content: string; toolCalls: ToolCall[] }>;
+  chatWithTools(messages: ChatMessage[], tools: ToolDef[], opts: { hint: TaskHint; signal?: AbortSignal; maxTokens?: number }): Promise<{ content: string; toolCalls: ToolCall[] }>;
 }
 
 export type EngineEvent =

@@ -68,13 +68,13 @@ export class OpenAICompatibleProvider implements LLMProvider {
     return full;
   }
 
-  async chatWithTools(messages: ChatMessage[], tools: ToolDef[], opts: { hint: TaskHint; signal?: AbortSignal }) {
+  async chatWithTools(messages: ChatMessage[], tools: ToolDef[], opts: { hint: TaskHint; signal?: AbortSignal; maxTokens?: number }) {
     const body: Record<string, unknown> = {
       model: this.model,
       messages: messages.map(toWire),
       tools: tools.map((t) => ({ type: 'function', function: { name: t.name, description: t.description ?? '', parameters: t.parameters } })),
       tool_choice: 'auto',
-      [this.cfg.maxTokensField ?? 'max_tokens']: 2000,
+      [this.cfg.maxTokensField ?? 'max_tokens']: opts.maxTokens ?? 6000,
       ...this.cfg.extraBody,
     };
     const res = await fetch(`${this.cfg.baseUrl.replace(/\/$/, '')}/chat/completions`, {

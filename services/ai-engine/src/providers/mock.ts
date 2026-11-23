@@ -89,7 +89,7 @@ export class MockProvider implements LLMProvider {
     return text;
   }
 
-  async chatWithTools(messages: ChatMessage[], tools: ToolDef[], opts: { hint: TaskHint }) {
+  async chatWithTools(messages: ChatMessage[], tools: ToolDef[], opts: { hint: TaskHint; maxTokens?: number }) {
     await sleep(this.delayMs * 10);
     const already = messages.some((m) => m.role === 'tool');
     if (already) return { content: 'Données récupérées, je peux concevoir l\'app.', toolCalls: [] };

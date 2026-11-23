@@ -1,7 +1,8 @@
 /** Point d'entrée de l'agent : équipe réelle (Agents SDK + LLM compatible OpenAI) ou équipe scriptée (démo). */
 import type { McpClient } from '../mcp.ts';
 import { INCEPTION_BASE_URL, INCEPTION_DEFAULT_MODEL } from '../providers/index.ts';
-import { runCrew, type CrewConfig, type CrewInput } from './crew.ts';
+import { type CrewConfig, type CrewInput } from './crew.ts';
+import { runEngine } from './engine/run.ts';
 import { runScriptedCrew } from './scripted.ts';
 import { Workspace } from './workspace.ts';
 
@@ -21,7 +22,7 @@ export function agentBackend(env: NodeJS.ProcessEnv = process.env, providerName:
 }
 
 export async function runAgent(input: CrewInput, backend: AgentBackend, ctx: { mcp?: McpClient; emit: (e: Record<string, unknown>) => void; signal?: AbortSignal }) {
-  if (backend.kind === 'llm') return runCrew(input, backend.cfg, ctx);
+  if (backend.kind === 'llm') return runEngine(input, backend.cfg, ctx);
   if (backend.kind === 'scripted') return runScriptedCrew(input, ctx);
   throw new Error(backend.reason);
 }

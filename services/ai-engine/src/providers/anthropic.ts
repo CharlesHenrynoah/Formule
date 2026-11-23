@@ -45,11 +45,11 @@ export class AnthropicProvider implements LLMProvider {
     return full;
   }
 
-  async chatWithTools(messages: ChatMessage[], tools: ToolDef[], opts: { hint: TaskHint; signal?: AbortSignal }) {
+  async chatWithTools(messages: ChatMessage[], tools: ToolDef[], opts: { hint: TaskHint; signal?: AbortSignal; maxTokens?: number }) {
     const res = await fetch(`${this.baseUrl}/messages`, {
       method: 'POST', headers: this.headers(), signal: opts.signal,
       body: JSON.stringify({
-        model: this.model, max_tokens: 2000, ...this.split(messages),
+        model: this.model, max_tokens: opts.maxTokens ?? 6000, ...this.split(messages),
         tools: tools.map((t) => ({ name: t.name, description: t.description ?? '', input_schema: t.parameters })),
       }),
     });
