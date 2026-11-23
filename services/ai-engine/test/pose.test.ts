@@ -45,13 +45,20 @@ test('le routeur classe une demande qui n\'est pas un dépôt', () => {
   assert.equal(bills.kind, 'tableau');
   assert.equal(bills.collection, 'factures');
   assert.equal(bills.data, true);
-  assert.equal(poseRequest(page, 'Ajoute un formulaire de contact').changed, false);
+  const posedForm = poseRequest(page, 'Ajoute un formulaire de contact');
+  assert.equal(posedForm.changed, true);
+  assert.match(posedForm.code, /<form/);
+  assert.doesNotMatch(posedForm.code, /data_list/);
 });
 
 test('une courbe ne pose pas un tableau titré par la demande', () => {
   const prompt = 'Ajoute sous le tableau des releases une courbe des commits par semaine sur les 3 derniers mois.';
   const posed = poseRequest(page, prompt);
-  assert.equal(posed.changed, false);
+  assert.equal(posed.changed, true);
+  assert.match(posed.code, /LineChart/);
+  assert.match(posed.code, /collection: 'commits'/);
+  assert.doesNotMatch(posed.code, /<table/);
+  assert.doesNotMatch(posed.code, /Ajoute sous/);
   const junk = page.replace('</BoardStack>', `<AddedReleases />\n    </BoardStack>`) + `
 function AddedReleases() {
   return (
@@ -65,6 +72,27 @@ function AddedReleases() {
   assert.equal(dropped.changed, true);
   assert.doesNotMatch(dropped.code, /AddedReleases/);
   assert.doesNotMatch(dropped.code, /Ajoute sous le tableau/);
+});
+
+test('une courbe qui croise deux collections pose deux séries', () => {
+  const prompt = 'Ajoute une courbe des 3 derniers mois qui croise deux séries sur les mêmes semaines : le nombre de commits en bleu, et le nombre de pull requests fusionnées en menthe.';
+  const route = routeDemand(prompt);
+  assert.equal(route.kind, 'courbe');
+  assert.deepEqual(route.collections, ['commits', 'pullRequests']);
+  const posed = poseRequest(page, prompt);
+  assert.equal(posed.changed, true);
+  assert.match(posed.code, /collection: 'commits'/);
+  assert.match(posed.code, /collection: 'pullRequests'/);
+  assert.match(posed.code, /dataKey="commits"/);
+  assert.match(posed.code, /dataKey="pullRequests"/);
+  assert.match(posed.code, /var\(--chart-1\)/);
+  assert.match(posed.code, /var\(--chart-2\)/);
+  assert.match(posed.code, /mergedAt/);
+  assert.doesNotMatch(posed.code, /Ajoute une courbe/);
+  assert.equal(poseRequest(posed.code, prompt).changed, false);
+  const orders = poseRequest(page, 'Ajoute une courbe des commandes par semaine');
+  assert.match(orders.code, /collection: 'commandes'/);
+  assert.match(orders.code, /<AddedCommandes \/>\s*<\/BoardStack>/);
 });
 
 test('si la page est inchangée, le tableau est posé avant BoardStack', () => {

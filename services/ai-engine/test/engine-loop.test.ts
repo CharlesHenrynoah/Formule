@@ -113,7 +113,7 @@ test('une demande sur une page ouverte passe par edit_file', () => {
   const agent = mainAgent(() => {});
   const text = agent.getMessages({ prompt: 'ajoute un graphique', files: ['src/App.tsx'], incremental: true, datasets: '' }).map((message) => message.parts.map((part) => part.type === 'text' ? part.text : '').join('\n')).join('\n');
   assert.match(text, /edit_file/);
-  assert.match(text, /Data Engineer/);
+  assert.match(text, /routeur/);
   assert.match(text, /n'appelles pas task une seconde fois/);
   const withReport = agent.getMessages({ prompt: 'ajoute un tableau', files: ['src/App.tsx'], incremental: true, datasets: '', liaison: 'outil github__list_releases, champ tag_name' }).map((message) => message.parts.map((part) => part.type === 'text' ? part.text : '').join('\n')).join('\n');
   assert.match(withReport, /rapport_data/);

@@ -14,7 +14,7 @@ import type { AgentName } from './agents/types.ts';
 import { collectionsInScreen, readsForCollections, type SourceTool } from '../../app-agents/ingest.ts';
 import { runAgentLoop } from './loop.ts';
 import { bindCharts } from './bind-charts.ts';
-import { collectionForPrompt, dropIncomplete, liaisonMission, poseRequest, routeDemand } from './pose.ts';
+import { dropIncomplete, liaisonMission, poseRequest, routeDemand } from './pose.ts';
 import type { SpawnAgent } from './tools/types.ts';
 
 const MAIN_STEPS = 24;
@@ -94,12 +94,12 @@ export async function runEngine(input: CrewInput, cfg: CrewConfig, ctx: { mcp?: 
 
   if (incremental) {
     const route = routeDemand(input.prompt);
-    counted({ type: 'agent', kind: 'message', role: 'data', text: `Routeur : ${route.kind} « ${route.title} », collection ${route.collection}${route.data ? '' : ', sans lecture'}.` });
+    const subject = route.collections.length > 1 ? `collections ${route.collections.join(', ')}` : `collection ${route.collection}`;
+    counted({ type: 'agent', kind: 'message', role: 'data', text: `Routeur : ${route.kind} « ${route.title} », ${subject}${route.data ? '' : ', sans lecture'}.` });
     if (!route.data) {
       liaisonReport = `Routeur : ${route.kind} « ${route.title} ». Aucune collection à lire.`;
     } else {
-    const collection = route.collection;
-    let read: { tool: string; args: Record<string, unknown> } | undefined;
+    let reads: Array<{ tool: string; args: Record<string, unknown> }> = [];
     try {
       const listed = await tb.listMcpTools('data');
       const catalog: SourceTool[] = listed.filter((tool) => !tool.ecriture).map((tool) => ({
@@ -108,12 +108,12 @@ export async function runEngine(input: CrewInput, cfg: CrewConfig, ctx: { mcp?: 
         write: false,
         inputSchema: (tool.schema ?? {}) as SourceTool['inputSchema'],
       }));
-      read = readsForCollections([collection], `${input.prompt}\n${pageBefore.slice(0, 2500)}`, catalog)[0];
+      reads = readsForCollections(route.collections, `${input.prompt}\n${pageBefore.slice(0, 2500)}`, catalog).slice(0, 3);
     } catch { /* la mission reste sans outil imposé */ }
     try {
       await spawnAgent({
         agentName: 'router',
-        prompt: liaisonMission(input.prompt, read),
+        prompt: liaisonMission(input.prompt, reads),
         signal: ctx.signal ?? new AbortController().signal,
       });
     } catch (error) {
@@ -148,7 +148,7 @@ export async function runEngine(input: CrewInput, cfg: CrewConfig, ctx: { mcp?: 
   const sampled = seedFromSamples(
     ws.files.get('server/tools.ts') ?? '',
     tb.mcpSamples.map((sample) => ({ tool: sample.tool, args: sample.args, result: sample.full ?? sample.result })),
-    [...new Set([...collectionsInScreen(ws.files.get('src/App.tsx') ?? ''), collectionForPrompt(input.prompt)])],
+    [...new Set([...collectionsInScreen(ws.files.get('src/App.tsx') ?? ''), ...routeDemand(input.prompt).collections])],
   );
   const app: AppBundle = { contract, agent: agentDef, backend: 'server/tools.ts', backendOk: !!tb.lastBackendTest?.ok, title };
   if (Object.keys(sampled).length) app.seed = sampled;
