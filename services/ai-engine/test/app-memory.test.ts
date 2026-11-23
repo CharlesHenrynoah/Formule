@@ -1,5 +1,5 @@
 /** Mémoire persistante de la crew + mode incrémental + thème monochrome. */
-import { mirrorPaletteClasses } from '../src/agent/theme-guard.ts';
+import { achromeSource, mirrorPaletteClasses } from '../src/agent/theme-guard.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
@@ -120,11 +120,12 @@ test('prompts : spec delta, consignes monochrome', () => {
   assert.match(PRODUCT_OWNER, /fond blanc/);
 });
 
-test('thème des apps : couleurs inversées (fond blanc, éléments noirs) + inversion des apps anciennes', () => {
+test('thème des apps : noir dominant, séries grises', () => {
   const css = readFileSync(new URL('../agent-template/src/index.css', import.meta.url), 'utf8');
   const room = css.slice(css.indexOf('.control-room {'));
-  assert.match(room, /--background: oklch\(1 0 0\)/);
-  assert.match(room, /--primary: oklch\(0\.15 0 0\)/);
+  assert.match(room, /--background: oklch\(0\.13 0 0\)/);
+  assert.match(room, /--foreground: oklch\(0\.96 0 0\)/);
+  assert.match(room, /--chart-1: oklch\(0\.95 0 0\)/);
   assert.match(room, /--chart-8:/);
   assert.doesNotMatch(room, /--color-white/); // pas d'inversion pour les nouvelles apps
   assert.doesNotMatch(css, /data-es-legacy/); // pas d'inversion globale : elle casserait les composants plateforme clairs
@@ -135,6 +136,13 @@ test('thème des apps : couleurs inversées (fond blanc, éléments noirs) + inv
   assert.doesNotMatch(html, /class="dark"/);
   const shell = readFileSync(new URL('../agent-template/src/components/es/app-shell.tsx', import.meta.url), 'utf8');
   assert.doesNotMatch(shell, /(cyan|violet|fuchsia|sky)-\d{2,3}|text-(zinc|slate)-[1-3]00|border-white|'dark control-room/);
+});
+
+test('une série bleue devient un gris', () => {
+  const r = achromeSource(`<Area stroke="#38bdf8" className="text-blue-400" />`);
+  assert.equal(r.changed > 0, true);
+  assert.match(r.code, /text-neutral-400/);
+  assert.doesNotMatch(r.code, /#38bdf8|text-blue/);
 });
 
 test('garde-fou monochrome : classes arbitraires d\'interface en gris, données intactes', async () => {

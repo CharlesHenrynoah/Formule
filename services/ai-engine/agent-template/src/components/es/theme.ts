@@ -1,15 +1,13 @@
 /**
- * Thème centralisé des apps générées : COULEURS INVERSÉES — fond blanc, éléments noirs, gris clair ;
- * seules les DONNÉES ont des couleurs, sobres et assez soutenues pour un fond clair.
- * - Recharts / shadcn Charts : var(--chart-1) … var(--chart-8) (définies dans index.css).
- * - PixiJS / three.js : VIZ (entiers 0xRRGGBB) — mêmes teintes que --chart-1..8 ; canvas transparent sur fond blanc.
+ * Thème des apps générées : noir dominant, noir et blanc.
+ * Les séries sont des gris, du plus clair au plus sombre, lisibles sur le fond noir.
  */
-export const VIZ = [0x3f6fb0, 0x2f8f6f, 0xa8862a, 0x6e5aa8, 0xb5523f, 0x3d8a9c, 0x5a7d48, 0x5f6675] as const;
+export const VIZ = [0xf2f2f2, 0xb5b5b5, 0x8a8a8a, 0x666666, 0xd0d0d0, 0x9a9a9a, 0x555555, 0x3a3a3a] as const;
 export const VIZ_CSS = ['var(--chart-1)', 'var(--chart-2)', 'var(--chart-3)', 'var(--chart-4)', 'var(--chart-5)', 'var(--chart-6)', 'var(--chart-7)', 'var(--chart-8)'] as const;
 /** Couleur de donnée n°i (cyclique). */
 export const viz = (i: number) => VIZ[((i % VIZ.length) + VIZ.length) % VIZ.length];
 export const vizCss = (i: number) => VIZ_CSS[((i % VIZ_CSS.length) + VIZ_CSS.length) % VIZ_CSS.length];
-/** Interface (scènes) : fond, grille, texte — neutres pour fond clair. `ink` = trait noir. */
-export const UI = { bg: 0xffffff, panel: 0xf5f5f5, grid: 0xe5e5e5, line: 0xcfcfcf, text: 0x262626, muted: 0x737373, ink: 0x111111, white: 0x111111 } as const;
-/** Statuts : discrets, à n'utiliser qu'en petites pastilles. */
-export const STATUS = { ok: 0x2e9e6a, warn: 0xc08a1e, alert: 0xc0442e } as const;
+/** Interface (scènes) : fond noir, texte blanc. */
+export const UI = { bg: 0x111111, panel: 0x1c1c1c, grid: 0x2a2a2a, line: 0x3a3a3a, text: 0xf5f5f5, muted: 0x8a8a8a, ink: 0xf5f5f5, white: 0xf5f5f5 } as const;
+/** Statuts : gris, pastilles seulement. */
+export const STATUS = { ok: 0xcfcfcf, warn: 0x8a8a8a, alert: 0xf5f5f5 } as const;

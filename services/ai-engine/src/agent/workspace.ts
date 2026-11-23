@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { guardBackendSource } from './engine/backend/compile.ts';
 import { checkImports, formatImportProblems, missingUiModules, repairChartUsage, repairPanelCalls, repairReactHooks, repairRechartsImports, repairTableColumnShape, repairToastImports, retargetChartImports } from './imports-check.ts';
 import { smokeRender, type SmokeResult } from './smoke.ts';
-import { monochromeClasses } from './theme-guard.ts';
+import { achromeSource, monochromeClasses } from './theme-guard.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(here, '../../../..');
@@ -338,7 +338,8 @@ export class Workspace {
     for (const f of (await this.list('src')).filter((x) => /\.tsx$/.test(x) && !x.startsWith('src/components/'))) {
       const src = await readFile(join(this.dir, f), 'utf8').catch(() => '');
       const m = monochromeClasses(src);
-      if (m.changed) await this.write(f, m.code);
+      const ach = achromeSource(m.code);
+      if (m.changed || ach.changed) await this.write(f, ach.code);
     }
     // 0b. Imports réparables sans le modèle, puis primitives shadcn encore absentes.
     for (const f of (await this.list('src')).filter((x) => /\.tsx$/.test(x) && !x.startsWith('src/components/ui/') && !x.startsWith('src/components/es/'))) {

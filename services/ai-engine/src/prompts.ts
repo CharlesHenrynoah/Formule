@@ -1,3 +1,4 @@
+import { achromeSource } from './agent/theme-guard.ts';
 import type { RuntimeTool } from './types.ts';
 
 export const PLAN_SYSTEM = `Tu es l'architecte d'Everything Software. À partir d'une demande, tu écris un PLAN court (spécification) d'une mini-app web.
@@ -19,8 +20,8 @@ ${tools.map((t) => `- ${t.id}${t.write ? ' [écriture]' : ''} : ${t.description 
 export const CODE_RULES = `Règles de sortie :
 - Réponds UNIQUEMENT avec un fichier HTML complet et autonome, de <!doctype html> à </html>, sans texte autour ni balises Markdown.
 - CSS et JS inline. Bibliothèques externes autorisées seulement depuis unpkg.com, cdn.jsdelivr.net, cdnjs.cloudflare.com, cdn.tailwindcss.com ou esm.sh (React via CDN + Babel possible).
-- Interface en français, design moderne sombre, responsive, accessible.
-- GRAPHIQUE : l'hôte est un <canvas> avec une hauteur fixe (260px), jamais un div. new Chart reçoit ce canvas. Chaque série a une couleur lisible sur le panneau : #38bdf8, #fbbf24, #34d399, #a78bfa, dans cet ordre. Les axes sont #94a3b8, la grille au moins rgba(148,163,184,.35). Pas de trait de la couleur du fond. Pas de graphique sans points quand les lignes existent.
+- Interface en français, noir et blanc, noir dominant : fond #111111, texte #f5f5f5, cartes #1c1c1c. Responsive, accessible. Pas de bleu, de vert, de jaune.
+- GRAPHIQUE : l'hôte est un <canvas> avec une hauteur fixe (260px), jamais un div. new Chart reçoit ce canvas. Chaque série est un gris : #f5f5f5, #a3a3a3, #737373, #d4d4d4, dans cet ordre. Les axes sont #8a8a8a, la grille au moins rgba(255,255,255,.2). Pas de trait de la couleur du fond. Pas de graphique sans points quand les lignes existent.
 - Interdits : document.cookie, accès à window.top / window.parent (sauf via window.mcp), redirections, formulaires vers des sites externes, appels réseau vers des API tierces.
 - localStorage autorisé pour persister l'état (avec try/catch).`;
 
@@ -41,7 +42,7 @@ export function extractHtml(raw: string): string {
   if (start > 0) s = s.slice(start);
   const end = s.toLowerCase().lastIndexOf('</html>');
   if (end >= 0) s = s.slice(0, end + 7);
-  return repairChartHosts(s.trim());
+  return repairChartHosts(achromeSource(s.trim()).code);
 }
 
 /** Chart.js ne dessine pas dans un div : l'hôte des new Chart devient un canvas. */

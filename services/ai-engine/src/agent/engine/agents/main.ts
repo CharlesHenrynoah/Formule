@@ -25,6 +25,7 @@ ${registryBrief()}
 
 Bibliothèques du projet : React, shadcn/ui, graphiques via ChartContainer de @/components/ui/chart, enveloppe @/components/es/app-shell. Pas d'autre kit.
 Un graphique a une hauteur fixe : className "h-[260px] w-full". Le config nomme chaque série, color 'var(--chart-1)' puis 'var(--chart-2)', 'var(--chart-3)', 'var(--chart-4)'. Le stroke ou le fill est 'var(--color-CLE)' avec CLE égale à la clé du config. Les dataKey existent sur les lignes (label, opened, closed, count, author). Pas de Chart.js, pas de canvas nu, pas de CDN. Une série vide garde les axes.
+L'interface est noir et blanc, noir dominant : fond noir, texte blanc, cartes gris très sombre. Les séries sont ces gris-là. Pas de bleu, de vert, de jaune, ni de classe Tailwind colorée.
 
 Avant d'écrire la page, lis src/components/es/board.tsx et compose avec ces pièces : BoardStack, BoardHeader, MetricGrid (quatre MetricCard), BoardSplit (graphique en 4/7, liste en 3/7). C'est la composition de shadcn-admin, sans sa barre latérale.
 Interdit dans la page : Sidebar, SidebarTrigger, AppSidebar, menu latéral.

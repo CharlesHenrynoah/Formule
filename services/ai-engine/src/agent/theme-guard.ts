@@ -28,6 +28,31 @@ export function monochromeClasses(src: string, opts: { invert?: boolean } = {}):
 
 // Miroir des classes de palette nommées dans le code de l'app uniquement (les composants plateforme es/ sont déjà clairs) :
 // white ↔ black, nuance N → 1000 − N (50 ↔ 950, 300 ↔ 700…) — un texte emerald-300 lisible sur noir devient emerald-700 lisible sur blanc.
+const CHROMA = 'red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose';
+const hexGray = (hex: string) => {
+  const h = hex.length === 3 ? hex.split('').map((c) => c + c).join('') : hex.slice(0, 6);
+  const [r, g, b] = [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16));
+  if (Math.abs(r - g) + Math.abs(g - b) < 12) return `#${h}`;
+  const y = Math.round(0.2126 * r + 0.7152 * g + 0.0722 * b).toString(16).padStart(2, '0');
+  return `#${y}${y}${y}`;
+};
+
+/** Classes colorées et hex chromatiques deviennent des gris. Le noir et le blanc restent. */
+export function achromeSource(src: string): { code: string; changed: number } {
+  let changed = 0;
+  const classes = new RegExp(`((?:[a-z]+:)*(?:text|bg|border(?:-[trblxy])?|ring|fill|stroke|from|via|to)-)(${CHROMA})(-\\d{2,3})?(?=[/\\s'"\`}]|$)`, 'g');
+  let code = src.replace(classes, (full, pre: string, _pal: string, shade: string) => {
+    changed++;
+    return `${pre}neutral${shade ?? ''}`;
+  });
+  code = code.replace(/#([0-9a-fA-F]{6}|[0-9a-fA-F]{3})\b/g, (full, hex: string) => {
+    const next = hexGray(hex);
+    if (next.toLowerCase() !== `#${hex.length === 3 ? hex.split('').map((c) => c + c).join('') : hex}`.toLowerCase() && next.toLowerCase() !== full.toLowerCase()) changed++;
+    return next;
+  });
+  return { code, changed };
+}
+
 const PALETTES = 'white|black|slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose';
 export function mirrorPaletteClasses(code: string): { code: string; changed: number } {
   let changed = 0;
