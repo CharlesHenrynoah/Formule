@@ -47,6 +47,20 @@ export const SHADCN_COMPONENTS = [
 
 /** src/** (front), server/tools.ts (backend MCP de l'app), index.html. */
 const WRITABLE = /^(src\/(?!components\/ui\/)[\w\-/.]+\.(tsx|ts|css|json)|src\/components\/ui\/[\w-]+\.tsx|server\/tools\.ts|index\.html)$/;
+/** Retrouve un extrait. Un ancrage copié avec des numéros « 12| … » est réessayé sans ces numéros. */
+export function locateAnchor(text: string, needle: string): { index: number; length: number; ambiguous: boolean } {
+  const at = (value: string) => {
+    const first = text.indexOf(value);
+    if (first < 0) return { index: -1, length: value.length, ambiguous: false };
+    return { index: first, length: value.length, ambiguous: text.indexOf(value, first + 1) >= 0 };
+  };
+  const direct = at(needle);
+  if (direct.index >= 0 || direct.ambiguous) return direct;
+  const stripped = needle.split('\n').map((line) => line.replace(/^\s*\d+\|\s?/, '')).join('\n');
+  if (!stripped || stripped === needle) return direct;
+  return at(stripped);
+}
+
 const MAX_FILE = 200_000;
 const MAX_FILES = 60;
 
@@ -186,19 +200,19 @@ export class Workspace {
     let text = this.files.get(key) ?? await readFile(abs, 'utf8').catch(() => { throw new Error(`Fichier introuvable : ${rel} (utilise write_file pour le créer)`); });
     const before0 = text;
     const where = (needle: string) => {
-      const first = text.indexOf(needle);
-      if (first < 0) {
-        const probe = needle.trim().split('\n')[0].trim().slice(0, 40);
+      const found = locateAnchor(text, needle);
+      if (found.ambiguous) throw new Error(`Ancrage ambigu dans ${key} (plusieurs occurrences) : « ${needle.slice(0, 80)} » — ajoute du contexte pour le rendre unique.`);
+      if (found.index < 0) {
+        const probe = needle.trim().split('\n')[0].replace(/^\s*\d+\|\s?/, '').trim().slice(0, 40);
         const hits = probe ? text.split('\n').map((l, i) => (l.includes(probe) ? `${i + 1}: ${l.trim().slice(0, 120)}` : '')).filter(Boolean).slice(0, 5) : [];
-        throw new Error(`Ancrage introuvable dans ${key} : « ${needle.slice(0, 80)} »${hits.length ? `\nLignes proches :\n${hits.join('\n')}` : ''}\nRelis la zone avec read_file({path, from, to}) puis réessaie avec le texte EXACT.`);
+        throw new Error(`Ancrage introuvable dans ${key} : « ${needle.slice(0, 80)} »${hits.length ? `\nLignes proches :\n${hits.join('\n')}` : ''}\nRelis la zone avec read_file({path, from, to}) puis réessaie avec le texte EXACT, sans numéros de ligne.`);
       }
-      if (text.indexOf(needle, first + 1) >= 0) throw new Error(`Ancrage ambigu dans ${key} (plusieurs occurrences) : « ${needle.slice(0, 80)} » — ajoute du contexte pour le rendre unique.`);
-      return first;
+      return found.index;
     };
     for (const e of edits) {
-      if (typeof e.find === 'string' && e.find) { const i = where(e.find); text = text.slice(0, i) + String(e.replace ?? '') + text.slice(i + e.find.length); }
-      else if (typeof e.after === 'string' && e.after) { const i = where(e.after) + e.after.length; text = text.slice(0, i) + String(e.insert ?? '') + text.slice(i); }
-      else if (typeof e.before === 'string' && e.before) { const i = where(e.before); text = text.slice(0, i) + String(e.insert ?? '') + text.slice(i); }
+      if (typeof e.find === 'string' && e.find) { const hit = locateAnchor(text, e.find); if (hit.ambiguous || hit.index < 0) where(e.find); text = text.slice(0, hit.index) + String(e.replace ?? '') + text.slice(hit.index + hit.length); }
+      else if (typeof e.after === 'string' && e.after) { const hit = locateAnchor(text, e.after); if (hit.ambiguous || hit.index < 0) where(e.after); text = text.slice(0, hit.index + hit.length) + String(e.insert ?? '') + text.slice(hit.index + hit.length); }
+      else if (typeof e.before === 'string' && e.before) { const hit = locateAnchor(text, e.before); if (hit.ambiguous || hit.index < 0) where(e.before); text = text.slice(0, hit.index) + String(e.insert ?? '') + text.slice(hit.index); }
       else throw new Error('chaque édition doit avoir find+replace, after+insert ou before+insert');
     }
     const r = await this.write(key, text);
@@ -208,12 +222,12 @@ export class Workspace {
     return { ...r, edits: edits.length, changedLines: Math.max(a.length, b.length) - same - tail };
   }
 
-  /** Lecture d'une plage de lignes (1-indexées, incluses), numérotées. */
+  /** Lecture d'une plage de lignes (1-indexées, incluses). Le texte est brut, copiable dans edit_file. */
   async readRange(rel: string, from = 1, to = from + 199) {
     const abs = this.safe(rel);
     const lines = (await readFile(abs, 'utf8')).split('\n');
     const a = Math.max(1, Math.floor(from)), b = Math.min(lines.length, Math.max(a, Math.floor(to)));
-    return { path: rel, total: lines.length, from: a, to: b, text: lines.slice(a - 1, b).map((l, i) => `${a + i}| ${l}`).join('\n') };
+    return { path: rel, total: lines.length, from: a, to: b, text: lines.slice(a - 1, b).join('\n') };
   }
 
   /** Recherche (texte littéral, insensible à la casse) dans les fichiers de l'app (hors composants générés). */

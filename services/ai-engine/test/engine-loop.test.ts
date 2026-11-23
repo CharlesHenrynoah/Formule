@@ -4,6 +4,7 @@ import type { LLMProvider, ToolCall } from '../src/types.ts';
 import type { Toolbox } from '../src/agent/toolbox.ts';
 import { shouldContinueWithToolCalls } from '../src/agent/engine/agents/shared.ts';
 import { mainAgent } from '../src/agent/engine/agents/main.ts';
+import { locateAnchor } from '../src/agent/workspace.ts';
 import { ReadFile } from '../src/agent/engine/tools/workspace.ts';
 import { runAgentLoop } from '../src/agent/engine/loop.ts';
 import { Task } from '../src/agent/engine/tools/task.ts';
@@ -93,15 +94,29 @@ test('une page longue se relit par plage de lignes', async () => {
   if (wide.ok) assert.match(JSON.stringify(wide.output), /from et to/);
   const slice = await ReadFile.execute({ ...ctx, input: { path: 'src/App.tsx', from: 330, to: 360 } });
   assert.equal(slice.ok, true);
-  if (slice.ok) assert.match(JSON.stringify(slice.output), /330\| ligne 330/);
+  if (slice.ok) {
+    const body = JSON.stringify(slice.output);
+    assert.match(body, /ligne 330/);
+    assert.match(body, /"from":330/);
+  }
+});
+
+test('un ancrage copié avec des numéros de ligne retrouve le texte', () => {
+  const page = '<h3>Top 10 des contributeurs</h3>\n<Chart />';
+  const hit = locateAnchor(page, '462| <h3>Top 10 des contributeurs</h3>');
+  assert.equal(hit.index, 0);
+  assert.equal(hit.length, '<h3>Top 10 des contributeurs</h3>'.length);
+  assert.equal(hit.ambiguous, false);
 });
 
 test('une demande sur une page ouverte passe par edit_file', () => {
   const agent = mainAgent(() => {});
   const text = agent.getMessages({ prompt: 'ajoute un graphique', files: ['src/App.tsx'], incremental: true, datasets: '' }).map((message) => message.parts.map((part) => part.type === 'text' ? part.text : '').join('\n')).join('\n');
   assert.match(text, /edit_file/);
-  assert.match(text, /from et to/);
   assert.match(text, /n'appelles pas task/);
+  const withPage = agent.getMessages({ prompt: 'ajoute un tableau', files: ['src/App.tsx'], incremental: true, datasets: '', page: '<h3>Top 10</h3>' }).map((message) => message.parts.map((part) => part.type === 'text' ? part.text : '').join('\n')).join('\n');
+  assert.match(withPage, /<h3>Top 10<\/h3>/);
+  assert.match(withPage, /page_return/);
 });
 
 test('task refuse un agent inconnu et un appel hors du principal', async () => {

@@ -35,6 +35,8 @@ export type Opening = {
   files: string[];
   incremental: boolean;
   datasets: string;
+  /** Fin exacte de src/App.tsx, sans numéros de ligne, quand la page existe déjà. */
+  page?: string;
 };
 
 export interface Agent {

@@ -9,7 +9,7 @@ export const ReadFile: AgentTool = setupTool({
   readOnly: true,
   timeoutMs: 30_000,
   agents: ['main', 'liaison'],
-  description: () => 'Lit un fichier. Pour une page déjà longue, passe from et to (lignes) : une lecture sans plage ne montre que les bords.',
+  description: () => 'Lit un fichier. from et to (lignes) renvoient le texte exact, sans numéros : c\'est ce texte qui va dans edit_file.',
   parameters: { properties: { path: { type: 'string' }, from: { type: 'number' }, to: { type: 'number' } }, required: ['path'] },
   execute: async ({ agentName, toolbox, input }) => {
     try {
@@ -54,7 +54,7 @@ export const EditFile: AgentTool = setupTool({
   readOnly: false,
   timeoutMs: 30_000,
   agents: ['main'],
-  description: () => 'Remplace un extrait exact d\'un fichier. find doit être présent tel quel.',
+  description: () => 'Remplace un extrait exact. find est le texte du fichier, sans numéros de ligne.',
   parameters: { properties: { path: { type: 'string' }, find: { type: 'string' }, replace: { type: 'string' } }, required: ['path', 'find', 'replace'] },
   execute: async ({ toolbox, input }) => {
     try {

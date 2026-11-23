@@ -82,7 +82,10 @@ export async function runEngine(input: CrewInput, cfg: CrewConfig, ctx: { mcp?: 
 
   const result = await runAgentLoop({
     agent: agentsLive.main,
-    opening: agentsLive.main.getMessages({ prompt: input.prompt, files: [...ws.files.keys()], incremental, datasets }),
+    opening: agentsLive.main.getMessages({
+      prompt: input.prompt, files: [...ws.files.keys()], incremental, datasets,
+      page: incremental ? pageBefore.split('\n').slice(-160).join('\n').slice(-7000) : '',
+    }),
     llm, toolbox: tb, spawnAgent, signal: ctx.signal, maxStepCount: MAIN_STEPS,
     onText: (text) => counted({ type: 'agent', kind: 'message', role: 'dev', text: text.slice(0, 500) }),
   });

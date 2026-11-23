@@ -107,7 +107,9 @@ test('workspace : patch ciblé (find/replace, insertion, ancrage ambigu ou absen
   await assert.rejects(() => ws.edit('src/App.tsx', [{ find: 'const', replace: 'let' }]), /ambigu/);
   await assert.rejects(() => ws.edit('src/App.tsx', [{ find: 'const zz = 9;', replace: '' }]), /introuvable/);
   const rr = await ws.readRange('src/App.tsx', 2, 3);
-  assert.equal(rr.text, '2| const c = 4;\n3| const b = 3;');
+  assert.equal(rr.text, 'const c = 4;\nconst b = 3;');
+  assert.equal(rr.from, 2);
+  assert.equal(rr.to, 3);
   const hits = await ws.search('CONST C');
   assert.deepEqual(hits, ['src/App.tsx:2: const c = 4;']);
 });
