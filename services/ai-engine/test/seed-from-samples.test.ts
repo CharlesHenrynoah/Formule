@@ -43,3 +43,12 @@ export const tools = {
   assert.equal(seed.issues[0].state, 'open');
   assert.equal(seed.issues[0].repo, 'formule');
 });
+
+test('les issues arrivent dans data_list même si le backend ne nomme pas la collection', () => {
+  const seed = seedFromSamples(`export const tools = { total: { run: () => ({ total: 1, totalCount: 1 }) } };`, [
+    { tool: 'github__list_issues', result: { issues: [{ number: 4, title: 'Bug', state: 'OPEN' }] } },
+  ]);
+  assert.equal(seed.issues.length, 1);
+  assert.equal(seed.issues[0].id, '4');
+  assert.equal(seed.issues[0].state, 'open');
+});

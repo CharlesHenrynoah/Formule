@@ -145,7 +145,7 @@ test('outils de plateforme : es_set_source / es_get_source (provenance lue par d
   const { compileTools, loadBackend, testBackend } = await import('../src/core.mjs');
   const src = `export const tools = { get_kpis: { input: {}, run: (_a, db) => ({ source: db.getMeta('source') ?? null }) } };`;
   const b = loadBackend(await compileTools(src), {});
-  assert.deepEqual(b.tools.map((t) => t.name), ['get_kpis', 'es_set_source', 'es_get_source']);
+  assert.deepEqual(b.tools.map((t) => t.name), ['get_kpis', 'es_set_source', 'es_get_source', 'data_list', 'data_get']);
   assert.equal(b.tools.find((t) => t.name === 'es_set_source').safe, true);
   b.call('es_set_source', { source: { workflowId: 'wf', executionId: '882' } });
   assert.deepEqual(b.call('get_kpis', {}), { source: { workflowId: 'wf', executionId: '882' } });
@@ -153,4 +153,24 @@ test('outils de plateforme : es_set_source / es_get_source (provenance lue par d
   assert.deepEqual(b.data().__meta.source.executionId, '882');
   const t = await testBackend(src, { tools: [{ name: 'get_kpis', write: false }] });
   assert.deepEqual(t.tools, ['get_kpis']);
+});
+
+test('data_list et data_get lisent la collection sans la créer', async () => {
+  const { compileTools, loadBackend } = await import('../src/core.mjs');
+  const src = `export const tools = { get_kpis: { input: {}, run: (_a, db) => ({ total: db.count('issues') }) } };`;
+  const b = loadBackend(await compileTools(src), { issues: [{ id: '1', state: 'open', created_at: '2026-01-01' }, { id: '2', state: 'closed', created_at: '2026-01-02' }] });
+  const page = b.call('data_list', { collection: 'issues', limit: 1 });
+  assert.equal(page.items.length, 1);
+  assert.equal(page.total, 2);
+  assert.equal(page.totalCount, 2);
+  assert.equal(page.items[0].createdAt, '2026-01-01');
+  const empty = b.call('data_list', { collection: 'depots' });
+  assert.deepEqual(empty.items, []);
+  assert.equal(empty.total, 0);
+  assert.match(empty.note, /aucune ligne/);
+  assert.equal(b.data().depots, undefined);
+  const one = b.call('data_get', { collection: 'issues', id: '2' });
+  assert.equal(one.item.id, '2');
+  assert.equal(one.items[0].id, '2');
+  assert.equal(b.call('data_get', { collection: 'issues', id: 'absente' }).item, null);
 });

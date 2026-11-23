@@ -31,9 +31,8 @@ export const McpCall: AgentTool = setupTool({
     required: ['tool'],
   },
   execute: async ({ toolbox, input }) => {
-    const args = input.args && typeof input.args === 'object' ? input.args as Record<string, unknown> : {};
     try {
-      const sample = await toolbox.sampleMcp('data', String(input.tool ?? ''), args);
+      const sample = await toolbox.sampleMcp('data', String(input.tool ?? ''), input.args ?? {});
       return { ok: true, output: sample };
     } catch (e) { return { ok: false, error: (e as Error).message }; }
   },

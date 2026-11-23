@@ -27,6 +27,8 @@ export const KINDS = new Set(['read', 'simulate', 'store', 'action']);
 export const BUILTINS = [
   { name: 'es_set_source', description: "Plateforme : mémorise la provenance des données ingérées (workflow, exécution, nœud) — lue par get_kpis via db.getMeta('source')", input: { source: { type: 'object' } }, write: true, safe: true, kind: 'store' },
   { name: 'es_get_source', description: 'Plateforme : provenance des dernières données ingérées (workflow, exécution, date)', input: {}, write: false, safe: true, kind: 'read' },
+  { name: 'data_list', description: "Porte de lecture stable. Renvoie { items, totalCount, total } pour une collection, sans filtre qui vide la page.", input: { collection: { type: 'string', description: 'issues, pullRequests, commits, depots ou profil' }, limit: { type: 'integer', optional: true, description: '1 à 100, défaut 100' } }, write: false, safe: true, kind: 'read' },
+  { name: 'data_get', description: 'Porte de lecture stable. Une ligne par id, aussi présente dans items.', input: { collection: { type: 'string' }, id: { type: 'string' } }, write: false, safe: true, kind: 'read' },
 ];
 /** Le modèle écrit souvent `int`. Sans alias, le schéma retombe sur string et refuse le nombre 100. */
 const TYPE_ALIAS = {
@@ -48,6 +50,7 @@ var console = { log: function(){}, warn: function(){}, error: function(){} };
 var __data = {};
 function __clone(x) { return x === undefined ? null : JSON.parse(JSON.stringify(x)); }
 function __col(n) { n = String(n); if (!/^[A-Za-z][\\w-]{0,40}$/.test(n)) throw new Error('collection invalide : ' + n); if (!Array.isArray(__data[n])) __data[n] = []; return __data[n]; }
+function __peek(n) { n = String(n); if (!/^[A-Za-z][\\w-]{0,40}$/.test(n)) throw new Error('collection invalide : ' + n); var c = __data[n]; return Array.isArray(c) ? c : []; }
 function __match(x, f) { if (!f) return true; for (var k in f) { if (f[k] !== undefined && x[k] !== f[k]) return false; } return true; }
 var db = {
   list: function (n, filter) { return __clone(__col(n).filter(function (x) { return __match(x, filter); })); },
@@ -232,6 +235,20 @@ export function loadBackend(jsCode, initialData = {}, { timeoutMs = CALL_TIMEOUT
       const clean = checkArgs(t.inputSchema, args);
       if (t.builtin) {
         if (name === 'es_get_source') return JSON.parse(runIn(`JSON.stringify(db.getMeta('source'))`));
+        if (name === 'data_list' || name === 'data_get') {
+          const collection = String(clean.collection ?? '');
+          if (!/^[A-Za-z][\w-]{0,40}$/.test(collection)) throw new Error(`collection invalide : ${collection}`);
+          if (name === 'data_get') {
+            const row = JSON.parse(runIn(`JSON.stringify(__peek(${JSON.stringify(collection)}).find(function (y) { return String(y.id) === ${JSON.stringify(String(clean.id ?? ''))}; }) || null)`));
+            if (!row) return { item: null, items: [], totalCount: 0, total: 0 };
+            alignRow(row);
+            return exposeItems({ item: row, items: [row], totalCount: 1, total: 1 });
+          }
+          const cap = clean.limit == null ? 100 : Math.min(100, Math.max(1, Math.trunc(Number(clean.limit))));
+          const parsed = JSON.parse(runIn(`JSON.stringify((function () { var all = __peek(${JSON.stringify(collection)}); return { items: all.slice(0, ${cap}), totalCount: all.length, total: all.length }; })())`));
+          if (!parsed.total) parsed.note = 'aucune ligne dans cette collection';
+          return exposeItems(parsed);
+        }
         const src = clean.source && typeof clean.source === 'object' ? clean.source : {};
         if (JSON.stringify(src).length > 4000) throw new Error('source trop volumineuse');
         runIn(`db.setMeta('source', JSON.parse(${JSON.stringify(JSON.stringify(src))}))`);

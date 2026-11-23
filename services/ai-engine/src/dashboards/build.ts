@@ -41,7 +41,8 @@ export async function buildDashboard(
   input: { prompt: string; dashboardId?: string; spec?: DashboardSpec | null },
   ctx: Ctx,
 ) {
-  const tools = (await ctx.mcp?.listTools()) ?? [];
+  let tools: Awaited<ReturnType<McpClient['listTools']>> = [];
+  try { tools = (await ctx.mcp?.listTools()) ?? []; } catch { tools = []; }
   const reads = tools.filter((t) => !t.write);
   const current = input.spec && input.spec.charts?.length ? input.spec : null;
   const mode = dashMode(input.prompt, current);

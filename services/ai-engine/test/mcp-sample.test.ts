@@ -29,6 +29,13 @@ test('slimArgs : dump massif → ids + pagination seulement', () => {
   assert.ok(!args.payload || String(args.payload).length < 500);
 });
 
+test('prepareCallArgs : objet en chaîne, perPage nombre, state all retiré', () => {
+  const { args } = prepareCallArgs('{ "perPage": "20", "state": "all", "sort": "created" }', { properties: { perPage: { type: 'integer' } } });
+  assert.equal(args.perPage, 20);
+  assert.equal(args.sort, 'created');
+  assert.equal('state' in args, false);
+});
+
 test('prepareCallArgs : fusionne défauts et allège', () => {
   const schema = { properties: { per_page: { type: 'integer' }, q: { type: 'string' } } };
   const { args } = prepareCallArgs({ q: 'prs' }, schema);

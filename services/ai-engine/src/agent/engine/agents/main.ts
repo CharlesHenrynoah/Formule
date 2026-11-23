@@ -15,8 +15,8 @@ N'écris jamais le code dans le message. Le code passe par write_file ou edit_fi
 
 Ordre :
 1. task avec subagent_type "liaison" pour échantillonner les données. Toi, tu n'appelles pas le MCP.
-2. write_file server/tools.ts. Les outils lisent db.list ou db.get et renvoient { items, totalCount }. Les filtres (state, page, perPage, sort) sont optionnels. perPage est un integer.
-3. write_file src/App.tsx avec les composants déjà dans le projet. L'écran lit result.items. created_at et createdAt sont le même champ. Une fenêtre de temps qui ne contient aucune des lignes reçues ne met pas les cartes à 0.
+2. write_file server/tools.ts. Les collections s'appellent issues, pullRequests, commits, depots ou profil : le nom rapporté par la liaison, écrit tel quel dans db.list ou db.get. Les outils que tu ajoutes servent aux totaux et renvoient { total, totalCount }. Les filtres (state, page, perPage, sort) sont optionnels. perPage est un integer. Tu n'écris pas data_list ni data_get : la plateforme les fournit déjà.
+3. write_file src/App.tsx avec les composants déjà dans le projet. Chaque liste passe par window.app.call('data_list', { collection: 'NOM' }). Une ligne passe par data_get. L'écran lit result.items et result.total. created_at et createdAt sont le même champ. Une fenêtre de temps qui ne contient aucune des lignes reçues ne met pas les cartes à 0.
 4. shadcn_add seulement si un composant shadcn manque.
 5. test_backend, puis build. S'ils échouent, corrige et relance. Arrête-toi seulement après un build réussi.
 

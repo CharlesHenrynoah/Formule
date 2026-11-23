@@ -110,9 +110,13 @@ function stampScope(row: Record<string, unknown>, args: unknown) {
   if (row.owner == null && typeof scope.owner === 'string') row.owner = scope.owner;
 }
 
-/** Colections → lignes. state passe en minuscules pour que `=== "open"` voie les "OPEN" de GitHub. */
+const CANONICAL = ['issues', 'pullRequests', 'commits', 'depots', 'profil'];
+
+/** Colections → lignes. state passe en minuscules pour que `=== "open"` voie les "OPEN" de GitHub.
+ *  data_list lit ces noms même si tools.ts ne les a pas écrits : la porte de lecture reste stable. */
 export function seedFromSamples(toolsSource: string, samples: McpSample[]): Record<string, Array<Record<string, unknown>>> {
-  const collections = collectionsInBackend(toolsSource);
+  const fromBackend = collectionsInBackend(toolsSource);
+  const collections = [...new Set([...fromBackend, ...CANONICAL])];
   const seed: Record<string, Array<Record<string, unknown>>> = {};
   const seen = new Map<string, Set<string>>();
   for (const sample of samples) {
@@ -121,10 +125,11 @@ export function seedFromSamples(toolsSource: string, samples: McpSample[]): Reco
       let best = 0;
       for (const collection of collections) {
         const score = affinity(collection, sample.tool, group.key);
-        if (score > best) { target = collection; best = score; }
+        const prefer = score === best && score > 0 && CANONICAL.includes(collection) && !CANONICAL.includes(target);
+        if (score > best || prefer) { target = collection; best = score; }
       }
-      if (!target && collections.length === 1) target = collections[0];
-      if (!target || (best === 0 && collections.length !== 1)) continue;
+      if (!target && fromBackend.length === 1) target = fromBackend[0];
+      if (!target || (best === 0 && fromBackend.length !== 1)) continue;
       const rows = seed[target] ?? [];
       const ids = seen.get(target) ?? new Set<string>();
       for (const row of group.rows) {

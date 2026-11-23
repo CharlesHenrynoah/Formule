@@ -116,15 +116,30 @@ export function slimArgs(args: unknown, max = MCP_ARGS_HARD): { args: Record<str
   return { args: out, trimmed, bytes: jsonSize(out) };
 }
 
+function objectArgs(raw: unknown): Record<string, unknown> {
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) return { ...(raw as Record<string, unknown>) };
+  if (typeof raw === 'string' && raw.trim().startsWith('{')) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
+    } catch { /* le modèle a envoyé une chaîne qui n'est pas un objet */ }
+  }
+  return {};
+}
+
 /** Fusionne défauts schéma + args agent, puis allège + plafonne la pagination. */
 export function prepareCallArgs(raw: unknown, schema?: unknown, max = MCP_ARGS_HARD) {
   const defaults = defaultsFromSchema(schema);
-  const user = (raw && typeof raw === 'object' && !Array.isArray(raw)) ? raw as Record<string, unknown> : {};
+  const user = objectArgs(raw);
   // L'agent gagne sur les défauts, sauf champs de pagination absents → on complète pour rester léger.
   const merged: Record<string, unknown> = { ...defaults, ...user };
   for (const [k, v] of Object.entries(defaults)) {
     if (!(k in user) && PAGE_KEYS.test(k)) merged[k] = v;
   }
+  for (const [k, v] of Object.entries(merged)) {
+    if ((PAGE_KEYS.test(k) || PAGE_NUM.test(k)) && typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v))) merged[k] = Number(v);
+  }
+  if (typeof merged.state === 'string' && /^(all|any|both|\*|tous|toutes)$/i.test(merged.state.trim())) delete merged.state;
   return slimArgs(capPagination(merged, 20), max);
 }
 

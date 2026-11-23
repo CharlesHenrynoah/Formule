@@ -40,8 +40,11 @@ export class Toolbox {
   }
 
   async mcpTools(): Promise<RuntimeTool[]> {
-    if (!this.tools) this.tools = this.mcp ? await this.mcp.listTools() : [];
-    return this.tools;
+    if (this.tools && this.tools.length > 0) return this.tools;
+    if (!this.mcp) return [];
+    const listed = await this.mcp.listTools();
+    if (listed.length > 0) this.tools = listed;
+    return listed;
   }
 
   // ---- Data Engineer / Développeur : MCP en lecture seule ----

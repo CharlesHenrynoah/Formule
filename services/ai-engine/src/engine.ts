@@ -37,7 +37,10 @@ export async function generate(input: GenerateInput, ctx: Ctx) {
   const { provider, emit } = ctx;
   const iterating = !!input.previousCode;
   const diffusing = !!input.diffusing && provider.supportsDiffusion;
-  const runtimeTools = input.useTools === false ? [] : (await ctx.mcp?.listTools()) ?? [];
+  let runtimeTools: RuntimeTool[] = [];
+  if (input.useTools !== false && ctx.mcp) {
+    try { runtimeTools = await ctx.mcp.listTools(); } catch { runtimeTools = []; }
+  }
   emit({ type: 'meta', provider: provider.name, model: provider.model, diffusing, fallback: ctx.fallback, tools: runtimeTools.length });
 
   // 1) Outils MCP en lecture pendant la génération (tool calling)
