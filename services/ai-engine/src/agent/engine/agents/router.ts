@@ -10,7 +10,8 @@ La mission nomme déjà les collections et, souvent, chaque outil. mcp_list_tool
 Si la mission ne nomme pas d'outil, tu choisis l'outil en lecture dont le nom contient la collection. Tu ignores les outils de recherche qui ne portent pas cette collection.
 GitHub : perPage 20. Jamais state "all". Les arguments sont un objet, pas une chaîne.
 
-Rapport court : type d'élément, collection, outil, arguments, noms des champs observés. Pas de dump.`;
+Rapport court : type d'élément, collection, outil, arguments, noms des champs observés. Pas de dump.
+Si la demande veut la plus récente, la dernière, ou un tri par date, le rapport sépare deux rôles : le champ affiché (tag, name, title) et le champ date observé (publishedAt, published_at, date, createdAt). Un numéro de version n'est pas une date. 7.1.1 ne se trie pas. Tu l'écris dans le rapport.`;
 
 export function routerAgent(emit: (event: AgentEvent) => void): Agent {
   return setupAgent({ name: 'router', tools: [TOOLS.mcp_list_tools, TOOLS.mcp_call] }).create({

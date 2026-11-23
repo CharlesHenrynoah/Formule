@@ -100,6 +100,15 @@ test('une courbe qui croise deux collections pose deux séries', () => {
   assert.equal(again.changed, false);
 });
 
+test('une demande de la plus récente prévient le routeur', () => {
+  const mission = liaisonMission('Ajoute une carte « Dernière release ». Elle affiche le tag de la release la plus récente et sa date de publication.');
+  assert.match(mission, /plus récente/);
+  assert.match(mission, /champ date/);
+  assert.match(mission, /n'est pas une date/);
+  const other = liaisonMission('Ajoute une courbe des commits par semaine');
+  assert.doesNotMatch(other, /n'est pas une date/);
+});
+
 test('la plus récente se trie sur la date, pas sur le tag', () => {
   const bad = `const at = new Date(String(row.tag_name ?? row.name ?? row.createdAt ?? row.publishedAt ?? row.date ?? '')).getTime();`
   const fixed = repairDateSort(bad);
