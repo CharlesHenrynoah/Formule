@@ -34,6 +34,8 @@ test('une courbe sans helper, sur un autre projet, lit sa collection', () => {
   assert.equal(bound.changed, true);
   assert.match(bound.code, /for \(const row of orders\)/);
   assert.match(bound.code, /new Date\(String\(row\.date/);
+  assert.match(bound.code, /at \+= 7 \* 86400000/);
+  assert.match(bound.code, /buckets\.set\(wk, 0\)/);
 });
 
 test('un classement sans date n\'est pas rebranché', () => {

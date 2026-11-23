@@ -21,7 +21,7 @@ export const CODE_RULES = `Règles de sortie :
 - Réponds UNIQUEMENT avec un fichier HTML complet et autonome, de <!doctype html> à </html>, sans texte autour ni balises Markdown.
 - CSS et JS inline. Bibliothèques externes autorisées seulement depuis unpkg.com, cdn.jsdelivr.net, cdnjs.cloudflare.com, cdn.tailwindcss.com ou esm.sh (React via CDN + Babel possible).
 - Interface en français, noir et blanc, noir dominant : fond #111111, texte #f5f5f5, cartes #1c1c1c. Responsive, accessible. Pas de bleu, de vert, de jaune.
-- GRAPHIQUE : l'hôte est un <canvas> avec une hauteur fixe (260px), jamais un div. new Chart reçoit ce canvas. Chaque série, dans cet ordre : #6eacd7, #79bb9e, #d5ba82, #9f8fbe. Les axes sont #8a8a8a, la grille au moins rgba(255,255,255,.2). Pas de trait de la couleur du fond. Pas de graphique sans points quand les lignes existent.
+- GRAPHIQUE : l'hôte est un <canvas> avec une hauteur fixe (260px), jamais un div. new Chart reçoit ce canvas. Chaque série, dans cet ordre : #6eacd7 bleu, #79bb9e menthe, #d5ba82 sable, #9f8fbe mauve. Si la demande nomme une de ces couleurs, la série prend celle-là. Chaque semaine de la fenêtre est un point, à 0 quand il n'y a rien. Les axes sont #8a8a8a, la grille au moins rgba(255,255,255,.2). Pas de trait de la couleur du fond. Pas de graphique sans points quand les lignes existent.
 - Interdits : document.cookie, accès à window.top / window.parent (sauf via window.mcp), redirections, formulaires vers des sites externes, appels réseau vers des API tierces.
 - localStorage autorisé pour persister l'état (avec try/catch).`;
 
