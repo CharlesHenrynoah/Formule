@@ -100,13 +100,12 @@ test('une courbe qui croise deux collections pose deux séries', () => {
   assert.equal(again.changed, false);
 });
 
-test('une demande de la plus récente prévient le routeur', () => {
+test('toute mission demande le rôle de chaque champ', () => {
   const mission = liaisonMission('Ajoute une carte « Dernière release ». Elle affiche le tag de la release la plus récente et sa date de publication.');
-  assert.match(mission, /plus récente/);
-  assert.match(mission, /champ date/);
+  assert.match(mission, /rôle : date, libellé, nombre ou état/);
   assert.match(mission, /n'est pas une date/);
   const other = liaisonMission('Ajoute une courbe des commits par semaine');
-  assert.doesNotMatch(other, /n'est pas une date/);
+  assert.match(other, /n'est pas une date/);
 });
 
 test('la plus récente se trie sur la date, pas sur le tag', () => {
@@ -117,6 +116,10 @@ test('la plus récente se trie sur la date, pas sur le tag', () => {
   assert.doesNotMatch(fixed.code, /tag_name/);
   const good = `new Date(String(row.publishedAt ?? row.date ?? '')).getTime()`;
   assert.equal(repairDateSort(good).changed, false);
+  const fallback = repairDateSort(`new Date(String(row.publishedAt ?? row.tag_name ?? '')).getTime()`);
+  assert.doesNotMatch(fallback.code, /tag_name/);
+  const labelOnly = repairDateSort(`new Date(String(row.tag_name ?? row.name ?? '')).getTime()`);
+  assert.match(labelOnly.code, /Number\.NaN/);
 });
 
 test('si la page est inchangée, le tableau est posé avant BoardStack', () => {

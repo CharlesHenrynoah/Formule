@@ -100,10 +100,7 @@ export function liaisonMission(prompt: string, read?: ReadCall | ReadCall[]): st
   const call = reads.length
     ? `Les mcp_call sont exactement, dans cet ordre :\n${reads.map((item, index) => `${index + 1}. ${item.tool} avec les arguments ${JSON.stringify(item.args)}`).join('\n')}\nTu n'appelles aucun autre serveur. Chaque outil une fois.`
     : `Échantillonne l'outil en lecture dont le nom contient ${route.collection}. Tu n'appelles pas un outil de recherche de workflows.`;
-  const latest = /derni[eè]r|plus récent|plus recent/i.test(prompt)
-    ? `La demande veut la plus récente. Le rapport nomme le champ libellé et le champ date observé, séparément. Un tag ou une version n'est pas une date.\n`
-    : '';
-  return `Routeur : ${route.kind}, ${subject}, titre « ${route.title} ».\nDemande : ${prompt}\n${call}\n${latest}Rapport court : un outil, ses arguments et ses champs, pour chaque collection. N'invente aucun champ. Tu n'écris pas la page.`;
+  return `Routeur : ${route.kind}, ${subject}, titre « ${route.title} ».\nDemande : ${prompt}\n${call}\nPour chaque champ observé, donne son rôle : date, libellé, nombre ou état. Un tag, un nom ou une version n'est pas une date.\nRapport court : un outil, ses arguments et ses champs, pour chaque collection. N'invente aucun champ. Tu n'écris pas la page.`;
 }
 
 /** Retire un tableau dont le titre est la demande brute. */
@@ -371,12 +368,13 @@ function formFn(name: string, title: string): string {
 
 const DATE_FIELD = /date|created|published|updated|merged|closed/i;
 
-/** Une date se lit sur un champ date. Un tag ou un nom ne sert jamais à trier la plus récente. */
+/** Une date se lit sur un champ date. Un libellé ne devient jamais une date, quelle que soit la demande. */
 export function repairDateSort(source: string): { code: string; changed: boolean } {
   const code = source.replace(/new Date\(String\((row(?:\?\.\w+|\.\w+)?(?:\s*\?\?\s*row(?:\?\.\w+|\.\w+)?)*)(?:\s*\?\?\s*['"]{2})?\)\)/g, (full, chain: string) => {
     const parts = chain.split(/\s*\?\?\s*/);
     const dates = parts.filter((part) => DATE_FIELD.test(part));
-    if (dates.length === parts.length || !dates.length || dates[0] === parts[0]) return full;
+    if (dates.length === parts.length) return full;
+    if (!dates.length) return 'Number.NaN';
     const rank = (part: string) => /published/i.test(part) ? 0 : /\bdate\b/i.test(part) ? 1 : /created/i.test(part) ? 2 : 3;
     dates.sort((a, b) => rank(a) - rank(b));
     return `new Date(String(${dates.join(' ?? ')} ?? ''))`;
