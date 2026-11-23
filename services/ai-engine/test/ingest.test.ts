@@ -10,6 +10,14 @@ const source = `export const tools = {
 test('un dépôt nommé dans la demande est reconnu', () => {
   assert.deepEqual(repoInText('activité du dépôt facebook/react'), { owner: 'facebook', repo: 'react' });
   assert.equal(repoInText('aucune source'), null);
+  assert.deepEqual(repoInText("const REPOS = [\n  'facebook/react',\n  'facebook/react-native',\n];"), { owner: 'facebook', repo: 'react' });
+});
+
+test('un dépôt cité entre guillemets donne la lecture des commits', () => {
+  const reads = readsForCollections(['commits'], "Ajoute une carte « Dernier commit ».\nconst REPOS = ['facebook/react'];", []);
+  assert.equal(reads[0]?.tool, 'github__list_commits');
+  assert.equal(reads[0]?.args.owner, 'facebook');
+  assert.equal(reads[0]?.args.repo, 'react');
 });
 
 test('une collection vide est remplie depuis GitHub, une collection pleine reste', async () => {

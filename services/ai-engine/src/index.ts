@@ -53,7 +53,7 @@ app.post<{ Body: AgentBody }>('/generate', async (req, reply) => {
         prompt: req.body.prompt, useTools: req.body.useTools, datasets: req.body.datasets, appId: req.body.projectId, previousVersion: req.body.previousVersion, fullRebuild: req.body.fullRebuild, phase: req.body.phase, sourceBrief: req.body.sourceBrief,
         previous: req.body.previousFiles ? { files: req.body.previousFiles, components: req.body.previousComponents, spec: req.body.previousPlan, brief: req.body.previousBrief, contract: req.body.previousContract ?? null } : undefined,
       }, backend, { mcp, emit: s.emit as (e: Record<string, unknown>) => void, signal: s.signal });
-      s.emit({ type: 'code_done', code: r.code });
+      if (r.code) s.emit({ type: 'code_done', code: r.code });
       s.emit({ type: 'result', ...r, mode: 'agent', provider: choice.provider.name, model: choice.provider.model });
     } catch (e) {
       s.emit({ type: 'error', message: `Agent : ${(e as Error).message}` });

@@ -129,7 +129,7 @@ export async function runEngine(input: CrewInput, cfg: CrewConfig, ctx: { mcp?: 
         write: false,
         inputSchema: (tool.schema ?? {}) as SourceTool['inputSchema'],
       }));
-      reads = readsForCollections(route.collections, `${input.prompt}\n${pageBefore.slice(0, 2500)}`, catalog).slice(0, 3);
+      reads = readsForCollections(route.collections, `${input.prompt}\n${pageBefore}`, catalog).slice(0, 3);
     } catch { /* la mission reste sans outil imposé */ }
     try {
       await spawnAgent({

@@ -13,7 +13,7 @@ export type SourceTool = {
   inputSchema?: { required?: string[]; properties?: Record<string, unknown> };
 };
 
-const REPO = /(?:^|[\s(])([A-Za-z0-9][\w.-]{0,80})\/([A-Za-z0-9][\w.-]{0,80})/g;
+const REPO = /(?:^|[\s('"`])([A-Za-z0-9][\w.-]{0,80})\/([A-Za-z0-9][\w.-]{0,80})/g;
 
 export function repoInText(text: string): { owner: string; repo: string } | null {
   REPO.lastIndex = 0;

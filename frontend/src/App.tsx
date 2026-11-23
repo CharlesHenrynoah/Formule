@@ -73,6 +73,7 @@ export default function App() {
 
   const [running, setRunning] = useState(false);
   const [offer, setOffer] = useState<{ text: string; canBuild: boolean; prompt: string } | null>(null);
+  const [sourcing, setSourcing] = useState(false);
   const briefRef = useRef('');
   const [phases, setPhases] = useState<PhaseState[]>([]);
   const [plan, setPlan] = useState('');
@@ -513,12 +514,12 @@ export default function App() {
     emitPipe('running');
     const ac = new AbortController();
     abortRef.current = ac;
-    setRunning(true); setError(null); setValidation(null); setPhases([]); setAppError(null);
+    setRunning(true); setSourcing(phase === 'source'); setError(null); setValidation(null); setPhases([]); setAppError(null);
     setToolEvents((list) => list.filter((t) => t.source === 'exécution' && iterate));
     codeBuf.current = ''; planBuf.current = ''; setStreamCode(''); setPlan(''); setDiffStep(0); setElapsed(undefined);
     setPlanStreaming(true); setAgentEvents([]);
-    if (!iterate) { setPreviewCode(''); setBoard(null); setBoards([]); lastPreview.current = 0; }
-    else setBoard(null);
+    if (!iterate && phase !== 'source') { setPreviewCode(''); setBoard(null); setBoards([]); lastPreview.current = 0; }
+    else if (phase !== 'source') setBoard(null);
     let savedProject: string | null = iterate ? project?.id ?? null : null;
     let savedNumber: number | null = null;
     let hold = false;
@@ -539,13 +540,13 @@ export default function App() {
             if (now - lastPreview.current > 700) { lastPreview.current = now; setPreviewCode(codeBuf.current); }
             break;
           }
-          case 'code_snapshot': codeBuf.current = e.text; setDiffStep(e.step); scheduleFlush(); break;
-          case 'code_done': codeBuf.current = e.code; setStreamCode(e.code); setPreviewCode(e.code); setDraft(e.code); break;
+          case 'code_snapshot': if (e.text) { codeBuf.current = e.text; setDiffStep(e.step); scheduleFlush(); } break;
+          case 'code_done': if (!e.code) break; codeBuf.current = e.code; setStreamCode(e.code); setPreviewCode(e.code); setDraft(e.code); break;
           case 'validation': setValidation({ ok: e.ok, errors: e.errors, warnings: e.warnings, fixed: e.attempt > 1 }); break;
           case 'app_ready': toast.success(`Interface prête · ${e.tools?.length ?? 0} outils`); break;
           case 'app_warning': toast.warning(e.message); break;
           case 'saved': steps.forEach((x) => { if (x.ok === undefined) x.ok = true; }); steps.push({ label: `version v${e.number} enregistrée`, ok: true }); savedProject = e.projectId; savedNumber = e.number; if (!iterate) recordCreation(e.projectId, text); toast.success(`Version v${e.number} enregistrée`); break;
-          case 'done': setPhases((l) => l.map((p) => ({ ...p, status: 'done' }))); setElapsed(e.ms); setPreviewCode(e.code); setDraft(e.code); setFiles(e.files ?? null); setCodeFile(e.files?.['src/App.tsx'] ? 'src/App.tsx' : '__html'); break;
+          case 'done': setPhases((l) => l.map((p) => ({ ...p, status: 'done' }))); setElapsed(e.ms); if (e.code) { setPreviewCode(e.code); setDraft(e.code); } setFiles(e.files ?? null); setCodeFile(e.files?.['src/App.tsx'] ? 'src/App.tsx' : '__html'); break;
           case 'error': steps.push({ label: 'échec', ok: false, detail: String(e.message).slice(0, 160) }); setError(e.message); toast.error(e.message); setPhases((l) => l.map((p) => (p.status === 'running' ? { ...p, status: 'error' } : p))); break;
         }
       }, ac.signal);
@@ -566,6 +567,7 @@ export default function App() {
         } catch { bootingRef.current = false; }
       }
       setRunning(false);
+      if (phase !== 'source') setSourcing(false);
       refreshProjects();
       if (!iterate) { setPrompt(''); setDatasets([]); }
     }
@@ -673,7 +675,7 @@ export default function App() {
                 </div>
               </div>
             )}
-            {running && !board && !/<body/i.test(previewCode) && (
+            {running && !sourcing && !board && !/<body/i.test(previewCode) && (
               <div className="absolute inset-0 grid place-items-center bg-background text-sm text-muted-foreground">
                 <div className="text-center"><Loader2 className="mx-auto mb-3 size-6 animate-spin" />L'interface se construit…</div>
               </div>
@@ -707,7 +709,7 @@ export default function App() {
                 </SelectContent>
               </Select>
             ) : current ? <Badge variant="outline" className="font-mono">v{current.number}</Badge> : null}
-            events={agentEvents} showBuild={running} offer={offer} onOffer={(ok) => { const next = offer; setOffer(null); if (!next) return; if (!ok) { if (project) setChat(project.id, normalizeChat(loadChat(project.id)).map((m) => m.role === 'pipeline' && m.status === 'source' ? { ...m, status: 'rejected' } : m)); return; } void run(next.prompt, !!project, 'build'); }} buildTitle={running && board ? 'Construction du tableau' : project ? 'Mise à jour de l’interface' : 'Création de l’interface'}
+            events={agentEvents} showBuild={running} offer={offer} onOffer={(ok) => { const next = offer; setOffer(null); if (!next) return; if (!ok) { setSourcing(false); if (project) setChat(project.id, normalizeChat(loadChat(project.id)).map((m) => m.role === 'pipeline' && m.status === 'source' ? { ...m, status: 'rejected' } : m)); return; } void run(next.prompt, !!project, 'build'); }} buildTitle={running && board ? 'Construction du tableau' : project ? 'Mise à jour de l’interface' : 'Création de l’interface'}
             hint={chatEmptyReason({ hasProject: !!project, running, appError: null, capable: hasApp ? chatCapable : null })}
             commands={hasApp && !running ? chatShell.commands : []} voice={voiceState} confirm={hostedConfirm}
             mode={chatMode} onModeChange={setChatModeAndSync}

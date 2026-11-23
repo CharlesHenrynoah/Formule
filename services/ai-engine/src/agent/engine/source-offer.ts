@@ -68,7 +68,7 @@ export async function collectSource(prompt: string, page: string, list: () => Pr
       write: false,
       inputSchema: (tool.schema ?? tool.inputSchema) as SourceTool['inputSchema'],
     }));
-    reads = readsForCollections(route.collections, `${prompt}\n${page.slice(0, 2500)}`, catalog).slice(0, 3);
+    reads = readsForCollections(route.collections, `${prompt}\n${page}`, catalog).slice(0, 3);
   } catch (error) {
     return offerFromReads(prompt, [{ tool: 'mcp', args: {}, ok: false, error: (error as Error).message, rows: [] }]);
   }
