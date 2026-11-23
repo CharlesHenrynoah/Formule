@@ -122,7 +122,7 @@ export const Build: AgentTool = setupTool({
   readOnly: false,
   timeoutMs: 120_000,
   agents: ['main'],
-  description: () => 'Construit l\'interface (vite). À relancer après chaque correction jusqu\'au succès.',
+  description: () => 'Construit l\'interface (vite), une fois, après un backend conforme.',
   parameters: { properties: {}, required: [] },
   execute: async ({ toolbox }) => {
     try {

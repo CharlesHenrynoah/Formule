@@ -72,7 +72,8 @@ export async function runEngine(input: CrewInput, cfg: CrewConfig, ctx: { mcp?: 
     const shell = ensureAppShell(page);
     if (shell.changed) await ws.write('src/App.tsx', shell.code);
     if (!ws.files.has('server/tools.ts')) throw new Error("Le backend n'a pas été écrit (server/tools.ts)");
-    if (!tb.lastBackendTest) await tb.testBackend('dev', null);
+    await tb.testBackend('dev', null);
+    if (!tb.lastBackendTest?.ok) throw new Error(`Backend non conforme : ${(tb.lastBackendTest?.problems ?? []).slice(0, 3).join(' ; ') || '0 outil'}`);
     if (shell.changed || !tb.lastBuild?.ok) await tb.build();
     if (!tb.lastBuild?.ok || !tb.lastBuild.html) throw new Error(`Build final en échec : ${tb.lastBuild?.output.slice(-600) ?? 'aucun build'}`);
   };

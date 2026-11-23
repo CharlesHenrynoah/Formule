@@ -10,6 +10,7 @@ import { cp, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promi
 import { dirname, join, normalize, relative, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { guardBackendSource } from './engine/backend/compile.ts';
 import { checkImports, formatImportProblems, missingUiModules, repairChartUsage, repairPanelCalls, repairReactHooks, repairRechartsImports, repairTableColumnShape, repairToastImports, retargetChartImports } from './imports-check.ts';
 import { smokeRender, type SmokeResult } from './smoke.ts';
 import { monochromeClasses } from './theme-guard.ts';
@@ -162,6 +163,10 @@ export class Workspace {
     if (content.length > MAX_FILE) throw new Error(`Fichier trop gros (${content.length} > ${MAX_FILE})`);
     const abs = this.safe(rel, true);
     const key = relative(this.dir, abs);
+    if (key === 'server/tools.ts') {
+      const problems = guardBackendSource(content);
+      if (problems.length) throw new Error(problems.join(' ; '));
+    }
     if (!this.files.has(key) && this.files.size >= MAX_FILES) throw new Error('Trop de fichiers');
     await mkdir(dirname(abs), { recursive: true });
     await rm(abs, { force: true });                // jamais d'écriture dans un fichier lié en dur au template

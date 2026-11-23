@@ -1,6 +1,7 @@
 import type { AgentTool } from './types.ts';
 import { McpCall, McpListTools } from './mcp.ts';
 import { Task } from './task.ts';
+import { CompileBackend } from './compile-backend.ts';
 import { Build, EditFile, Glob, Grep, ReadFile, ShadcnAdd, TestBackend, WriteFile } from './workspace.ts';
 
 /** Registre unique. Chaque agent n'en reçoit qu'un sous-ensemble. */
@@ -11,6 +12,7 @@ export const TOOLS = {
   grep: Grep,
   glob: Glob,
   shadcn_add: ShadcnAdd,
+  compile_backend: CompileBackend,
   test_backend: TestBackend,
   build: Build,
   task: Task,
