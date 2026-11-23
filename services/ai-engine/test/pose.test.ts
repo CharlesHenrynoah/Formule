@@ -93,6 +93,11 @@ test('une courbe qui croise deux collections pose deux séries', () => {
   const orders = poseRequest(page, 'Ajoute une courbe des commandes par semaine');
   assert.match(orders.code, /collection: 'commandes'/);
   assert.match(orders.code, /<AddedCommandes \/>\s*<\/BoardStack>/);
+  const releases = poseRequest(page, 'Ajoute une courbe des releases publiées par semaine sur les 3 derniers mois. Une seule série, en sable.');
+  assert.match(releases.code, /var\(--chart-3\)/);
+  assert.match(releases.code, /at \+= 7 \* 86400000/);
+  const again = poseRequest(releases.code, 'Ajoute une courbe des releases publiées par semaine sur les 3 derniers mois. Une seule série, en sable.');
+  assert.equal(again.changed, false);
 });
 
 test('si la page est inchangée, le tableau est posé avant BoardStack', () => {

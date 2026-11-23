@@ -122,6 +122,17 @@ function componentName(collection: string): string {
   return `Added${stem.charAt(0).toUpperCase()}${stem.slice(1)}`;
 }
 
+const SERIES_COLORS: Array<[RegExp, string]> = [[/bleu/i, '1'], [/menthe/i, '2'], [/sable/i, '3'], [/mauve/i, '4']];
+
+function seriesColor(prompt: string, collection: string, index: number): string {
+  const needle = collection === 'pullRequests' ? 'pull|fusion' : collection;
+  const at = prompt.search(new RegExp(needle, 'i'));
+  const around = at >= 0 ? prompt.slice(at, at + 120) : '';
+  for (const [pattern, color] of SERIES_COLORS) if (around && pattern.test(around)) return color;
+  if (index === 0) for (const [pattern, color] of SERIES_COLORS) if (pattern.test(prompt)) return color;
+  return String((index % 4) + 1);
+}
+
 function seriesKey(collection: string): string {
   const stem = collection.replace(/[^A-Za-z0-9]/g, '');
   const key = stem ? stem.charAt(0).toLowerCase() + stem.slice(1) : 'serie';
@@ -144,17 +155,38 @@ function anchorOf(source: string): string {
   return '';
 }
 
+function replaceFunction(source: string, name: string, fn: string): string {
+  const start = source.indexOf(`function ${name}(`);
+  if (start < 0) return source;
+  const open = source.indexOf('{', start);
+  let depth = 0;
+  for (let i = open; i < source.length; i++) {
+    if (source[i] === '{') depth += 1;
+    else if (source[i] === '}') {
+      depth -= 1;
+      if (depth === 0) {
+        const end = source.indexOf('\n', i);
+        return `${source.slice(0, start)}${fn}\n${source.slice(end + 1)}`;
+      }
+    }
+  }
+  return source;
+}
+
 /** Insère le composant dans le return et ses imports. Sans ancre, la page reste inchangée. */
 function mount(source: string, name: string, fn: string, modules: Array<[string, string[]]>): { code: string; changed: boolean } {
   const anchor = anchorOf(source);
-  if (!anchor || source.includes(`<${name}`)) return { code: source, changed: false };
-  let code = source.replace(anchor, `<${name} />\n    ${anchor}`);
-  if (!source.includes(`function ${name}(`)) {
+  if (!anchor) return { code: source, changed: false };
+  const present = source.includes(`function ${name}(`);
+  const stale = present && fn.includes('at += 7 * 86400000') && !source.includes('at += 7 * 86400000');
+  if (source.includes(`<${name}`) && !stale) return { code: source, changed: false };
+  let code = source.includes(`<${name}`) ? source : source.replace(anchor, `<${name} />\n    ${anchor}`);
+  if (!present) {
     for (const [module, names] of modules) code = ensureImport(code, module, names);
     const at = code.search(/export default function/);
     code = at >= 0 ? `${code.slice(0, at)}${fn}\n${code.slice(at)}` : `${fn}\n${code}`;
-  }
-  return { code, changed: true };
+  } else if (stale) code = replaceFunction(code, name, fn);
+  return { code, changed: code !== source };
 }
 
 const HOOKS: Array<[string, string[]]> = [['react', ['useState', 'useEffect']]];
@@ -238,7 +270,7 @@ function chartFn(name: string, collections: string[], title: string, prompt: str
 `;
   }
   const keys = collections.map(seriesKey);
-  const config = keys.map((key, index) => `${key}: { label: '${labelOf(collections[index] ?? key)}', color: 'var(--chart-${(index % 4) + 1})' }`).join(', ');
+  const config = keys.map((key, index) => `${key}: { label: '${labelOf(collections[index] ?? key)}', color: 'var(--chart-${seriesColor(prompt, collections[index] ?? key, index)})' }`).join(', ');
   const lines = keys.map((key) => `<Line dataKey="${key}" type="monotone" stroke="var(--color-${key})" strokeWidth={2} dot={false} />`).join('\n          ');
   const loads = collections.map((collection, index) => {
     const merged = collection === 'pullRequests' && /fusionn|merg/i.test(prompt) ? `if (!(row.mergedAt || row.merged_at || row.merged === true)) continue;` : '';
@@ -273,6 +305,10 @@ function chartFn(name: string, collections: string[], title: string, prompt: str
     Promise.all([
       ${loads}
     ]).then(() => {
+      for (let at = cutoff; at <= Date.now(); at += 7 * 86400000) {
+        const wk = addedWeek(at);
+        if (!buckets.has(wk)) buckets.set(wk, { label: wk${keys.map((key) => `, ${key}: 0`).join('')} });
+      }
       if (!stop) setRows([...buckets.values()].sort((a, b) => a.label.localeCompare(b.label)).slice(-13));
     }).catch(() => {});
     return () => { stop = true; };
@@ -335,9 +371,11 @@ export function poseRequest(source: string, prompt: string): { code: string; cha
   const route = routeDemand(prompt);
   if (route.kind === 'filtre' || route.kind === 'action') return { code: source, changed: false };
   if (!route.data && route.kind !== 'formulaire') return { code: source, changed: false };
-  if (shown(source, route.title)) return { code: source, changed: false };
   const name = componentName(route.collections.join('') || route.collection);
-  if (route.kind === 'courbe') return mount(source, name, chartFn(name, route.collections, route.title, prompt), [...HOOKS, ...CHARTS]);
+  const fn = route.kind === 'courbe' ? chartFn(name, route.collections, route.title, prompt) : '';
+  const stale = fn.includes('at += 7 * 86400000') && source.includes(`function ${name}(`) && !source.includes('at += 7 * 86400000');
+  if (shown(source, route.title) && !stale) return { code: source, changed: false };
+  if (route.kind === 'courbe') return mount(source, name, fn, [...HOOKS, ...CHARTS]);
   if (route.kind === 'tableau') return mount(source, name, tableFn(name, route.collection, route.title), HOOKS);
   if (route.kind === 'formulaire') return mount(source, name, formFn(name, route.title), [['react', ['useState']]]);
   if (route.data) return mount(source, name, cardFn(name, route.collection, route.title), HOOKS);
