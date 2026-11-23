@@ -42,9 +42,26 @@ export function collectionsInScreen(screen: string): string[] {
   return [...names];
 }
 
+const DATE_KEYS = ['date', 'createdAt', 'created_at', 'publishedAt', 'published_at', 'updatedAt', 'mergedAt'];
+
+export function rowHasDate(row: unknown): boolean {
+  if (!row || typeof row !== 'object') return false;
+  const record = row as Record<string, unknown>;
+  return DATE_KEYS.some((key) => typeof record[key] === 'string');
+}
+
 export function emptyCollections(source: string, db: Record<string, unknown>, screen = ''): string[] {
   const names = new Set([...collectionsInBackend(source), ...collectionsInScreen(screen)]);
   return [...names].filter((name) => !Array.isArray(db[name]) || (db[name] as unknown[]).length === 0);
+}
+
+/** Lignes déjà là, mais sans aucune date : un graphique par semaine ne peut rien tracer. */
+export function datelessCollections(source: string, db: Record<string, unknown>, screen = ''): string[] {
+  const names = new Set([...collectionsInBackend(source), ...collectionsInScreen(screen)]);
+  return [...names].filter((name) => {
+    const rows = db[name];
+    return Array.isArray(rows) && rows.length > 0 && rows.every((row) => !rowHasDate(row));
+  });
 }
 
 function githubFamily(collection: string): 'issues' | 'pulls' | 'commits' | null {
@@ -108,22 +125,25 @@ export async function ingestEmptyCollections(
   call: (tool: string, args: Record<string, unknown>) => Promise<unknown>,
   catalog?: { tools?: SourceTool[]; screen?: string },
 ): Promise<boolean> {
-  const missing = emptyCollections(source, db, catalog?.screen ?? '');
-  if (!missing.length) return false;
+  const screen = catalog?.screen ?? '';
+  const missing = emptyCollections(source, db, screen);
+  const stale = datelessCollections(source, db, screen);
+  const targets = [...new Set([...missing, ...stale])];
+  if (!targets.length) return false;
   const samples: McpSample[] = [];
-  for (const read of readsForCollections(missing, prompt, catalog?.tools ?? [])) {
+  for (const read of readsForCollections(targets, prompt, catalog?.tools ?? [])) {
     try {
       const result = await call(read.tool, read.args);
       if (result != null) samples.push({ tool: read.tool, args: read.args, result });
     } catch { /* une lecture en échec laisse les autres continuer */ }
   }
   if (!samples.length) return false;
-  const seeded = seedFromSamples(source, samples, missing);
+  const seeded = seedFromSamples(source, samples, targets);
   let filled = false;
   for (const [name, rows] of Object.entries(seeded)) {
-    if (!missing.includes(name) || !rows.length) continue;
-    db[name] = rows;
-    filled = true;
+    if (!rows.length) continue;
+    if (missing.includes(name)) { db[name] = rows; filled = true; continue; }
+    if (stale.includes(name) && rows.some(rowHasDate)) { db[name] = rows; filled = true; }
   }
   return filled;
 }

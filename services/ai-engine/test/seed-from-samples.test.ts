@@ -56,6 +56,16 @@ test('pull_requests et pullRequests reçoivent les mêmes lignes', () => {
   assert.equal(seed.pullRequests[0].author, 'ada');
 });
 
+test('un commit garde la date et le message nichés dans commit', () => {
+  const seed = seedFromSamples(`export const tools = { a: { run: (_a, db) => db.list('commits') } };`, [
+    { tool: 'github__list_commits', args: { owner: 'facebook', repo: 'react' }, result: [{ sha: 'abc', author: { login: 'ada' }, commit: { message: 'Fix le graphique', author: { name: 'Ada', date: '2026-11-23T14:31:37Z' } } }] },
+  ]);
+  assert.equal(seed.commits[0].author, 'ada');
+  assert.equal(seed.commits[0].message, 'Fix le graphique');
+  assert.equal(seed.commits[0].date, '2026-11-23T14:31:37Z');
+  assert.equal(seed.commits[0].createdAt, '2026-11-23T14:31:37Z');
+});
+
 test('les issues arrivent dans data_list même si le backend ne nomme pas la collection', () => {
   const seed = seedFromSamples(`export const tools = { total: { run: () => ({ total: 1, totalCount: 1 }) } };`, [
     { tool: 'github__list_issues', result: { issues: [{ number: 4, title: 'Bug', state: 'OPEN' }] } },

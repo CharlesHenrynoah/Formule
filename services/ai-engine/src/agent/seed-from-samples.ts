@@ -12,6 +12,15 @@ export function collectionsInBackend(src: string): string[] {
   return [...names];
 }
 
+function nestedDate(value: Record<string, unknown>): string | null {
+  if (typeof value.date === 'string') return value.date;
+  for (const key of ['author', 'committer']) {
+    const child = value[key];
+    if (child && typeof child === 'object' && typeof (child as { date?: unknown }).date === 'string') return (child as { date: string }).date;
+  }
+  return null;
+}
+
 function asRow(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const raw = value as Record<string, unknown>;
@@ -31,8 +40,14 @@ function asRow(value: unknown): Record<string, unknown> | null {
       if (names.length) row[key] = names.slice(0, 8);
     }     else if (typeof field === 'object') {
       const nested = field as Record<string, unknown>;
+      if (key === 'commit') {
+        const dated = nestedDate(nested);
+        const message = typeof nested.message === 'string' ? nested.message : null;
+        if (dated && row.date == null) row.date = dated;
+        if (message && row.message == null) row.message = message.length > 180 ? message.slice(0, 180) : message;
+      }
       if (typeof nested.login === 'string') row[key] = { login: nested.login };
-      else if (typeof nested.name === 'string') row[key] = nested.name;
+      else if (typeof nested.name === 'string' && key !== 'commit') row[key] = nested.name;
     }
   }
   if (typeof row.state === 'string') row.state = row.state.toLowerCase();
@@ -41,6 +56,7 @@ function asRow(value: unknown): Record<string, unknown> | null {
   if (typeof row.owner === 'string' && typeof row.repo === 'string' && !row.repo.includes('/')) row.repository = row.repository ?? `${row.owner}/${row.repo}`;
   if ((row.merged_at || row.mergedAt) && (row.state == null || row.state === 'closed')) row.state = 'merged';
   if (row.id == null && row.number != null) row.id = String(row.number);
+  if (typeof row.date === 'string' && row.createdAt == null) { row.createdAt = row.date; row.created_at = row.date; }
   for (const [snake, camel] of [['created_at', 'createdAt'], ['updated_at', 'updatedAt'], ['merged_at', 'mergedAt'], ['closed_at', 'closedAt'], ['published_at', 'publishedAt'], ['tag_name', 'tagName']] as const) {
     if (row[camel] == null && typeof row[snake] === 'string') row[camel] = row[snake];
     if (row[snake] == null && typeof row[camel] === 'string') row[snake] = row[camel];

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { collectionsInScreen, ingestEmptyCollections, readsForCollections, repoInText, type SourceTool } from '../src/app-agents/ingest.ts';
+import { collectionsInScreen, datelessCollections, ingestEmptyCollections, readsForCollections, repoInText, type SourceTool } from '../src/app-agents/ingest.ts';
 
 const source = `export const tools = {
   lire: { run: (_a, db) => __rows(db, "issues", {}, {}) },
@@ -60,6 +60,23 @@ test('les releases lues par l\'écran arrivent avec version, date, auteur et pul
   assert.equal(row.publishedAt, '2026-10-14T17:06:15Z');
   assert.equal(row.author, 'eps1lon');
   assert.equal(row.prCount, 1);
+  assert.equal((db.issues as unknown[]).length, 1);
+});
+
+test('des commits sans date sont rechargés, une collection datée reste', async () => {
+  const db: Record<string, unknown> = {
+    commits: [{ sha: 'ancien', author: 'ada' }],
+    issues: [{ id: '1', createdAt: '2026-11-01T00:00:00Z' }],
+  };
+  const screen = `app.call('data_list', { collection: 'commits' })`;
+  const tool: SourceTool = { id: 'github__list_commits', name: 'list_commits', write: false, inputSchema: { required: ['owner', 'repo'], properties: { perPage: {} } } };
+  assert.deepEqual(datelessCollections(source, db, screen), ['commits']);
+  const filled = await ingestEmptyCollections(source, db, 'facebook/react', async () => ([
+    { sha: 'abc', author: { login: 'ada' }, commit: { message: 'Fix', author: { name: 'Ada', date: '2026-11-23T14:31:37Z' } } },
+  ]), { tools: [tool], screen });
+  assert.equal(filled, true);
+  const row = (db.commits as Array<Record<string, unknown>>)[0];
+  assert.equal(row.date, '2026-11-23T14:31:37Z');
   assert.equal((db.issues as unknown[]).length, 1);
 });
 

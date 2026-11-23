@@ -13,6 +13,7 @@ import { textOf } from './agents/shared.ts';
 import type { AgentName } from './agents/types.ts';
 import { collectionsInScreen } from '../../app-agents/ingest.ts';
 import { runAgentLoop } from './loop.ts';
+import { bindCharts } from './bind-charts.ts';
 import { collectionForPrompt, poseRequest } from './pose.ts';
 import type { SpawnAgent } from './tools/types.ts';
 
@@ -77,12 +78,15 @@ export async function runEngine(input: CrewInput, cfg: CrewConfig, ctx: { mcp?: 
     if (!ws.files.has('server/tools.ts')) throw new Error("Le backend n'a pas été écrit (server/tools.ts)");
     await tb.testBackend('dev', null);
     if (!tb.lastBackendTest?.ok) throw new Error(`Backend non conforme : ${(tb.lastBackendTest?.problems ?? []).slice(0, 3).join(' ; ') || '0 outil'}`);
+    let patched = shell.changed;
     if (incremental && (ws.files.get('src/App.tsx') ?? '') === pageBefore) {
       const posed = poseRequest(ws.files.get('src/App.tsx') ?? '', input.prompt);
-      if (posed.changed) await ws.write('src/App.tsx', posed.code);
+      if (posed.changed) { await ws.write('src/App.tsx', posed.code); patched = true; }
     }
+    const bound = bindCharts(ws.files.get('src/App.tsx') ?? '');
+    if (bound.changed) { await ws.write('src/App.tsx', bound.code); patched = true; }
     if (incremental && (ws.files.get('src/App.tsx') ?? '') === pageBefore) throw new Error("L'élément demandé n'a pas été posé : la page est inchangée.");
-    if (shell.changed || !tb.lastBuild?.ok) await tb.build();
+    if (patched || !tb.lastBuild?.ok) await tb.build();
     if (!tb.lastBuild?.ok || !tb.lastBuild.html) throw new Error(`Build final en échec : ${tb.lastBuild?.output.slice(-600) ?? 'aucun build'}`);
   };
 
