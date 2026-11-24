@@ -286,7 +286,9 @@ export function resolveSources(prompt: string, identities: Array<{ id: string; n
   const forbidden = [...named.skip];
   const unknown: string[] = [];
   const text = prompt.toLowerCase().normalize('NFD').replace(/\p{M}/gu, '');
-  const pattern = /(?:serveur|mcp|moteur)\s+(?:de\s+)?([a-z0-9][a-z0-9-]{2,32})/g;
+  // Les qualificatifs empilés décrivent le type de source, pas son identité.
+  // Consommer le groupe entier avant de chercher le nom (serveur MCP, MCP server…).
+  const pattern = /\b(?:serveur|server|mcp|moteur|connecteur|connector)\b(?:\s+(?:serveur|server|mcp|moteur|connecteur|connector)\b)*\s+(?:de\s+)?(?!(?:serveur|server|mcp|moteur|connecteur|connector)\b)([a-z0-9][a-z0-9_-]{2,32})\b/g;
   for (const match of text.matchAll(pattern)) {
     const token = match[1]!;
     if (NOT_A_SERVER.has(token)) continue;

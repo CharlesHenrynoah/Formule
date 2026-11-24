@@ -157,3 +157,36 @@ test('une acquisition refusée n’annonce pas une interface prête', async () =
   assert.match(offer.text, /Rien ne peut être généré/);
   assert.doesNotMatch(offer.text, /demo__/);
 });
+
+
+test('les qualificatifs de protocole ne deviennent pas des identités de source', () => {
+  const identities = [{ id: 'sonde', name: 'Sonde' }, { id: 'demo', name: 'Démo locale' }];
+  for (const reference of ['serveur MCP Sonde', 'MCP Sonde', 'serveur Sonde via MCP', 'MCP server Sonde', 'serveur MCP de Sonde', 'connecteur MCP Sonde']) {
+    const intent = compileIntent(`Affiche le total du ${reference}.`, identities);
+    assert.deepEqual(intent.sources.required, ['sonde'], reference);
+    assert.deepEqual(intent.sources.unknown, [], reference);
+  }
+  const generic = compileIntent('Affiche le total du serveur MCP.', identities);
+  assert.deepEqual(generic.sources.unknown, []);
+  const missing = compileIntent('Affiche le total du serveur MCP Talos.', identities);
+  assert.deepEqual(missing.sources.unknown, ['talos']);
+  assert.deepEqual(missing.sources.required, []);
+});
+
+test('une référence composée atteint le sélecteur et conserve le verrou de source', async () => {
+  const calls: string[] = [];
+  let selections = 0;
+  const offer = await collectSource(
+    'Affiche le total du serveur MCP Sonde.',
+    '',
+    async () => [demo, sonde],
+    async (tool) => { calls.push(tool); return [{ total: 4 }]; },
+    async () => { selections += 1; return '{"reads":[{"tool":"demo__get_weather","args":{}}]}'; },
+    undefined,
+    { registry: [record({ id: 'sonde', name: 'Sonde' }), record({ id: 'demo', name: 'Démo locale' })] },
+  );
+  assert.equal(selections, 1);
+  assert.deepEqual(calls, ['sonde__list_totals']);
+  assert.equal(offer.canBuild, true);
+  assert.doesNotMatch(offer.text, /inconnu du registre|demo__/);
+});
