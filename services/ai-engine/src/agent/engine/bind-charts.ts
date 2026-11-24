@@ -19,12 +19,18 @@ function intendedState(name: string, source: string, states: string[]): string |
   return states.find((state) => around.includes(state.toLowerCase())) ?? null;
 }
 
+function plotsMeasure(body: string): boolean {
+  return /Number\(\s*row\.[A-Za-z_][\w]*\s*\)/.test(body);
+}
+
+/** Un comptage par semaine, pas une courbe de mesure. Le mot « courbe » ne suffit pas. */
 function timeSeries(name: string, body: string, source: string): boolean {
+  if (plotsMeasure(body)) return false;
   if (/\.points\b|\.valeur\b/.test(body)) return true;
-  if (/semaine|weekly|par semaine|by week|courbe/i.test(`${name} ${body}`)) return true;
+  if (/semaine|weekly|par semaine|by week/i.test(`${name} ${body}`)) return true;
   const at = source.indexOf(`data={${name}}`);
   if (at < 0) return false;
-  return /semaine|par semaine|courbe|par jour|derniers mois/i.test(source.slice(Math.max(0, at - 400), at));
+  return /par semaine|by week|derniers mois/i.test(source.slice(Math.max(0, at - 400), at));
 }
 
 const WEEK_FILL = 'at += 7 * 86400000';

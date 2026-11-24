@@ -279,7 +279,7 @@ export function readsForUnmatched(prompt: string, tools: SourceTool[] = []): Arr
       const args = argsForTool(tool, prompt);
       let score = toolScore(prompt, tool);
       // Docs / list avant météo quand un serveur métier est nommé.
-      if (use.length && /search_docs|list_|read_|markets|getID/i.test(tool.name)) score += 4;
+      if (use.length && /search_docs|list_|read_|execute/i.test(tool.name)) score += 4;
       return { tool, args, score };
     })
     .filter((item): item is { tool: SourceTool; args: Record<string, unknown>; score: number } => !!item.args)

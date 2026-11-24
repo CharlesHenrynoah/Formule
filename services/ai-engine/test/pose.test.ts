@@ -12,6 +12,10 @@ export default function App() {
 }
 `;
 
+test('le mot version seul ne fabrique pas une collection releases', () => {
+  assert.notEqual(collectionForPrompt('Affiche le tarif, numéro de version 3'), 'releases');
+});
+
 test('une demande de releases nomme la collection releases', () => {
   assert.equal(collectionForPrompt('Ajoute un tableau des 10 dernières releases du dépôt, avec le numéro de version'), 'releases');
 });

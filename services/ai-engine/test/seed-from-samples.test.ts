@@ -100,6 +100,14 @@ test('un texte renvoyé par n\'importe quel outil devient les lignes de la colle
   assert.equal(seed.pages[1].label, 'Routing');
 });
 
+test('hors GitHub, le mot me ne verse pas les lignes dans profil', () => {
+  const seed = seedFromSamples(`export const tools = { a: { run: (_a, db) => db.list('profil') } };`, [
+    { tool: 'atlas__get_me', result: [{ id: '1', title: 'Page' }] },
+  ]);
+  assert.equal(seed.profil, undefined);
+  assert.equal(seed.get_me[0].title, 'Page');
+});
+
 test('une collection canonique ne reçoit pas des lignes qui n\'en sont pas', () => {
   const seed = seedFromSamples(`export const tools = { a: { run: (_a, db) => db.list('profil') } };`, [
     { tool: 'remote__read', result: [{ price: 1, volume: 2 }] },

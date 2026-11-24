@@ -4,13 +4,13 @@
  */
 
 const FAMILIES: Array<[RegExp, string]> = [
-  [/release|version/i, 'releases'],
-  [/pull|fusion/i, 'pullRequests'],
-  [/issue/i, 'issues'],
-  [/commit/i, 'commits'],
-  [/workflow/i, 'workflows'],
-  [/note/i, 'notes'],
-  [/alert/i, 'alerts'],
+  [/\breleases?\b/i, 'releases'],
+  [/\bpulls?\b/i, 'pullRequests'],
+  [/\bissues?\b/i, 'issues'],
+  [/\bcommits?\b/i, 'commits'],
+  [/\bworkflows?\b/i, 'workflows'],
+  [/\bnotes?\b/i, 'notes'],
+  [/\balerts?\b/i, 'alerts'],
 ];
 
 function familyOf(text: string): string {

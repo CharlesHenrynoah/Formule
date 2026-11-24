@@ -104,6 +104,11 @@ function tokens(value: string): Set<string> {
   return new Set(value.toLowerCase().split(/[^a-z0-9]+/).filter((part) => part.length > 1));
 }
 
+function serverOf(tool: string): string {
+  return tool.includes('__') ? tool.split('__')[0] : '';
+}
+
+/** Correspondance exacte pour tout serveur. Les synonymes (profil, dépôts, issues) ne valent que pour GitHub. */
 export function affinity(collection: string, tool: string, key: string): number {
   const flat = (value: string) => value.toLowerCase().replace(/[_-]/g, '');
   const bag = flat(`${tool} ${key}`);
@@ -112,6 +117,7 @@ export function affinity(collection: string, tool: string, key: string): number 
   if (bag.includes(name)) return 4;
   const stem = name.replace(/s$/, '');
   if (stem.length > 3 && bag.includes(stem)) return 3;
+  if (serverOf(tool) !== 'github') return 0;
   const bagTokens = tokens(`${tool} ${key}`);
   const nameTokens = tokens(collection);
   for (const [, words] of FAMILIES) {
@@ -207,7 +213,7 @@ export function seedFromSamples(toolsSource: string, samples: McpSample[], extra
         const rows = seed[target] ?? [];
         const ids = seen.get(target) ?? new Set<string>();
         for (const row of group.rows) {
-          if (rows.length >= 40) break;
+          if (rows.length >= 240) break;
           const id = String(row.id ?? row.number ?? '');
           if (id && ids.has(id)) continue;
           if (id) ids.add(id);

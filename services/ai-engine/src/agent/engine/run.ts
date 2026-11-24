@@ -163,8 +163,12 @@ export async function runEngine(input: CrewInput, cfg: CrewConfig, ctx: { mcp?: 
       const posed = poseRequest(ws.files.get('src/App.tsx') ?? '', input.prompt);
       if (posed.changed) { await ws.write('src/App.tsx', posed.code); patched = true; note('Finition', 'pose', 'Élément demandé posé', 'ok'); }
     }
-    const bound = bindCharts(ws.files.get('src/App.tsx') ?? '');
-    if (bound.changed) { await ws.write('src/App.tsx', bound.code); patched = true; note('Finition', 'graphiques', 'Graphiques reliés aux lectures', 'ok'); }
+    const beforeCharts = ws.files.get('src/App.tsx') ?? '';
+    const bound = bindCharts(beforeCharts);
+    const measureKept = /Number\(\s*row\.[A-Za-z_][\w]*\s*\)/.test(beforeCharts);
+    const becameCount = measureKept && /buckets\.set\(wk/.test(bound.code) && !/buckets\.set\(wk/.test(beforeCharts);
+    if (bound.changed && !becameCount) { await ws.write('src/App.tsx', bound.code); patched = true; note('Finition', 'graphiques', 'Graphiques reliés aux lectures', 'ok'); }
+    else if (becameCount) note('Finition', 'graphiques', 'Mesure conservée : un comptage ne la remplace pas', 'ok');
     else note('Finition', 'graphiques', 'graphiques déjà reliés', 'ok');
     const dated = repairDateSort(ws.files.get('src/App.tsx') ?? '');
     if (dated.changed) { await ws.write('src/App.tsx', dated.code); patched = true; note('Finition', 'dates', 'Tri des dates réparé', 'ok'); }

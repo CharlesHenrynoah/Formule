@@ -17,35 +17,15 @@ import {
 import { reviewSource } from './product-owner.ts';
 import { readsFromSelector, selectorPrompt } from './select-mcp.ts';
 import { routeDemand } from './pose.ts';
+import { alignPairSeries, keepSpan } from './series.ts';
 
 export type SourceRead = { tool: string; args: Record<string, unknown>; ok: boolean; error?: string; rows: Array<Record<string, unknown>> };
 export type SourceSample = { tool: string; args: Record<string, unknown>; rows: Array<Record<string, unknown>> };
 export type SourceOffer = { canBuild: boolean; text: string; brief: string; samples: SourceSample[] };
 
-/** Séries [horodatage, mesure] → lignes plates. Le nom de série reste celui du serveur. */
+/** Séries [horodatage, mesure] alignées par horodatage. Le nom de série reste celui du serveur. */
 function chartRows(data: unknown): Array<Record<string, unknown>> | null {
-  if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
-  const series = Object.entries(data as Record<string, unknown>).filter((entry): entry is [string, unknown[][]] => {
-    const value = entry[1];
-    return Array.isArray(value) && Array.isArray(value[0]) && value[0].length >= 2 && typeof value[0][1] === 'number';
-  });
-  if (!series.length) return null;
-  const rows: Array<Record<string, unknown>> = [];
-  const length = Math.min(20, series[0]![1].length);
-  for (let i = 0; i < length; i++) {
-    const row: Record<string, unknown> = {};
-    for (const [key, points] of series) {
-      const point = points[i];
-      if (!Array.isArray(point)) continue;
-      if (row.date == null) {
-        const x = point[0];
-        row.date = typeof x === 'number' && x > 1e11 ? new Date(x).toISOString().slice(0, 10) : x;
-      }
-      row[key] = point[1];
-    }
-    if (Object.keys(row).length > 1) rows.push(row);
-  }
-  return rows.length ? rows : null;
+  return alignPairSeries(data);
 }
 
 export function failureText(data: unknown): string | null {
@@ -63,13 +43,13 @@ function rowsOf(data: unknown): Array<Record<string, unknown>> {
   if (chart) return chart;
   if (typeof data === 'string' && data.trim()) {
     const lines = data.split('\n').map((line) => line.replace(/^\s*[-*]\s*/, '').replace(/^\d+(?:\.\d+)*\s+/, '').trim()).filter((line) => line.length > 2 && line.length < 120 && !line.endsWith(':'));
-    if (lines.length > 1) return lines.slice(0, 20).map((titre) => ({ titre }));
+    if (lines.length > 1) return keepSpan(lines, 80).map((titre) => ({ titre }));
     return [{ texte: data.trim().slice(0, 280) }];
   }
-  if (Array.isArray(data)) return data.filter((row) => row && typeof row === 'object').slice(0, 20) as Array<Record<string, unknown>>;
+  if (Array.isArray(data)) return keepSpan(data.filter((row) => row && typeof row === 'object') as Array<Record<string, unknown>>, 240);
   if (data && typeof data === 'object') {
     for (const value of Object.values(data as Record<string, unknown>)) {
-      if (Array.isArray(value) && value[0] && typeof value[0] === 'object') return value.slice(0, 20) as Array<Record<string, unknown>>;
+      if (Array.isArray(value) && value[0] && typeof value[0] === 'object') return keepSpan(value.filter((row) => row && typeof row === 'object') as Array<Record<string, unknown>>, 240);
     }
   }
   return [];

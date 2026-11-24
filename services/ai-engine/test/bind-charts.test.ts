@@ -38,6 +38,22 @@ test('une courbe sans helper, sur un autre projet, lit sa collection', () => {
   assert.match(bound.code, /buckets\.set\(wk, 0\)/);
 });
 
+test('une courbe de mesure n\'est pas remplacée par un comptage', () => {
+  const page = `function Page() {
+  const [rows, setRows] = useState([]);
+  const series = useMemo(() => rows.flatMap((row) => {
+    const date = String(row.updated_at ?? '');
+    const value = Number(row.price);
+    return date && Number.isFinite(value) ? [{ date, value }] : [];
+  }), [rows]);
+  return <h3>Courbe sur 30 jours</h3>;
+}`;
+  const bound = bindCharts(page + '\n<Chart data={series} />');
+  assert.equal(bound.changed, false);
+  assert.match(bound.code, /Number\(row\.price\)/);
+  assert.doesNotMatch(bound.code, /buckets\.set\(wk/);
+});
+
 test('un classement sans date n\'est pas rebranché', () => {
   const rank = `function Page() {
   const [authors, setAuthors] = useState([]);
