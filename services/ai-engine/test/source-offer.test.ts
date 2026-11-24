@@ -31,6 +31,17 @@ test('un élément déjà affiché ne part pas en développement', () => {
   assert.match(curve.text, /Commits par semaine/);
 });
 
+test('une ligne dont les champs ne couvrent pas la demande n’est pas la donnée obtenue', () => {
+  const offer = offerFromReads('Affiche le prix. Titre "Solana en direct".', [
+    { tool: 'atlas__execute', args: { intent: 'prix' }, ok: true, rows: [{ active_count: 1, 'total_market_cap.btc': 2, 'total_market_cap.eth': 3 }] },
+  ]);
+  assert.equal(offer.canBuild, false);
+  assert.match(offer.text, /Données obtenues : aucune/);
+  assert.match(offer.text, /champs hors demande/);
+  assert.match(offer.text, /Solana en direct/);
+  assert.equal(offer.samples.length, 0);
+});
+
 test('un texte renvoyé par un MCP compte comme des lignes', () => {
   const offer = offerFromReads('Crée un tableau des sujets.', [
     { tool: 'atlas__list_topics', args: { repoName: 'vercel/next.js' }, ok: true, rows: [{ titre: 'Build System' }, { titre: 'Server Runtime' }] },

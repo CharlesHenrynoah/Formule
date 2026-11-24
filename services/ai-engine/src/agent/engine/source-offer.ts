@@ -173,18 +173,31 @@ export function offerFromReads(prompt: string, reads: SourceRead[], page = ''): 
     return { canBuild: false, text, brief: text, samples: [], log: text };
   }
   const route = routeDemand(prompt);
-  const business = (read: SourceRead) => read.ok && read.rows.length > 0 && !read.rows.every((row) => isDocumentationRow(row));
+  const holdsDemand = (row: Record<string, unknown>) => {
+    const fields = Object.keys(row).filter((key) => key !== 'collection');
+    const chain = linkChain(prompt, fields);
+    const needs = acquisitionNeeds(chain);
+    if (!needs.length) return true;
+    const open = new Set(needs.map((need) => need.text));
+    return chain.links.some((link) => link.state === 'tenu' && !open.has(link.text) && !!link.field && fields.includes(link.field));
+  };
+  const useful = (read: SourceRead) => read.ok && read.rows.some((row) => !isDocumentationRow(row) && holdsDemand(row));
+  const business = (read: SourceRead) => useful(read);
   const lines = !route.data
     ? ['Aucune collection à lire pour cette demande.']
     : reads.length
     ? reads.map((read) => {
-      const where = [read.args.owner, read.args.repo].filter(Boolean).join('/') || String(Object.values(read.args).find((value) => typeof value === 'string' && value.length > 0 && value.length < 80 && !/function|=>|client\./.test(value)) ?? '');
+      const where = [read.args.owner, read.args.repo].filter(Boolean).join('/') || String(Object.entries(read.args).find(([key, value]) => key !== 'language' && key !== 'code' && typeof value === 'string' && value.length > 2 && value.length < 80 && !/function|=>|client\./.test(value))?.[1] ?? '');
       if (!read.ok) return `${read.tool}${where ? ` sur ${where}` : ''} a échoué : ${read.error ?? 'lecture impossible'}.`;
-      return `${read.tool}${where ? ` sur ${where}` : ''} : ${read.rows.length} ligne${read.rows.length > 1 ? 's' : ''}. Champs : ${fieldsOf(read.rows[0])}.`;
+      const fields = fieldsOf(read.rows[0]);
+      if (read.rows.length && !read.rows.every((row) => isDocumentationRow(row)) && !useful(read)) return `${read.tool}${where ? ` sur ${where}` : ''} : ${read.rows.length} ligne, champs hors demande : ${fields}.`;
+      return `${read.tool}${where ? ` sur ${where}` : ''} : ${read.rows.length} ligne${read.rows.length > 1 ? 's' : ''}. Champs : ${fields}.`;
     })
     : ['Aucune lecture ne correspond à cette demande.'];
   const ready = !route.data || reads.some(business);
-  const element = `Ce qui peut être généré : ${route.kind} « ${route.title} ».`;
+  const quoted = [...prompt.matchAll(/[«"]([^»"]{2,80})[»"]/g)].map((match) => match[1].trim());
+  const named = [...quoted].reverse().find((label) => label.split(' ').length >= 2 && !/[{}/]/.test(label));
+  const element = `Ce qui peut être généré : ${route.kind} « ${named || route.title} ».`;
   const obtained = reads.filter(business);
   const failed = reads.filter((read) => !read.ok);
   const summary = [
@@ -198,7 +211,7 @@ export function offerFromReads(prompt: string, reads: SourceRead[], page = ''): 
     summary,
     'Voici les données pour cette demande.',
     ...lines,
-    ready ? element : 'Rien ne peut être généré tant qu’une lecture ne renvoie pas de lignes.',
+    ready ? element : `Rien ne peut être généré pour « ${named || route.title} » tant qu’une lecture ne renvoie pas les mesures demandées.`,
   ].join('\n');
   const brief = [`Sourcing validé. ${element}`, ...lines, 'Respecte le rôle de chaque champ : une date reste une date, un libellé reste un libellé.'].join('\n');
   const samples = reads.filter(business).slice(0, 3).map((read) => ({
@@ -376,12 +389,12 @@ export async function collectSource(
           const choice = ranked.find((item) => item.score > 0);
           const claim = choice?.text ?? planned[Math.min(attempt, Math.max(planned.length - 1, 0))]?.claim ?? prompt.slice(0, 80);
           if (choice) lastLayer = choice.layer;
-          const hint = planned.find((item) => item.claim === claim)?.hint ?? planned[0]?.hint;
+          const hint = planned.find((item) => item.claim === claim)?.hint;
           try {
             let code = '';
             if (lastCode && lastError && strategy === 'rewrite') {
               const fixed = correctAcquisition(lastCode, lastError, observed);
-              lastCorrection = fixed.strategy;
+              lastCorrection = fixed.strategy === 'raw' ? 'retour brut, propriété absente retirée' : fixed.strategy;
               if (fixed.strategy === 'stop') {
                 strategy = 'stop';
                 break;

@@ -5,6 +5,7 @@
  * - objet   : methode({ options })
  * L'exemple renvoyé par la doc gagne. Le diagnostic (nombre d'arguments, type string, Params) départage le reste.
  */
+import ts from 'typescript';
 import type { SourceTool } from '../../app-agents/ingest.ts';
 import { claimsFromPrompt } from './chain.ts';
 import { classifyLink } from '../../../../mcp-hub/src/link-state.ts';
@@ -225,6 +226,29 @@ export function missingProperty(error: string): string | null {
   return error.match(/property '([^']+)' does not exist/i)?.[1] ?? null;
 }
 
+/** Retire la propriété que le type refuse et renvoie l'objet qui existe. */
+export function dropAbsentAccess(code: string, missing: string): string | null {
+  const source = ts.createSourceFile('run.js', code, ts.ScriptTarget.ES2022, true, ts.ScriptKind.JS);
+  const edits: Array<{ start: number; end: number; text: string }> = [];
+  const receiverBefore = (expr: ts.Expression): string | null => {
+    if (!ts.isPropertyAccessExpression(expr) && !ts.isPropertyAccessChain(expr)) return null;
+    if (expr.name.text === missing) return expr.expression.getText(source);
+    return receiverBefore(expr.expression);
+  };
+  const visit = (node: ts.Node) => {
+    if (ts.isReturnStatement(node) && node.expression) {
+      const receiver = receiverBefore(node.expression);
+      if (receiver) edits.push({ start: node.expression.getStart(source), end: node.expression.getEnd(), text: receiver });
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  if (!edits.length) return null;
+  let next = code;
+  for (const edit of edits.sort((a, b) => b.start - a.start)) next = next.slice(0, edit.start) + edit.text + next.slice(edit.end);
+  return next === code ? null : next;
+}
+
 /** Forme réellement observée, avant tout sélecteur ou agrégat. */
 export function observeShape(data: unknown, depth = 0): string {
   if (data == null) return 'null';
@@ -256,11 +280,13 @@ export function correctAcquisition(code: string, error: string, observed = ''): 
   if (diagnostic === 'property') {
     const missing = missingProperty(error);
     const suggestion = error.match(/did you mean '([^']+)'/i)?.[1];
-    if (!suggestion || (observed && !observed.includes(suggestion)) || (missing && observed && observed.includes(missing))) {
-      return { code: null, diagnostic, strategy: 'reinspect' };
+    if (suggestion && (!observed || observed.includes(suggestion)) && !(missing && observed && observed.includes(missing))) {
+      const rewritten = rewriteCallsFromDiagnostics(code, error);
+      if (rewritten) return { code: rewritten, diagnostic, strategy: 'rewrite' };
     }
-    const rewritten = rewriteCallsFromDiagnostics(code, error);
-    return { code: rewritten, diagnostic, strategy: rewritten ? 'rewrite' : 'reinspect' };
+    const raw = missing ? dropAbsentAccess(code, missing) : null;
+    if (raw) return { code: raw, diagnostic, strategy: 'raw' };
+    return { code: null, diagnostic, strategy: 'reinspect' };
   }
   if (diagnostic === 'signature' || diagnostic === 'type') {
     const rewritten = rewriteCallsFromDiagnostics(code, error);
@@ -395,10 +421,10 @@ export function planAcquisitions(prompt: string, docs: DocHint[]): Array<{ id: s
   if (!docs.length) {
     return (claims.length ? claims : [{ id: 'c1', text: prompt.slice(0, 80) }]).slice(0, 4).map((claim) => ({ id: claim.id, claim: claim.text }));
   }
-  return docs.slice(0, 6).map((hint, index) => {
-    const hay = `${hint.method ?? ''} ${hint.summary ?? ''} ${hint.endpoint ?? ''} ${hint.signature ?? ''}`.toLowerCase();
-    const claim = claims.find((item) => hay.includes(item.text.toLowerCase().slice(0, 16)))?.text ?? claims[index]?.text ?? prompt.slice(0, 80);
-    return { id: `a${index + 1}`, claim, hint };
+  return claims.slice(0, 4).map((claim) => {
+    const needle = claim.text.toLowerCase().slice(0, 16);
+    const hint = docs.find((doc) => `${doc.method ?? ''} ${doc.summary ?? ''} ${doc.endpoint ?? ''} ${doc.response ?? ''} ${doc.returns ?? ''} ${doc.signature ?? ''}`.toLowerCase().includes(needle));
+    return { id: claim.id, claim: claim.text, hint };
   });
 }
 

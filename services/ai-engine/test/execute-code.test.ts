@@ -4,6 +4,7 @@ import {
   classifyDiagnostic,
   classifyShapeError,
   correctAcquisition,
+  planAcquisitions,
   observeShape,
   dualCallExamples,
   ensureRunClient,
@@ -131,11 +132,21 @@ test('une propriété absente n’est pas inventée', () => {
   const error = "Property 'missing_field' does not exist on type 'Record'.";
   assert.equal(classifyDiagnostic(error), 'property');
   const fixed = correctAcquisition(code, error, '{ id: string, amount: number }');
-  assert.equal(fixed.code, null);
-  assert.equal(fixed.strategy, 'reinspect');
+  assert.equal(fixed.strategy, 'raw');
+  assert.match(fixed.code ?? '', /return row;/);
+  assert.doesNotMatch(fixed.code ?? '', /missing_field/);
   assert.equal(classifyDiagnostic('401 unauthorized'), 'auth');
   assert.equal(classifyDiagnostic('429 quota exceeded'), 'quota');
   assert.equal(correctAcquisition(code, '401 unauthorized').strategy, 'stop');
+});
+
+test('une doc sans rapport n’est pas collée à la mesure', () => {
+  const planned = planAcquisitions('Affiche le prix.', [
+    { method: 'client.derivatives.get', summary: 'derivatives', endpoint: 'GET /derivatives' },
+    { method: 'client.coins.markets.get', summary: 'prix des marchés', endpoint: 'GET /coins/markets' },
+  ]);
+  const price = planned.find((item) => item.claim === 'prix');
+  assert.equal(price?.hint?.method, 'client.coins.markets.get');
 });
 
 test('une signature incompatible est corrigée sans toucher un autre appel', () => {

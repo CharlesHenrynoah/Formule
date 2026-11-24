@@ -18,7 +18,7 @@ function familyOf(text: string): string {
   return '';
 }
 
-const STOP = new Set(['ajoute', 'ajouter', 'modifie', 'modifier', 'change', 'changer', 'supprime', 'supprimer', 'retire', 'retirer', 'mets', 'mettre', 'faire', 'fais', 'montre', 'voir', 'avec', 'dans', 'pour', 'sous', 'vers', 'chez', 'sur', 'par', 'les', 'des', 'une', 'aux', 'son', 'ses', 'est', 'pas', 'plus', 'tout', 'tous', 'toutes', 'cette', 'cet', 'mois', 'semaine', 'semaines', 'jour', 'jours', 'dernier', 'derniers', 'dernieres', 'trois', 'depuis', 'entre', 'sans', 'logiciel', 'demande', 'element', 'couleur', 'couleurs', 'titre', 'texte', 'fond', 'style', 'suivi', 'affichage', 'detail', 'details']);
+const STOP = new Set(['ajoute', 'ajouter', 'modifie', 'modifier', 'change', 'changer', 'supprime', 'supprimer', 'retire', 'retirer', 'mets', 'mettre', 'faire', 'fais', 'montre', 'voir', 'avec', 'dans', 'pour', 'sous', 'vers', 'chez', 'sur', 'par', 'les', 'des', 'une', 'aux', 'son', 'ses', 'est', 'pas', 'plus', 'tout', 'tous', 'toutes', 'cette', 'cet', 'mois', 'semaine', 'semaines', 'jour', 'jours', 'dernier', 'derniers', 'dernieres', 'trois', 'depuis', 'entre', 'sans', 'logiciel', 'demande', 'element', 'couleur', 'couleurs', 'titre', 'texte', 'fond', 'style', 'suivi', 'affichage', 'detail', 'details', 'cree', 'crée', 'creer', 'créer', 'ensuite', 'dashboard']);
 
 const KIND_WORD = 'courbe|graphique|histogramme|camembert|série|serie|tableau|liste|grille|formulaire|saisie|filtre|sélecteur|selecteur|recherche|bouton|action|page|écran|ecran|panneau|onglet|carte';
 
