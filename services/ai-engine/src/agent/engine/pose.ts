@@ -82,8 +82,10 @@ export function routeDemand(prompt: string): DemandRoute {
   const collections = collectionsInDemand(prompt);
   const collection = collections[0] ?? 'lignes';
   const namedFamily = FAMILIES.some(([pattern]) => pattern.test(prompt));
-  const reads = namedFamily || kind === 'courbe' || kind === 'tableau' || kind === 'page' || /montre|affiche|nombre|compte|données|donnees|par semaine|par jour|par mois|derni[eè]r|croise/i.test(prompt);
-  const data = reads && kind !== 'formulaire' && kind !== 'filtre' && kind !== 'action' && !(/couleur|déplace|deplace|renomme|retire|supprime/i.test(prompt) && kind !== 'courbe' && kind !== 'tableau');
+  const asksData = namedFamily || /\b(prix|price|volume|capitalisation|variation|statut|nombre|total|taux|score|données|donnees)\b/i.test(prompt);
+  const reads = asksData || kind === 'courbe' || kind === 'tableau' || kind === 'page' || /montre|affiche|nombre|compte|par semaine|par jour|par mois|derni[eè]r|croise/i.test(prompt);
+  const visualOnly = /\b(couleur|déplace|deplace|renomme|retire|supprime)\b/i.test(prompt) && !asksData && kind !== 'courbe' && kind !== 'tableau';
+  const data = reads && kind !== 'formulaire' && kind !== 'filtre' && kind !== 'action' && !visualOnly;
   const labels = collections.map(labelOf);
   const span = /3 derniers mois/i.test(prompt) ? ' (3 derniers mois)' : '';
   const joined = labels.length > 1 ? `${labels.slice(0, -1).join(', ')} et ${labels.at(-1)}` : labels[0] ?? labelOf(collection);

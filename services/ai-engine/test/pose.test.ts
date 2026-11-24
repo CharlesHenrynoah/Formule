@@ -39,6 +39,14 @@ test('nommer une collection suffit à demander sa lecture', () => {
   assert.equal(route.data, true);
   const color = routeDemand('Change la couleur du bouton Envoyer');
   assert.equal(color.data, false);
+  const market = routeDemand('Crée une page « Crypto Market Monitor » avec le prix et le volume. Retire la barre latérale.');
+  assert.equal(market.kind, 'page');
+  assert.equal(market.data, true);
+  const paint = routeDemand('Change la couleur de la page « Crypto Market Monitor »');
+  assert.equal(paint.kind, 'page');
+  assert.equal(paint.data, false);
+  const shift = routeDemand('Crée une page « Crypto Market Monitor » et suis le déplacement du prix.');
+  assert.equal(shift.data, true);
 });
 
 test('le routeur classe une demande qui n\'est pas un dépôt', () => {
