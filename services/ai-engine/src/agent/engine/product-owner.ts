@@ -4,7 +4,7 @@
  */
 import { keepNamedServer, mentionedServers, type SourceTool } from '../../app-agents/ingest.ts';
 import { keepSpan } from './series.ts';
-import { linkChain } from './chain.ts';
+import { linkChain, type ChainProof } from './chain.ts';
 
 export type OwnerRead = { tool: string; args: Record<string, unknown>; ok: boolean; error?: string; rows: Array<Record<string, unknown>> };
 export type OwnerSample = { tool: string; args: Record<string, unknown>; rows: Array<Record<string, unknown>> };
@@ -164,6 +164,23 @@ function samplesOf(reads: OwnerRead[]): OwnerSample[] {
     }));
 }
 
+function proofOf(reads: OwnerRead[]): ChainProof {
+  const args: Record<string, unknown> = {};
+  const values: unknown[] = [];
+  const docs: string[] = [];
+  for (const read of reads) {
+    Object.assign(args, read.args);
+    if (typeof read.args.code === 'string') docs.push(read.args.code);
+    for (const row of read.rows) {
+      const keys = Object.keys(row);
+      const doc = keys.length > 0 && keys.every((key) => /^(method|endpoint|summary|description|params|response|query|language|path|url)$/i.test(key));
+      if (doc) docs.push(Object.values(row).map((value) => String(value)).join(' '));
+      else for (const value of Object.values(row)) if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') values.push(value);
+    }
+  }
+  return { args, values, docs: docs.join('\n') };
+}
+
 function thoughtBlock(thought: DemandThought): string {
   return ['Product Owner — chaîne de pensée :', ...thought.steps].join('\n');
 }
@@ -221,7 +238,7 @@ export function reviewSource(
     return { ok: false, text, brief: text, samples: [], thought, missing: ['lecture métier'], retryable: true };
   }
 
-  const chain = linkChain(prompt, fields);
+  const chain = linkChain(prompt, fields, proofOf(okReads));
   if (docsMismatchIntent(thought, fields) || !chain.ok) {
     const missing = chain.missing.length ? chain.missing : thought.expectedFields;
     const text = [

@@ -1,5 +1,5 @@
 import { senseLines, type GenLog } from '../agent/sensor.ts';
-import { linkChain, type Chain } from '../agent/engine/chain.ts';
+import { linkChain, type Chain, type ClaimKind } from '../agent/engine/chain.ts';
 import { evaluate, type Report } from '../evaluation/evaluator.ts';
 import type { DataContract } from '../../../../packages/contracts/src/types.ts';
 import { locate, type Layer } from '../evaluation/repair.ts';
@@ -69,6 +69,23 @@ export function mapField(input: {
   }
   const distance = obstacles.reduce((sum, item) => sum + item.weight, 0);
   return { logs, chain, report, obstacles, distance };
+}
+
+const NEED_ORDER: ClaimKind[] = ['mesure', 'collection', 'entite', 'dimension', 'parametre', 'periode', 'unite'];
+
+export type RankedNeed = { text: string; kind: ClaimKind; layer: Layer; score: number };
+
+/** Les exigences se classent. Une trajectoire déjà bloquée ne reste pas en tête. */
+export function rankNeeds(needs: Array<{ text: string; kind: ClaimKind }>, blocked: string[] = []): RankedNeed[] {
+  return needs
+    .filter((need) => NEED_ORDER.includes(need.kind))
+    .map((need) => {
+      const order = NEED_ORDER.indexOf(need.kind);
+      const layer: Layer = need.kind === 'mesure' || need.kind === 'collection' || need.kind === 'entite' ? 'mcp' : locate(need.text);
+      const score = (NEED_ORDER.length - order) - (blocked.includes(need.text) ? 20 : 0);
+      return { ...need, layer, score };
+    })
+    .sort((a, b) => b.score - a.score || a.text.localeCompare(b.text));
 }
 
 export function trajectoryScore(candidate: Trajectory): number {

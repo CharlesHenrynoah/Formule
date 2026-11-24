@@ -71,6 +71,7 @@ test('le sourcing appelle d’abord l’agent Sélecteur', async () => {
       assert.match(mission, /CoinGecko|coingecko/i);
       return '{"reads":[{"tool":"coingecko__execute","args":{"code":"return []"}}],"why":"crypto"}';
     },
+    async () => 'async function run(client) { return client.records.list({}); }',
   );
   assert.equal(selectCalls, 1);
   assert.equal(offer.canBuild, true);
@@ -87,11 +88,14 @@ test('une erreur d’authentification ne retire pas l’acquisition déjà réus
       { id: 'atlas__list', description: 'liste', serverName: 'Atlas', schema: { required: [], properties: {} } },
       { id: 'atlas__execute', description: 'sdk', serverName: 'Atlas', schema: { required: ['code'], properties: { code: { type: 'string' } } } },
     ]),
-    async (tool) => {
+    async (tool, args) => {
       if (tool === 'atlas__list') return [{ name: 'nord', total: 3 }];
+      assert.match(String(args.code ?? ''), /async function run\(client\)/);
+      assert.doesNotMatch(String(args.code ?? ''), /return \[\]/);
       throw new Error('401 unauthorized');
     },
-    async () => '{"reads":[{"tool":"atlas__list","args":{}},{"tool":"atlas__execute","args":{"code":"async function run(client){ return client.records.list({}); }"}}]}',
+    async () => '{"reads":[{"tool":"atlas__list","args":{}},{"tool":"atlas__execute","args":{"code":"return []"}}]}',
+    async () => 'async function run(client) { return client.records.list({}); }',
   );
   assert.equal(offer.canBuild, false);
   assert.equal(offer.samples[0]?.rows[0]?.total, 3);
@@ -138,7 +142,7 @@ test('execute générique : docs → run(client) + retry, sans méta-outils MCP'
       assert.match(mission, /INTERDIT/);
       assert.match(mission, /client\.coins\.markets\.get/);
       if (missions.length === 1) {
-        return 'const x = await client.search_docs.get();\nreturn x;';
+        return 'async function run(client) {\n  const x = await client.search_docs.get();\n  return x;\n}';
       }
       assert.match(mission, /Échec précédent|search_docs/);
       return 'async function run(client) {\n  const rows = await client.coins.markets.get({ vs_currency: "usd" });\n  return rows;\n}';

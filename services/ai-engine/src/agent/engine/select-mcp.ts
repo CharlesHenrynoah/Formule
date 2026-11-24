@@ -48,6 +48,7 @@ export function selectorPrompt(demand: string, tools: SourceTool[]): string {
     '6. Tu n’inventes aucun identifiant. Au plus 3 outils en lecture, de préférence sur le même moteur.',
     '7. Un identifiant présent dans la demande (dépôt, ville, id) est recopié tel quel dans les arguments.',
     '8. Remplis les args requis avec des valeurs tirées de la demande ; sinon laisse args à {}.',
+    '9. Tu ne transmets jamais de code. Un outil execute se nomme avec args vide : le moteur d’exécution écrira le script.',
     'Réponds uniquement par un JSON : {"reads":[{"tool":"identifiant","args":{}}],"why":"une phrase"}',
     '',
     intentHint(demand),
@@ -57,11 +58,6 @@ export function selectorPrompt(demand: string, tools: SourceTool[]): string {
     '',
     `Demande : ${demand.slice(0, 1400)}`,
   ].join('\n');
-}
-
-function requiredMissing(tool: SourceTool, args: Record<string, unknown>): boolean {
-  const required = Array.isArray(tool.inputSchema?.required) ? tool.inputSchema.required : [];
-  return required.some((key) => args[key] == null || args[key] === '');
 }
 
 /** Garde les lectures dont l'outil existe. Le dépôt écrit dans la demande remplace celui inventé. */
@@ -78,6 +74,8 @@ export function readsFromSelector(answer: string, tools: SourceTool[], demand: s
     if (!tool) continue;
     const given = read.args && typeof read.args === 'object' && !Array.isArray(read.args) ? read.args as Record<string, unknown> : {};
     const args = { ...(argsForTool(tool, demand) ?? {}), ...given };
+    const needsCode = (tool.inputSchema?.required ?? []).includes('code');
+    if (needsCode) delete args.code;
     if (repo) {
       if ('owner' in args) args.owner = repo.owner;
       if ('repo' in args && args.repo !== repo.repo) args.repo = repo.repo;
@@ -85,7 +83,8 @@ export function readsFromSelector(answer: string, tools: SourceTool[], demand: s
         if (/repo.?name|repository|full.?name/i.test(key)) args[key] = `${repo.owner}/${repo.repo}`;
       }
     }
-    if (requiredMissing(tool, args)) continue;
+    const required = (tool.inputSchema?.required ?? []).filter((key) => !(needsCode && key === 'code'));
+    if (required.some((key) => args[key] == null || args[key] === '')) continue;
     const props = tool.inputSchema?.properties ?? {};
     if (Object.entries(args).some(([key, value]) => props[key] && !valueFits(value, props[key]))) continue;
     out.push({ tool: tool.id, args });

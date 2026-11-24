@@ -6,7 +6,6 @@
 import { keepNamedServer, mentionedServers, readsForCollections, readsForUnmatched, type SourceTool } from '../../app-agents/ingest.ts';
 import {
   correctAcquisition,
-  ensureRunClient,
   executeCodePrompt,
   findCodeTool,
   findDocsTool,
@@ -18,14 +17,18 @@ import {
   stripTypeSuppression,
   type DiagnosticClass,
 } from './execute-code.ts';
+import { admitExecute } from './execute-gate.ts';
 import { reviewSource } from './product-owner.ts';
+import { acquisitionNeeds, linkChain } from './chain.ts';
+import { rankNeeds } from '../../navigation/apf.ts';
 import { readsFromSelector, selectorPrompt } from './select-mcp.ts';
 import { routeDemand } from './pose.ts';
 import { splitAcquisition } from '../../discovery/acquire.ts';
 import { withinBudget } from '../../runtime/resilience.ts';
 import { alignPairSeries, keepSpan } from './series.ts';
 
-export type SourceRead = { tool: string; args: Record<string, unknown>; ok: boolean; error?: string; rows: Array<Record<string, unknown>>; raw?: unknown; diagnostic?: DiagnosticClass };
+export type ResponseState = 'vide' | 'erreur' | 'inconnu' | 'valide';
+export type SourceRead = { tool: string; args: Record<string, unknown>; ok: boolean; error?: string; rows: Array<Record<string, unknown>>; raw?: unknown; diagnostic?: DiagnosticClass; state?: ResponseState };
 export type SourceSample = { tool: string; args: Record<string, unknown>; rows: Array<Record<string, unknown>> };
 export type SourceOffer = { canBuild: boolean; text: string; brief: string; samples: SourceSample[]; log: string };
 
@@ -44,21 +47,74 @@ export function failureText(data: unknown): string | null {
   return null;
 }
 
-function rowsOf(data: unknown): Array<Record<string, unknown>> {
-  const chart = chartRows(data);
-  if (chart) return chart;
-  if (typeof data === 'string' && data.trim()) {
+const DOC_KEY = /^(method|endpoint|summary|description|params|response|query|language|path|url)$/i;
+
+export function isDocumentationRow(row: Record<string, unknown>): boolean {
+  const keys = Object.keys(row).filter((key) => key !== 'collection');
+  return keys.length > 0 && keys.every((key) => DOC_KEY.test(key));
+}
+
+function asRows(value: unknown[]): Array<Record<string, unknown>> | null {
+  if (!value.length) return null;
+  if (value.every((item) => item && typeof item === 'object' && !Array.isArray(item))) return value as Array<Record<string, unknown>>;
+  if (value.every((item) => item == null || ['string', 'number', 'boolean'].includes(typeof item))) return value.map((item) => ({ value: item }));
+  return null;
+}
+
+/** Projection sans perte : la forme brute décide, un non-tableau n'est pas vide. */
+export function projectResponse(data: unknown): { state: ResponseState; rows: Array<Record<string, unknown>>; collections: Record<string, Array<Record<string, unknown>>>; shape: string } {
+  const empty = { state: 'vide' as const, rows: [], collections: {}, shape: 'vide' };
+  if (data == null || data === '') return empty;
+  if (typeof data === 'number' || typeof data === 'boolean') {
+    const rows = [{ value: data }];
+    return { state: 'valide', rows, collections: { valeur: rows }, shape: typeof data };
+  }
+  if (typeof data === 'string') {
+    if (!data.trim()) return empty;
     const lines = data.split('\n').map((line) => line.replace(/^\s*[-*]\s*/, '').replace(/^\d+(?:\.\d+)*\s+/, '').trim()).filter((line) => line.length > 2 && line.length < 120 && !line.endsWith(':'));
-    if (lines.length > 1) return keepSpan(lines, 80).map((titre) => ({ titre }));
-    return [{ texte: data.trim().slice(0, 280) }];
+    const rows = lines.length > 1 ? keepSpan(lines, 80).map((titre) => ({ titre })) : [{ texte: data.trim().slice(0, 280) }];
+    return { state: 'valide', rows, collections: { texte: rows }, shape: 'texte' };
   }
-  if (Array.isArray(data)) return keepSpan(data.filter((row) => row && typeof row === 'object') as Array<Record<string, unknown>>, 240);
-  if (data && typeof data === 'object') {
-    for (const value of Object.values(data as Record<string, unknown>)) {
-      if (Array.isArray(value) && value[0] && typeof value[0] === 'object') return keepSpan(value.filter((row) => row && typeof row === 'object') as Array<Record<string, unknown>>, 240);
+  if (typeof data !== 'object') return { state: 'inconnu', rows: [], collections: {}, shape: typeof data };
+  if (Array.isArray(data)) {
+    if (!data.length) return empty;
+    const rows = asRows(data);
+    if (!rows) return { state: 'inconnu', rows: [], collections: {}, shape: observeShape(data) };
+    return { state: 'valide', rows: keepSpan(rows, 240), collections: { liste: rows }, shape: observeShape(data) };
+  }
+  const chart = chartRows(data);
+  if (chart?.length) return { state: 'valide', rows: chart, collections: { serie: chart }, shape: observeShape(data) };
+  const record = data as Record<string, unknown>;
+  const collections: Record<string, Array<Record<string, unknown>>> = {};
+  for (const [key, value] of Object.entries(record)) {
+    if (!Array.isArray(value)) continue;
+    const rows = asRows(value);
+    if (rows) collections[key] = keepSpan(rows, 240);
+  }
+  const names = Object.keys(collections);
+  if (names.length) {
+    const rows = names.flatMap((name) => collections[name]!.map((row) => (names.length > 1 ? { ...row, collection: name } : row)));
+    return { state: 'valide', rows, collections, shape: observeShape(data) };
+  }
+  const keys = Object.keys(record);
+  if (!keys.length) return empty;
+  if (keys.length === 1 && record[keys[0]!] && typeof record[keys[0]!] === 'object') {
+    const inner = projectResponse(record[keys[0]!]);
+    if (inner.state === 'valide' || inner.state === 'vide') return inner;
+  }
+  const row: Record<string, unknown> = {};
+  const flatten = (value: unknown, prefix: string) => {
+    if (value == null || typeof value !== 'object' || Array.isArray(value)) {
+      if (prefix) row[prefix] = value;
+      return;
     }
-  }
-  return [];
+    const entries = Object.entries(value as Record<string, unknown>);
+    if (!entries.length && prefix) row[prefix] = value;
+    for (const [key, child] of entries) flatten(child, prefix ? `${prefix}.${key}` : key);
+  };
+  flatten(record, '');
+  if (Object.keys(row).length) return { state: 'valide', rows: [row], collections: { objet: [row] }, shape: observeShape(data) };
+  return { state: 'inconnu', rows: [], collections: {}, shape: observeShape(data) };
 }
 
 function roleOf(key: string, value: unknown): 'date' | 'libellé' | 'nombre' | 'état' {
@@ -114,6 +170,7 @@ export function offerFromReads(prompt: string, reads: SourceRead[], page = ''): 
     return { canBuild: false, text, brief: text, samples: [], log: text };
   }
   const route = routeDemand(prompt);
+  const business = (read: SourceRead) => read.ok && read.rows.length > 0 && !read.rows.every((row) => isDocumentationRow(row));
   const lines = !route.data
     ? ['Aucune collection à lire pour cette demande.']
     : reads.length
@@ -123,9 +180,9 @@ export function offerFromReads(prompt: string, reads: SourceRead[], page = ''): 
       return `${read.tool}${where ? ` sur ${where}` : ''} : ${read.rows.length} ligne${read.rows.length > 1 ? 's' : ''}. Champs : ${fieldsOf(read.rows[0])}.`;
     })
     : ['Aucune lecture ne correspond à cette demande.'];
-  const ready = !route.data || reads.some((read) => read.ok && read.rows.length > 0);
+  const ready = !route.data || reads.some(business);
   const element = `Ce qui peut être généré : ${route.kind} « ${route.title} ».`;
-  const obtained = reads.filter((read) => read.ok && read.rows.length);
+  const obtained = reads.filter(business);
   const failed = reads.filter((read) => !read.ok);
   const summary = [
     `Données obtenues : ${obtained.map((read) => `${read.tool} (${read.rows.length} ligne${read.rows.length > 1 ? 's' : ''})`).join(', ') || 'aucune'}.`,
@@ -141,7 +198,7 @@ export function offerFromReads(prompt: string, reads: SourceRead[], page = ''): 
     ready ? element : 'Rien ne peut être généré tant qu’une lecture ne renvoie pas de lignes.',
   ].join('\n');
   const brief = [`Sourcing validé. ${element}`, ...lines, 'Respecte le rôle de chaque champ : une date reste une date, un libellé reste un libellé.'].join('\n');
-  const samples = reads.filter((read) => read.ok && read.rows.length).slice(0, 3).map((read) => ({
+  const samples = reads.filter(business).slice(0, 3).map((read) => ({
     tool: read.tool,
     args: read.args,
     rows: splitAcquisition(read.rows).stored.map((row) => {
@@ -166,9 +223,16 @@ function serverOf(id: string): string {
 async function runReads(
   reads: Array<{ tool: string; args: Record<string, unknown> }>,
   call: (tool: string, args: Record<string, unknown>) => Promise<unknown>,
+  admit?: (tool: string, args: Record<string, unknown>) => string | null,
 ): Promise<SourceRead[]> {
   const done: SourceRead[] = [];
   for (const read of reads) {
+    const refusal = admit?.(read.tool, read.args) ?? null;
+    if (refusal === 'defer') continue;
+    if (refusal) {
+      done.push({ ...read, ok: false, error: refusal, rows: [], state: 'erreur', diagnostic: 'signature' });
+      continue;
+    }
     try {
       const result = await call(read.tool, read.args);
       const failed = failureText(result);
@@ -176,8 +240,15 @@ async function runReads(
         done.push({ ...read, ok: false, error: failed, rows: [], raw: result, diagnostic: correctAcquisition('', failed).diagnostic });
         continue;
       }
-      const rows = rowsOf(result);
-      done.push({ ...read, ok: rows.length > 0, error: rows.length ? undefined : 'réponse vide', rows, raw: result });
+      const projected = projectResponse(result);
+      done.push({
+        ...read,
+        ok: projected.state === 'valide',
+        error: projected.state === 'vide' ? 'réponse vide' : projected.state === 'inconnu' ? 'structure inconnue' : undefined,
+        rows: projected.rows,
+        raw: result,
+        state: projected.state,
+      });
     } catch (error) {
       const message = (error as Error).message;
       done.push({ ...read, ok: false, error: message, rows: [], diagnostic: correctAcquisition('', message).diagnostic });
@@ -252,9 +323,18 @@ export async function collectSource(
       }
     }
 
-    let done = await runReads(reads, call);
+    const codeIds = new Set(catalog.filter((tool) => (tool.inputSchema?.required ?? []).includes('code')).map((tool) => tool.id));
+    let liveDocs: ReturnType<typeof sdkHintsFromDocs> = [];
+    const admitCall = (tool: string, args: Record<string, unknown>) => {
+      if (!codeIds.has(tool)) return null;
+      if (typeof args.code !== 'string') return 'defer';
+      const verdict = admitExecute(String(args.code), liveDocs);
+      return verdict.ok ? null : verdict.reason;
+    };
+    let done = await runReads(reads, call, admitCall);
     let owner = reviewSource(prompt, catalog, done);
     let lastCorrection = 'aucune';
+    let lastLayer = '';
 
     // Une acquisition à la fois. Une erreur ne retire pas les appuis déjà validés.
     if (!owner.ok && writeCode) {
@@ -278,14 +358,21 @@ export async function collectSource(
         let lastError: string | undefined;
         let lastCode = '';
         let observed = '';
-        let signature = '';
         let stagnant = 0;
         let strategy: 'rewrite' | 'minimal' | 'stop' = 'rewrite';
         const tried = new Set<string>();
+        const blocked: string[] = [];
         const prior = done.find((read) => read.tool === codeTool.id && read.error && typeof read.args.code === 'string');
         if (prior?.error && prior.raw != null) observed = observeShape(prior.raw);
+        liveDocs = docs;
         for (let attempt = 0; withinBudget(attempt, 3) && strategy !== 'stop'; attempt++) {
-          const claim = owner.missing[0] ?? planned[Math.min(attempt, planned.length - 1)]?.claim ?? prompt.slice(0, 80);
+          const before = owner.missing.length;
+          const fields = [...new Set(done.filter((read) => read.ok && read.rows.some((row) => !isDocumentationRow(row))).flatMap((read) => read.rows.filter((row) => !isDocumentationRow(row)).flatMap((row) => Object.keys(row))))];
+          const chain = linkChain(prompt, fields);
+          const ranked = rankNeeds(acquisitionNeeds(chain).length ? acquisitionNeeds(chain) : owner.missing.map((text) => ({ text, kind: 'mesure' as const })), blocked);
+          const choice = ranked.find((item) => item.score > 0);
+          const claim = choice?.text ?? planned[Math.min(attempt, Math.max(planned.length - 1, 0))]?.claim ?? prompt.slice(0, 80);
+          if (choice) lastLayer = choice.layer;
           const hint = planned.find((item) => item.claim === claim)?.hint ?? planned[0]?.hint;
           try {
             let code = '';
@@ -300,7 +387,7 @@ export async function collectSource(
                 strategy = 'stop';
                 break;
               }
-              if (fixed.code && !tried.has(fixed.code)) code = ensureRunClient(fixed.code);
+              if (fixed.code && !tried.has(fixed.code)) code = stripTypeSuppression(fixed.code);
               else strategy = fixed.strategy === 'raw' || fixed.strategy === 'reinspect' || fixed.strategy === 'minimal' ? 'minimal' : strategy;
             }
             if (!code) {
@@ -314,26 +401,38 @@ export async function collectSource(
                 claim,
                 minimal: strategy === 'minimal',
               }));
-              code = ensureRunClient(stripTypeSuppression(stripCodeFence(raw)));
+              code = stripTypeSuppression(stripCodeFence(raw));
               lastCorrection = strategy === 'minimal' ? 'appel minimal, retour brut' : 'nouvel appel ciblé';
             }
-            if (code.length < 40 || tried.has(code)) {
-              if (tried.has(code)) strategy = strategy === 'rewrite' ? 'minimal' : 'stop';
+            const gate = admitExecute(code, docs);
+            if (!gate.ok) {
+              lastError = gate.reason;
+              lastCode = '';
+              stagnant += 1;
+              if (stagnant >= 2) strategy = 'stop';
+              continue;
+            }
+            if (tried.has(code)) {
+              strategy = strategy === 'rewrite' ? 'minimal' : 'stop';
               continue;
             }
             tried.add(code);
             lastCode = code;
-            const extra = await runReads([{ tool: codeTool.id, args: { code, intent: claim.slice(0, 160) } }], call);
+            const extra = await runReads([{ tool: codeTool.id, args: { code, intent: claim.slice(0, 160) } }], call, admitCall);
             done = keepFootholds(done, extra);
             const fresh = extra.find((read) => read.raw != null);
             if (fresh?.raw != null) observed = observeShape(fresh.raw);
             owner = reviewSource(prompt, catalog, done);
-            const mark = `${extra.map((read) => read.diagnostic ?? (read.ok ? 'ok' : 'vide')).join(',')}|${owner.missing.length}`;
-            if (mark === signature) {
+            if (extra.some((read) => read.diagnostic === 'auth' || read.diagnostic === 'quota')) {
+              strategy = 'stop';
+              lastCorrection = extra.find((read) => read.diagnostic)?.diagnostic ?? 'stop';
+              break;
+            }
+            if (!owner.ok && owner.missing.length >= before) {
+              blocked.push(claim);
               stagnant += 1;
               strategy = strategy === 'rewrite' ? 'minimal' : 'stop';
             } else stagnant = 0;
-            signature = mark;
             if (owner.ok || stagnant >= 2) break;
             lastError = extra.map((read) => read.error).filter(Boolean).join('\n')
               || (extra.some((read) => read.ok && read.rows.length) ? 'lignes présentes mais hors intention (souvent de la doc)' : 'réponse vide ou hors mesures');
@@ -362,7 +461,7 @@ export async function collectSource(
       selectLine,
       offer.text.replace('Données manquantes : aucune.', `Données manquantes : ${missing}.`).replace('Données manquantes : lecture exploitable.', `Données manquantes : ${missing}.`).replace('Correction : aucune.', `Correction : ${lastCorrection}.`).replace('Résultat : lecture exploitable.', `Résultat : ${result}.`).replace('Résultat : rien ne peut être généré.', `Résultat : ${result}.`),
     ].filter(Boolean).join('\n\n');
-    const log = [offer.log, owner.text, lastCorrection !== 'aucune' ? `correction ${lastCorrection}` : ''].filter(Boolean).join('\n\n');
+    const log = [offer.log, owner.text, lastLayer ? `couche ${lastLayer}` : '', lastCorrection !== 'aucune' ? `correction ${lastCorrection}` : ''].filter(Boolean).join('\n\n');
     if (!owner.ok) {
       return { canBuild: false, text, brief: owner.brief, samples: offer.samples, log };
     }
