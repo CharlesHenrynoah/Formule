@@ -4,6 +4,6 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "test": "cd ../.. && npm exec -w services/ai-engine -- node --import tsx --test test/bench.test.ts test/chain.test.ts test/series.test.ts test/seed-from-samples.test.ts test/source-offer.test.ts test/pose.test.ts test/bind-charts.test.ts test/align-calls.test.ts test/product-owner.test.ts"
+    "test": "cd ../.. && npm exec -w services/ai-engine -- node --import tsx --test test/apf.test.ts test/bench.test.ts test/chain.test.ts test/series.test.ts test/seed-from-samples.test.ts test/source-offer.test.ts test/pose.test.ts test/bind-charts.test.ts test/align-calls.test.ts test/product-owner.test.ts"
   }
 }
