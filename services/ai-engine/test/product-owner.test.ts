@@ -81,7 +81,7 @@ test('le Product Owner renvoie les acquisitions manquantes au sourcing', () => {
 
 test('le Product Owner accepte des mesures CoinGecko', () => {
   const verdict = reviewSource(prompt, [gecko, exec], [
-    { tool: 'coingecko__execute', args: {}, ok: true, rows: [{ name: 'Bitcoin', price: 90000, change_24h: 1.2, volume: 1e9 }] },
+    { tool: 'coingecko__execute', args: {}, ok: true, rows: [{ name: 'Bitcoin', symbol: 'BTC', price: 90000, change_24h: 1.2, volume: 1e9 }] },
   ]);
   assert.equal(verdict.ok, true);
   assert.match(verdict.text, /acceptées/);

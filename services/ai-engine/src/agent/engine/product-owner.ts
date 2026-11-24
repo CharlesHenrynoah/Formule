@@ -4,7 +4,7 @@
  */
 import { keepNamedServer, mentionedServers, type SourceTool } from '../../app-agents/ingest.ts';
 import { keepSpan } from './series.ts';
-import { linkChain, type ChainProof } from './chain.ts';
+import { claimsFromPrompt, hitsInRows, linkChain, type ChainProof } from './chain.ts';
 import { classifyLink } from '../../../../mcp-hub/src/link-state.ts';
 
 export type OwnerRead = { tool: string; args: Record<string, unknown>; ok: boolean; error?: string; rows: Array<Record<string, unknown>>; diagnostic?: string };
@@ -257,9 +257,14 @@ export function reviewSource(
     return { ok: false, text, brief: text, samples: [], thought, missing: ['lecture métier'], retryable: true };
   }
 
-  const chain = linkChain(prompt, fields, proofOf(okReads));
+  const needles = claimsFromPrompt(prompt).filter((claim) => claim.kind === 'entite' || claim.kind === 'filtre').map((claim) => claim.text);
+  const hits = okReads.filter((read) => read.rows.some((row) => !Object.keys(row).every((key) => /^(method|endpoint|summary|description|params|response|query|language|path|url)$/i.test(key)))).flatMap((read) => hitsInRows(read.rows, needles, read.tool));
+  const proof: ChainProof = { ...proofOf(okReads), hits };
+  const chain = linkChain(prompt, fields, proof);
   if (docsMismatchIntent(thought, fields) || !chain.ok) {
     const missing = chain.missing.length ? chain.missing : thought.expectedFields;
+    const kinds = chain.claims.filter((claim) => missing.includes(claim.text)).map((claim) => claim.kind);
+    const entityGap = kinds.length > 0 && kinds.every((kind) => kind === 'entite' || kind === 'filtre' || kind === 'champ');
     const text = [
       thinking,
       '',
@@ -270,7 +275,9 @@ export function reviewSource(
       `L’utilisateur attend : ${thought.ui} sur « ${thought.subject} » (champs du type ${thought.expectedFields.join(', ')}).`,
       `Acquisitions manquantes : ${missing.join(' ; ')}.`,
       'Elles retournent au sourcing avant un refus définitif.',
-      'search_docs (ou équivalent) ne suffit pas : il faut une lecture métier (souvent execute / list / get) qui renvoie ces mesures.',
+      entityGap
+        ? 'Une entité ou un filtre se cherche dans les valeurs des lignes déjà lues, ou dans un paramètre de recherche prévu pour cela. Un outil de validation ne les fournit pas.'
+        : 'search_docs (ou équivalent) ne suffit pas : il faut une lecture métier (souvent execute / list / get) qui renvoie ces mesures.',
       'Interdit de poser un dashboard « répartition de method/summary ».',
       'Rien ne peut être généré tant que ces champs manquent.',
       '',

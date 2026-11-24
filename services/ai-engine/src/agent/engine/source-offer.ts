@@ -3,7 +3,7 @@
  * L’agent Sélecteur choisit le MCP ; le déterministe ne sert qu’en repli.
  * Le dépôt et les garde-fous (keepNamedServer, Product Owner) restent déterministes.
  */
-import { keepNamedServer, mentionedServers, readsForCollections, readsForUnmatched, type SourceTool } from '../../app-agents/ingest.ts';
+import { argsForTool, keepNamedServer, mentionedServers, readsForCollections, readsForUnmatched, valueFits, type SourceTool } from '../../app-agents/ingest.ts';
 import {
   correctAcquisition,
   executeCodePrompt,
@@ -20,7 +20,8 @@ import {
 import { classifyLink } from '../../../../mcp-hub/src/link-state.ts';
 import { admitExecute } from './execute-gate.ts';
 import { reviewSource } from './product-owner.ts';
-import { acquisitionNeeds, linkChain } from './chain.ts';
+import { acquisitionNeeds, claimsFromPrompt, hitsInRows, linkChain } from './chain.ts';
+import { classifySearch, profileTool } from './capabilities.ts';
 import { rankNeeds } from '../../navigation/apf.ts';
 import { readsFromSelector, selectorPrompt } from './select-mcp.ts';
 import { routeDemand } from './pose.ts';
@@ -173,11 +174,14 @@ export function offerFromReads(prompt: string, reads: SourceRead[], page = ''): 
     return { canBuild: false, text, brief: text, samples: [], log: text };
   }
   const route = routeDemand(prompt);
+  const needles = claimsFromPrompt(prompt).filter((claim) => claim.kind === 'entite' || claim.kind === 'filtre').map((claim) => claim.text);
   const holdsDemand = (row: Record<string, unknown>) => {
     const fields = Object.keys(row).filter((key) => key !== 'collection');
-    const chain = linkChain(prompt, fields);
+    const hits = hitsInRows([row], needles);
+    const chain = linkChain(prompt, fields, { hits });
     const needs = acquisitionNeeds(chain);
     if (!needs.length) return true;
+    if (needs.some((need) => need.kind === 'entite' || need.kind === 'filtre')) return hits.length > 0;
     const open = new Set(needs.map((need) => need.text));
     return chain.links.some((link) => link.state === 'tenu' && !open.has(link.text) && !!link.field && fields.includes(link.field));
   };
@@ -225,7 +229,7 @@ export function offerFromReads(prompt: string, reads: SourceRead[], page = ''): 
   const samples = reads.filter(business).slice(0, 3).map((read) => ({
     tool: read.tool,
     args: read.args,
-    rows: splitAcquisition(read.rows).stored.map((row) => {
+    rows: splitAcquisition(read.rows).stored.filter((row) => !needles.length || hitsInRows(read.rows, needles).length === 0 || hitsInRows([row], needles).length > 0).map((row) => {
       const clipped: Record<string, unknown> = {};
       for (const [key, value] of Object.entries(row).slice(0, 12)) clipped[key] = typeof value === 'string' && value.length > 180 ? value.slice(0, 180) : value;
       return clipped;
@@ -293,6 +297,115 @@ function keepFootholds(previous: SourceRead[], extra: SourceRead[]): SourceRead[
   return kept;
 }
 
+const DATA_KINDS = new Set(['mesure', 'unite', 'periode', 'dimension', 'parametre']);
+
+function selectionNote(input: { intention: string; capacite: string; candidats: string[]; exclus: string[]; args: Record<string, unknown>; preuves: string[]; resultat: string }): string {
+  return [
+    `intention : ${input.intention}`,
+    `capacité : ${input.capacite}`,
+    `candidats : ${input.candidats.join(', ') || 'aucun'}`,
+    `exclus : ${input.exclus.join(' ; ') || 'aucun'}`,
+    `arguments : ${JSON.stringify(input.args)}`,
+    `preuves : ${input.preuves.join(' ; ') || 'aucune'}`,
+    `résultat : ${input.resultat}`,
+  ].join('\n');
+}
+
+function excludedTools(catalog: SourceTool[], server: string): string[] {
+  return catalog
+    .filter((tool) => !server || serverOf(tool.id) === server)
+    .map((tool) => ({ tool, profile: profileTool(tool) }))
+    .filter((item) => item.profile.capability === 'VALIDATE' || item.profile.capability === 'TRIGGER' || item.profile.capability === 'WRITE' || item.profile.capability === 'SDK_EXECUTE')
+    .slice(0, 8)
+    .map((item) => `${item.tool.id} (${item.profile.capability} : ${item.profile.reasons[0]})`);
+}
+
+function filterArgs(tool: SourceTool, prompt: string, needle: string): Record<string, unknown> | null {
+  const base = argsForTool(tool, prompt);
+  if (!base) return null;
+  const props = tool.inputSchema?.properties ?? {};
+  const key = Object.keys(props).find((item) => /^(query|q|search|name|filter|nom)$/i.test(item));
+  if (!key) return null;
+  const prop = props[key];
+  const description = prop && typeof prop === 'object' && 'description' in prop ? String((prop as { description?: unknown }).description ?? '') : '';
+  if (!/filter|search|name|description|nom|titre|label|filtre/i.test(description)) return null;
+  if (!valueFits(needle, prop)) return null;
+  return { ...base, [key]: needle };
+}
+
+function hasDataNeed(prompt: string, done: SourceRead[]): boolean {
+  const rows = done.filter((read) => read.ok).flatMap((read) => read.rows);
+  const fields = [...new Set(rows.flatMap((row) => Object.keys(row)))];
+  const needles = claimsFromPrompt(prompt).filter((claim) => claim.kind === 'entite' || claim.kind === 'filtre').map((claim) => claim.text);
+  const chain = linkChain(prompt, fields, { hits: hitsInRows(rows, needles) });
+  return acquisitionNeeds(chain).some((need) => DATA_KINDS.has(need.kind));
+}
+
+/** Une entité se résout dans les valeurs, ou par un filtre de recherche. Jamais par un outil incompatible. */
+async function coverEntities(
+  prompt: string,
+  catalog: SourceTool[],
+  done: SourceRead[],
+  call: (tool: string, args: Record<string, unknown>) => Promise<unknown>,
+): Promise<{ done: SourceRead[]; log: string; gap: string; changed: boolean }> {
+  const needs = claimsFromPrompt(prompt).filter((claim) => claim.kind === 'entite' || claim.kind === 'filtre');
+  if (!needs.length) return { done, log: '', gap: '', changed: false };
+  const notes: string[] = [];
+  let gap = '';
+  let changed = false;
+  const { use, skip } = mentionedServers(prompt, catalog);
+  const fromReads = [...new Set(done.map((read) => serverOf(read.tool)).filter(Boolean))];
+  const preferred = use.length ? use : fromReads.filter((id) => !skip.includes(id) && !/^demo/.test(id));
+  const searches = catalog.filter((tool) => {
+    const server = serverOf(tool.id);
+    if (skip.includes(server) || /^demo/.test(server) && !use.some((id) => /^demo/.test(id))) return false;
+    if (preferred.length && !preferred.includes(server)) return false;
+    return profileTool(tool).capability === 'SEARCH';
+  });
+  for (const need of needs) {
+    const known = done.flatMap((read) => hitsInRows(read.rows, [need.text], read.tool));
+    if (known.length) {
+      notes.push(selectionNote({
+        intention: need.text,
+        capacite: 'SEARCH',
+        candidats: [...new Set(known.map((hit) => hit.tool).filter((tool): tool is string => !!tool))],
+        exclus: excludedTools(catalog, serverOf(known[0]?.tool ?? preferred[0] ?? '')),
+        args: done.find((read) => read.tool === known[0]?.tool)?.args ?? {},
+        preuves: known.slice(0, 3).map((hit) => `${hit.field}#${hit.rowId}`),
+        resultat: 'correspondance',
+      }));
+      continue;
+    }
+    const tool = searches.find((item) => filterArgs(item, prompt, need.text));
+    const args = tool ? filterArgs(tool, prompt, need.text) : null;
+    if (!tool || !args) {
+      gap = gap || `recherche incomplète : ${need.text}`;
+      notes.push(selectionNote({ intention: need.text, capacite: 'SEARCH', candidats: searches.map((item) => item.id), exclus: excludedTools(catalog, preferred[0] ?? ''), args: {}, preuves: [], resultat: 'recherche incomplète' }));
+      continue;
+    }
+    const already = done.find((read) => read.tool === tool.id && JSON.stringify(read.args) === JSON.stringify(args));
+    const extra = already ? [already] : await runReads([{ tool: tool.id, args }], call);
+    if (!already) {
+      done = keepFootholds(done, extra);
+      changed = true;
+    }
+    const read = extra[0];
+    const verdict = classifySearch({ ok: !!read?.ok || read?.state === 'vide', rows: read?.rows ?? [], args, properties: tool.inputSchema?.properties, needle: need.text });
+    const label = verdict.gap === 'correspondance' ? 'correspondance' : verdict.gap === 'absence' ? 'absence confirmée' : verdict.gap === 'pagination' ? 'pagination manquante' : verdict.gap === 'erreur' ? 'erreur technique' : 'recherche incomplète';
+    if (verdict.gap !== 'correspondance') gap = `${label} : ${need.text}`;
+    notes.push(selectionNote({
+      intention: need.text,
+      capacite: 'SEARCH',
+      candidats: [tool.id],
+      exclus: excludedTools(catalog, serverOf(tool.id)),
+      args,
+      preuves: verdict.hits.slice(0, 3).map((hit) => `${hit.field}#${hit.rowId}`),
+      resultat: label,
+    }));
+  }
+  return { done, log: notes.join('\n'), gap, changed };
+}
+
 /** Lit les outils. Le sélecteur choisit le serveur. Le Product Owner valide avant Valider. */
 export async function collectSource(
   prompt: string,
@@ -347,7 +460,7 @@ export async function collectSource(
       }
     }
 
-    const codeIds = new Set(catalog.filter((tool) => (tool.inputSchema?.required ?? []).includes('code')).map((tool) => tool.id));
+    const codeIds = new Set(catalog.filter((tool) => profileTool(tool).capability === 'SDK_EXECUTE').map((tool) => tool.id));
     let liveDocs: ReturnType<typeof sdkHintsFromDocs> = [];
     const admitCall = (tool: string, args: Record<string, unknown>) => {
       if (!codeIds.has(tool)) return null;
@@ -359,9 +472,18 @@ export async function collectSource(
     let owner = reviewSource(prompt, catalog, done);
     let lastCorrection = 'aucune';
     let lastLayer = '';
+    let gap = '';
+    let selectionLog = '';
+    const covered = await coverEntities(prompt, catalog, done, call);
+    done = covered.done;
+    selectionLog = covered.log;
+    gap = covered.gap;
+    if (covered.changed) owner = reviewSource(prompt, catalog, done);
+    if (owner.ok) gap = '';
 
     // Une acquisition à la fois. Une erreur ne retire pas les appuis déjà validés.
-    if (!owner.ok && writeCode) {
+    // Une entité, un filtre ou une validation ne partent pas vers un exécuteur de code.
+    if (!owner.ok && writeCode && hasDataNeed(prompt, done)) {
       const { use, skip } = mentionedServers(prompt, catalog);
       const fromReads = [...new Set(done.map((read) => serverOf(read.tool)).filter(Boolean))];
       const preferred = use.length ? use : fromReads.filter((id) => !skip.includes(id) && !/^demo/.test(id));
@@ -393,9 +515,13 @@ export async function collectSource(
           const before = owner.missing.length;
           const fields = [...new Set(done.filter((read) => read.ok && read.rows.some((row) => !isDocumentationRow(row))).flatMap((read) => read.rows.filter((row) => !isDocumentationRow(row)).flatMap((row) => Object.keys(row))))];
           const chain = linkChain(prompt, fields);
-          const ranked = rankNeeds(acquisitionNeeds(chain).length ? acquisitionNeeds(chain) : owner.missing.map((text) => ({ text, kind: 'mesure' as const })), blocked);
-          const choice = ranked.find((item) => item.score > 0);
-          const claim = choice?.text ?? planned[Math.min(attempt, Math.max(planned.length - 1, 0))]?.claim ?? prompt.slice(0, 80);
+          const ranked = rankNeeds(acquisitionNeeds(chain).filter((need) => DATA_KINDS.has(need.kind)), blocked);
+          const choice = ranked.find((item) => item.score > 0) ?? (strategy === 'minimal' ? ranked[0] : undefined);
+          if (!choice) {
+            strategy = 'stop';
+            break;
+          }
+          const claim = choice.text;
           if (choice) lastLayer = choice.layer;
           const hint = planned.find((item) => item.claim === claim)?.hint;
           try {
@@ -479,21 +605,29 @@ export async function collectSource(
     const { skip: skipShow } = mentionedServers(prompt, catalog);
     const visible = done.filter((read) => !skipShow.includes(serverOf(read.tool)) && !(/^demo/.test(serverOf(read.tool)) && skipShow.some((id) => /^demo/.test(id))));
     const offer = offerFromReads(prompt, visible.length ? visible : done.filter((read) => !/^demo/.test(serverOf(read.tool))), page);
-    const missing = owner.ok ? 'aucune' : (owner.missing.join(', ') || 'lecture exploitable');
-    const result = owner.ok && offer.canBuild ? 'exigences tenues' : offer.samples.length ? 'acquisitions réussies conservées, exigences encore ouvertes' : 'rien ne peut être généré';
+    const missing = owner.ok ? 'aucune' : (owner.missing.filter((item) => item !== 'lecture métier').join(', ') || gap || 'lecture exploitable');
+    const result = owner.ok && offer.canBuild ? 'exigences tenues' : gap || (offer.samples.length ? 'acquisitions réussies conservées, exigences encore ouvertes' : 'rien ne peut être généré');
     const text = [
       selectLine,
       offer.text.replace('Données manquantes : aucune.', `Données manquantes : ${missing}.`).replace('Données manquantes : lecture exploitable.', `Données manquantes : ${missing}.`).replace('Correction : aucune.', `Correction : ${lastCorrection}.`).replace('Résultat : lecture exploitable.', `Résultat : ${result}.`).replace('Résultat : rien ne peut être généré.', `Résultat : ${result}.`),
     ].filter(Boolean).join('\n\n');
-    const log = [offer.log, owner.text, lastLayer ? `couche ${lastLayer}` : '', lastCorrection !== 'aucune' ? `correction ${lastCorrection}` : ''].filter(Boolean).join('\n\n');
+    const focus = <T extends { rows: Array<Record<string, unknown>> }>(samples: T[]): T[] => {
+      const needles = claimsFromPrompt(prompt).filter((claim) => claim.kind === 'entite' || claim.kind === 'filtre').map((claim) => claim.text);
+      if (!needles.length) return samples;
+      return samples.map((sample) => {
+        if (!hitsInRows(sample.rows, needles).length) return sample;
+        return { ...sample, rows: sample.rows.filter((row) => hitsInRows([row], needles).length > 0) };
+      });
+    };
+    const log = [selectionLog, offer.log, owner.text, lastLayer ? `couche ${lastLayer}` : '', lastCorrection !== 'aucune' ? `correction ${lastCorrection}` : ''].filter(Boolean).join('\n\n');
     if (!owner.ok) {
-      return { canBuild: false, text, brief: owner.brief, samples: offer.samples, log };
+      return { canBuild: false, text, brief: owner.brief, samples: focus(offer.samples), log };
     }
     return {
       canBuild: offer.canBuild,
       text,
       brief: [selectLine, offer.brief, owner.brief].filter(Boolean).join('\n\n'),
-      samples: owner.samples.length ? owner.samples : offer.samples,
+      samples: focus(owner.samples.length ? owner.samples : offer.samples),
       log,
     };
   } catch (error) {

@@ -6,8 +6,9 @@
  */
 import { createHash } from 'node:crypto';
 
-export type ClaimKind = 'meta' | 'entite' | 'mesure' | 'unite' | 'parametre' | 'periode' | 'dimension' | 'collection' | 'vue' | 'action';
+export type ClaimKind = 'meta' | 'entite' | 'mesure' | 'unite' | 'parametre' | 'periode' | 'dimension' | 'collection' | 'vue' | 'action' | 'filtre' | 'champ' | 'operation';
 export type Claim = { id: string; kind: ClaimKind; text: string };
+export type ValueHit = { needle: string; value: string; field: string; rowId: string; tool?: string };
 export type LinkState = 'tenu' | 'ouvert';
 export type Link = { claim: string; text: string; state: LinkState; field?: string };
 export type Seal = { index: number; prev: string; hash: string };
@@ -23,9 +24,9 @@ export type Chain = {
   missing: string[];
 };
 
-export type ChainProof = { args?: Record<string, unknown>; values?: unknown[]; docs?: string };
+export type ChainProof = { args?: Record<string, unknown>; values?: unknown[]; docs?: string; hits?: ValueHit[] };
 
-const NOT_ACQUIRED = new Set<ClaimKind>(['meta', 'vue', 'action']);
+const NOT_ACQUIRED = new Set<ClaimKind>(['meta', 'vue', 'action', 'operation']);
 
 const DOC_FIELD = /^(method|endpoint|summary|description|params|response|query|language|path|url)$/i;
 
@@ -41,6 +42,8 @@ const SAME: Array<[RegExp, RegExp]> = [
   [/etat|statut|status/, /state|status|etat|statut/],
   [/nombre|count|total|taux|score/, /count|total|rate|score|nombre/],
 ];
+
+const SKIP_PROPER = new Set(['affiche', 'montre', 'avec', 'pour', 'dans', 'sous', 'voici', 'ensuite', 'tableau', 'liste', 'page', 'carte', 'workflow', 'workflows', 'commit', 'commits', 'issue', 'issues', 'release', 'releases', 'note', 'notes', 'alerte', 'alertes', 'utilise', 'recupere', 'interface', 'element', 'dashboard', 'titre', 'cree', 'creer', 'haut', 'bas', 'milieu', 'mets', 'ajoute']);
 
 const MEASURE = /\b(prix|price|volume|variation|capitalisation|market cap|date|nom|statut|nombre|total|taux|score|plus haut)\b/gi;
 const VIEW = /\b(\d+\s+)?(cartes?|kpis?|courbe|graphique|tableau|liste|grille|page|écran|ecran|panneau|horodatage|top\s*\d+)\b([^.;\n]{0,90})/gi;
@@ -83,13 +86,24 @@ export function claimsFromPrompt(prompt: string): Claim[] {
   for (const match of prompt.matchAll(/\b(EUR|USD|GBP|JPY|CHF)\b/g)) add('unite', match[1]);
   for (const match of prompt.matchAll(/\bpar\s+([A-Za-zÀ-ÿ][\w-]{2,30})/gi)) add('dimension', match[1]);
   for (const match of prompt.matchAll(/param[eè]tre\s+([A-Za-z_][\w]*)/gi)) add('parametre', match[1]);
+  for (const match of prompt.matchAll(/\b(?:champ|colonne|field)\s+([A-Za-z_][\w]*)/gi)) add('champ', match[1]);
+  for (const match of prompt.matchAll(/\b(?:nomm[ée]e?s?|appel[ée]e?s?|filtre|filtr(?:er|és?|ées?))\s+([A-Za-zÀ-ÿ][\w-]{1,40})/gi)) add('filtre', match[1]);
+  for (const match of prompt.matchAll(/\b(valider|valide|déclencher|declencher|publier|exécuter|executer)\b/gi)) add('operation', match[1]);
   for (const match of prompt.matchAll(/[«"]([^»"]{2,80})[»"]/g)) add('meta', match[1]);
   for (const match of prompt.matchAll(/\b([A-Z]{2,6})\b/g)) {
     if (!/^(MCP|API|EUR|USD|GBP|JPY|CHF|GET|SDK|HTTP|KPI)$/.test(match[1])) add('entite', match[1]);
   }
   const named = prompt.match(/donn[ée]es de\s+([^,(.]{2,40})/i);
   if (named) add('entite', named[1]);
-  for (const match of prompt.matchAll(/\b(issues?|commits?|releases?|pull requests?|commandes?|topics?|orders?)\b/gi)) add('collection', match[1]);
+  const bare = prompt.replace(/[«"][^»"]*[»"]/g, ' ');
+  for (const match of bare.matchAll(/\b([A-Z][a-zàâäéèêëïîôùûüç]{2,40})\b/g)) {
+    const at = match.index ?? 0;
+    const before = bare.slice(0, at);
+    if (before.trim().length === 0 || /[.!?]\s*$/.test(before)) continue;
+    if (SKIP_PROPER.has(fold(match[1]))) continue;
+    add('entite', match[1]);
+  }
+  for (const match of prompt.matchAll(/\b(issues?|commits?|releases?|pull requests?|commandes?|topics?|orders?|workflows?|notes?|alerts?)\b/gi)) add('collection', match[1]);
   for (const match of prompt.matchAll(/\b(alerter|envoie|envoyer|supprimer)\b/gi)) add('action', match[1]);
   if (!claims.length) add('vue', 'écran des données demandées');
   return claims.slice(0, 24);
@@ -115,6 +129,44 @@ function viewHeld(text: string, fields: string[]): boolean {
   if (/tableau|liste|grille|top\s*\d+/.test(kind)) return business.length >= 1 || fields.length >= 2;
   if (/carte|kpi/.test(kind)) return business.some((field) => covers(text, field)) || business.length > 0;
   return business.length > 0 || fields.length > 0;
+}
+
+export function rowIdOf(row: Record<string, unknown>, index: number): string {
+  const id = row.id ?? row.uuid ?? row.slug ?? row.name;
+  return id == null || id === '' ? String(index) : String(id);
+}
+
+export function valueHolds(value: string, needle: string): boolean {
+  const left = fold(value);
+  const right = fold(needle);
+  if (right.length < 2 || left.length < 1) return false;
+  if (left === right) return true;
+  const escaped = right.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(^|[^a-z0-9])${escaped}([^a-z0-9]|$)`).test(left);
+}
+
+/** Une entité se lit dans les valeurs, avec la ligne et l'identifiant qui la portent. */
+export function hitsInRows(rows: Array<Record<string, unknown>>, needles: string[], tool?: string): ValueHit[] {
+  const hits: ValueHit[] = [];
+  const wanted = needles.map((needle) => needle.trim()).filter((needle) => needle.length >= 2);
+  rows.forEach((row, index) => {
+    const rowId = rowIdOf(row, index);
+    const walk = (value: unknown, field: string) => {
+      if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+        const shown = String(value).slice(0, 80);
+        for (const needle of wanted) {
+          if (!valueHolds(shown, needle)) continue;
+          hits.push({ needle, value: shown, field, rowId, tool });
+        }
+        return;
+      }
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        for (const [key, child] of Object.entries(value as Record<string, unknown>)) walk(child, field ? `${field}.${key}` : key);
+      }
+    };
+    for (const [key, value] of Object.entries(row)) if (key !== 'collection') walk(value, key);
+  });
+  return hits;
 }
 
 function proofTouches(proof: ChainProof | undefined, needle: string): boolean {
@@ -143,9 +195,14 @@ export function linkChain(prompt: string, fields: string[], proof?: ChainProof):
         ?? (wantsDocs(prompt) ? clean.find((item) => covers(claim.text, item)) : undefined);
       return field ? { claim: claim.id, text: claim.text, state: 'tenu' as const, field } : open;
     }
-    if (claim.kind === 'entite') {
-      const short = fold(claim.text).length <= 12 && !fold(claim.text).includes(' ');
-      const field = business.find((item) => covers(claim.text, item) || (short && /^(name|title|nom|titre|id|symbol|slug)$/i.test(item)));
+    if (claim.kind === 'entite' || claim.kind === 'filtre') {
+      const hit = (proof?.hits ?? []).find((item) => fold(item.needle) === fold(claim.text) || valueHolds(item.value, claim.text));
+      if (hit) return { claim: claim.id, text: claim.text, state: 'tenu' as const, field: `${hit.field}#${hit.rowId}` };
+      const literal = business.find((item) => fold(item) === fold(claim.text));
+      return literal ? { claim: claim.id, text: claim.text, state: 'tenu' as const, field: literal } : open;
+    }
+    if (claim.kind === 'champ') {
+      const field = business.find((item) => fold(item) === fold(claim.text) || fold(item).endsWith(`.${fold(claim.text)}`));
       return field ? { claim: claim.id, text: claim.text, state: 'tenu' as const, field } : open;
     }
     if (claim.kind === 'unite') {
@@ -168,7 +225,7 @@ export function linkChain(prompt: string, fields: string[], proof?: ChainProof):
       if (field || proofTouches(proof, key)) return { claim: claim.id, text: claim.text, state: 'tenu' as const, field: field ?? 'argument' };
       return open;
     }
-    if (claim.kind === 'meta' || claim.kind === 'action') return open;
+    if (claim.kind === 'meta' || claim.kind === 'action' || claim.kind === 'operation') return open;
     if (claim.kind === 'collection') {
       return business.length ? { claim: claim.id, text: claim.text, state: 'tenu' as const, field: business[0] } : open;
     }

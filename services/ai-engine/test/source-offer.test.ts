@@ -73,7 +73,7 @@ test('le sourcing appelle d’abord l’agent Sélecteur', async () => {
       },
     ]),
     async (tool) => {
-      if (tool === 'coingecko__execute') return [{ name: 'Bitcoin', price: 90000, volume: 1e9 }];
+      if (tool === 'coingecko__execute') return [{ name: 'Bitcoin', symbol: 'BTC', price: 90000, volume: 1e9 }];
       return [{ jour: 1, min_c: 0 }];
     },
     async (mission) => {
@@ -142,7 +142,7 @@ test('execute générique : docs → run(client) + retry, sans méta-outils MCP'
         const code = String(args.code ?? '');
         assert.match(code, /async function run\(client\)/);
         if (calls === 1) throw new Error('Property \'search_docs\' does not exist on type');
-        return [{ name: 'Bitcoin', price: 91000, volume: 2e9 }];
+        return [{ name: 'Bitcoin', symbol: 'BTC', price: 91000, volume: 2e9 }];
       }
       return [];
     },

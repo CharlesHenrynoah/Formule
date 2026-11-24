@@ -4,6 +4,8 @@
  * Le backend généré ne peut pas appeler le réseau : l'ingestion se fait ici, une fois.
  */
 import { affinity, collectionsInBackend, seedFromSamples, type McpSample } from '../agent/seed-from-samples.ts';
+import { claimsFromPrompt } from '../agent/engine/chain.ts';
+import { isRetrieval, profileTool } from '../agent/engine/capabilities.ts';
 
 export type SourceTool = {
   id: string;
@@ -155,6 +157,19 @@ export function argsForTool(tool: SourceTool, prompt: string): Record<string, un
   }
   const props = tool.inputSchema?.properties ?? {};
   if (props.perPage && args.perPage == null) args.perPage = 20;
+  const entity = claimsFromPrompt(prompt).find((claim) => claim.kind === 'entite' || claim.kind === 'filtre');
+  if (entity) {
+    for (const key of Object.keys(props)) {
+      if (required.includes(key) || args[key] != null) continue;
+      if (!/^(query|q|search|name|filter|nom)$/i.test(key)) continue;
+      const prop = tool.inputSchema?.properties?.[key];
+      const description = prop && typeof prop === 'object' && 'description' in prop ? String((prop as { description?: unknown }).description ?? '') : '';
+      if (!/filter|search|name|description|nom|titre|label|filtre/i.test(description)) continue;
+      if (!valueFits(entity.text, props[key])) continue;
+      args[key] = entity.text;
+      break;
+    }
+  }
   for (const [key, value] of Object.entries(args)) {
     if (props[key] && !valueFits(value, props[key])) return null;
   }
@@ -267,7 +282,7 @@ function toolScore(prompt: string, tool: SourceTool): number {
  */
 export function readsForUnmatched(prompt: string, tools: SourceTool[] = []): Array<{ tool: string; args: Record<string, unknown> }> {
   const { use, skip } = mentionedServers(prompt, tools);
-  let pool = tools.filter((tool) => !tool.write && tool.id && !tool.id.startsWith('app-'));
+  let pool = tools.filter((tool) => !tool.write && tool.id && !tool.id.startsWith('app-') && isRetrieval(profileTool(tool)));
   // Denylist demo sauf use explicite (filet anti-bleed, calqué control-plane).
   if (!use.some((id) => /^demo/.test(id))) {
     pool = pool.filter((tool) => !/^demo/.test(serverOf(tool.id)));
@@ -309,7 +324,7 @@ export function readsForCollections(missing: string[], prompt: string, tools: So
     const coveredByGithub = !!family && reads.some((read) => read.tool.startsWith('github__') && read.tool.includes(family === 'pulls' ? 'pull' : family));
     if (coveredByGithub) continue;
     const ranked = tools
-      .filter((tool) => !tool.write && tool.id && !tool.id.startsWith('app-') && !used.has(tool.id))
+      .filter((tool) => !tool.write && tool.id && !tool.id.startsWith('app-') && !used.has(tool.id) && isRetrieval(profileTool(tool)))
       .map((tool) => ({ tool, score: affinity(collection, `${tool.id} ${tool.name}`, tool.name), list: /^(list|search|find)_/.test(tool.name) ? 1 : 0 }))
       .filter((item) => item.score >= 3 && argsForTool(item.tool, prompt))
       .sort((a, b) => b.score - a.score || b.list - a.list);

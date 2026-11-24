@@ -3,6 +3,7 @@
  * puis on exécute nous-mêmes les lectures qu'il a nommées.
  */
 import { argsForTool, repoInText, valueFits, type SourceTool } from '../../app-agents/ingest.ts';
+import { profileTool } from './capabilities.ts';
 
 export type SelectedRead = { tool: string; args: Record<string, unknown> };
 
@@ -44,11 +45,11 @@ export function selectorPrompt(demand: string, tools: SourceTool[]): string {
     '2. Si la demande nomme un moteur, même approximativement, tu le privilégies.',
     '3. Tu ne choisis jamais un moteur que la demande écarte.',
     '4. Sans exclusion explicite : le moteur de démo ne sert que si aucun autre moteur ne couvre la demande.',
-    '5. Si la demande veut des mesures et qu’un outil execute (paramètre code) existe : search_docs seul ne suffit pas, il faut l’outil qui renvoie les données.',
+    '5. Une mesure se lit avec un outil de lecture, de recherche ou d’exécution SDK. Un outil de validation, de déclenchement ou d’écriture ne fournit pas les données. Un paramètre code ne suffit pas à reconnaître un exécuteur SDK.',
     '6. Tu n’inventes aucun identifiant. Au plus 3 outils en lecture, de préférence sur le même moteur.',
     '7. Un identifiant présent dans la demande (dépôt, ville, id) est recopié tel quel dans les arguments.',
     '8. Remplis les args requis avec des valeurs tirées de la demande ; sinon laisse args à {}.',
-    '9. Tu ne transmets jamais de code. Un outil execute se nomme avec args vide : le moteur d’exécution écrira le script.',
+    '9. Tu ne transmets jamais de code. Un exécuteur SDK se nomme avec args vide : le moteur d’exécution écrira le script. Tu ne choisis pas un outil de validation pour une lecture.',
     'Réponds uniquement par un JSON : {"reads":[{"tool":"identifiant","args":{}}],"why":"une phrase"}',
     '',
     intentHint(demand),
@@ -72,10 +73,12 @@ export function readsFromSelector(answer: string, tools: SourceTool[], demand: s
   for (const read of Array.isArray(parsed.reads) ? parsed.reads : []) {
     const tool = known.get(String(read.tool ?? ''));
     if (!tool) continue;
+    const profile = profileTool(tool);
+    if (profile.capability === 'VALIDATE' || profile.capability === 'WRITE' || profile.capability === 'TRIGGER') continue;
     const given = read.args && typeof read.args === 'object' && !Array.isArray(read.args) ? read.args as Record<string, unknown> : {};
     const args = { ...(argsForTool(tool, demand) ?? {}), ...given };
-    const needsCode = (tool.inputSchema?.required ?? []).includes('code');
-    if (needsCode) delete args.code;
+    const sdk = profile.capability === 'SDK_EXECUTE';
+    if (sdk) delete args.code;
     if (repo) {
       if ('owner' in args) args.owner = repo.owner;
       if ('repo' in args && args.repo !== repo.repo) args.repo = repo.repo;
@@ -83,7 +86,7 @@ export function readsFromSelector(answer: string, tools: SourceTool[], demand: s
         if (/repo.?name|repository|full.?name/i.test(key)) args[key] = `${repo.owner}/${repo.repo}`;
       }
     }
-    const required = (tool.inputSchema?.required ?? []).filter((key) => !(needsCode && key === 'code'));
+    const required = (tool.inputSchema?.required ?? []).filter((key) => !(sdk && key === 'code'));
     if (required.some((key) => args[key] == null || args[key] === '')) continue;
     const props = tool.inputSchema?.properties ?? {};
     if (Object.entries(args).some(([key, value]) => props[key] && !valueFits(value, props[key]))) continue;

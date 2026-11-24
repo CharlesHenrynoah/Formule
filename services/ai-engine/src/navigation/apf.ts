@@ -71,7 +71,7 @@ export function mapField(input: {
   return { logs, chain, report, obstacles, distance };
 }
 
-const NEED_ORDER: ClaimKind[] = ['mesure', 'collection', 'entite', 'dimension', 'parametre', 'periode', 'unite'];
+const NEED_ORDER: ClaimKind[] = ['mesure', 'collection', 'entite', 'filtre', 'champ', 'dimension', 'parametre', 'periode', 'unite'];
 
 export type RankedNeed = { text: string; kind: ClaimKind; layer: Layer; score: number };
 
@@ -81,7 +81,7 @@ export function rankNeeds(needs: Array<{ text: string; kind: ClaimKind }>, block
     .filter((need) => NEED_ORDER.includes(need.kind))
     .map((need) => {
       const order = NEED_ORDER.indexOf(need.kind);
-      const layer: Layer = need.kind === 'mesure' || need.kind === 'collection' || need.kind === 'entite' ? 'mcp' : locate(need.text);
+      const layer: Layer = need.kind === 'mesure' || need.kind === 'collection' || need.kind === 'entite' || need.kind === 'filtre' || need.kind === 'champ' ? 'mcp' : locate(need.text);
       const score = (NEED_ORDER.length - order) - (blocked.includes(need.text) ? 20 : 0);
       return { ...need, layer, score };
     })

@@ -8,6 +8,7 @@
 import ts from 'typescript';
 import type { SourceTool } from '../../app-agents/ingest.ts';
 import { claimsFromPrompt } from './chain.ts';
+import { profileTool } from './capabilities.ts';
 import { classifyLink } from '../../../../mcp-hub/src/link-state.ts';
 
 export type DocHint = {
@@ -506,7 +507,7 @@ export function findCodeTool(
     const server = serverOf(tool.id);
     if (skip.includes(server)) return false;
     if (preferred.length && !preferred.includes(server)) return false;
-    return (tool.inputSchema?.required ?? []).includes('code');
+    return profileTool(tool).capability === 'SDK_EXECUTE';
   });
 }
 
