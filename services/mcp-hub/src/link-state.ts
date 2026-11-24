@@ -46,7 +46,7 @@ export function classifyLink(message: string, code?: number): { obstacle: Obstac
   if (/terminated|econnreset|econnrefused|socket hang up|fetch failed|und_err_|other side closed|network error|headers timeout|body timeout/.test(text)) {
     return { obstacle: 'transport', recoverable: true };
   }
-  if (code === 408 || code === 502 || code === 503 || code === 504 || /etimedout|timeout|délai|unavailable|temporairement|503|504/.test(text)) {
+  if (code === 408 || code === 502 || code === 503 || code === 504 || /etimedout|timeout|délai|unavailable|indisponible|temporairement|503|504/.test(text)) {
     return { obstacle: 'availability', recoverable: true };
   }
   if (/expected \d+\s*(?:-\d+)?\s+arguments?|not assignable to parameter/.test(text)) {

@@ -65,6 +65,11 @@ export async function runEngine(input: CrewInput, cfg: CrewConfig, ctx: { mcp?: 
     emit({ type: 'agent', kind: 'role', role: 'data', label: 'Sélecteur' });
     const page = input.previous?.files?.['src/App.tsx'] ?? '';
     const llm = providerFor(cfg);
+    let registry: Awaited<ReturnType<NonNullable<NonNullable<typeof ctx.mcp>['listServers']>>> = [];
+    let registryUnreadable = false;
+    if (ctx.mcp.listServers) {
+      try { registry = await ctx.mcp.listServers(); } catch { registryUnreadable = true; }
+    }
     const offer = await collectSource(
       input.prompt,
       page,
@@ -76,7 +81,7 @@ export async function runEngine(input: CrewInput, cfg: CrewConfig, ctx: { mcp?: 
           content: [
             'Tu es le Sélecteur. Chaque serveur MCP est un moteur interchangeable, l’app est le véhicule.',
             'Tu choisis le moteur branché dont les outils couvrent la demande. Pas de marque par défaut.',
-            'Tu n’utilises pas la démo si un autre moteur couvre la demande. Tu n’inventes aucun outil.',
+            'Si la demande nomme un moteur, c’est le seul. La démo ne remplace pas une source réelle. Tu n’inventes aucun outil.',
             'Réponds uniquement par le JSON demandé.',
           ].join(' '),
         }, { role: 'user', content: mission }],
@@ -94,6 +99,11 @@ export async function runEngine(input: CrewInput, cfg: CrewConfig, ctx: { mcp?: 
         }, { role: 'user', content: mission }],
         { hint: { task: 'tools', prompt: input.prompt }, maxTokens: 2500, signal: ctx.signal },
       ),
+      {
+        registry,
+        registryUnreadable,
+        reconnect: ctx.mcp.reconnect ? (id) => ctx.mcp!.reconnect!(id) : undefined,
+      },
     );
     if (offer.log) note('Sélecteur', 'diagnostic', offer.log.slice(0, 4000), 'info');
     emit({ type: 'agent', kind: 'message', role: 'data', text: offer.text.slice(0, 500) });

@@ -2,7 +2,7 @@
  * Product Owner : avant le Développeur, il raisonne sur l’intention réelle
  * (n’importe quel logiciel / MCP), puis vérifie que les lectures y correspondent.
  */
-import { keepNamedServer, mentionedServers, type SourceTool } from '../../app-agents/ingest.ts';
+import { resolveSources, type SourceTool } from '../../app-agents/ingest.ts';
 import { keepSpan } from './series.ts';
 import { hitsInRows, linkChain, measurableFields, observedFields, rowsAbout, type ChainProof } from './chain.ts';
 import { compileIntent, globalShape, type Intent } from './sdk-scope.ts';
@@ -221,8 +221,31 @@ export function reviewSource(
 ): OwnerVerdict {
   const thought = thinkAboutDemand(prompt, intent);
   const thinking = thoughtBlock(thought);
-  const { use, skip } = mentionedServers(prompt, tools);
-  const kept = keepNamedServer(prompt, tools, reads);
+  const bound = intent.sources.required.length || intent.sources.forbidden.length || intent.sources.unknown.length;
+  const sources = bound
+    ? intent.sources
+    : resolveSources(prompt, [...new Map(tools.map((tool) => {
+      const id = serverOf(tool.id);
+      return [id, { id, name: tool.serverName }] as const;
+    }).filter((entry) => entry[0].length >= 3)).values()]);
+  if (sources.unknown.length) {
+    const text = [
+      thinking,
+      '',
+      'Product Owner : le serveur demandé est absent du registre.',
+      `Serveur inconnu : ${sources.unknown.join(', ')}.`,
+      'Rien ne peut être généré.',
+    ].join('\n');
+    return { ok: false, text, brief: text, samples: [], thought, missing: sources.unknown.map((id) => `serveur inconnu : ${id}`), retryable: false };
+  }
+  const use = sources.required;
+  const skip = sources.forbidden;
+  const kept = reads.filter((read) => {
+    const server = serverOf(read.tool);
+    if (skip.includes(server)) return false;
+    if (use.length && server && !use.includes(server)) return false;
+    return true;
+  });
   const okReads = kept.filter((read) => read.ok && read.rows.length);
   const fields = fieldsOf(okReads);
   const samples = samplesOf(okReads);

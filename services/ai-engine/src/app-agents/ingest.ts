@@ -7,6 +7,16 @@ import { affinity, collectionsInBackend, seedFromSamples, type McpSample } from 
 import { claimsFromPrompt } from '../agent/engine/chain.ts';
 import { isRetrieval, profileTool } from '../agent/engine/capabilities.ts';
 
+/** Registre : identité et état, distincts du catalogue d'outils. */
+export type ServerRecord = {
+  id: string;
+  name?: string;
+  enabled: boolean;
+  status: 'connected' | 'connecting' | 'error' | 'disabled';
+  authorized: number;
+  error?: string;
+};
+
 export type SourceTool = {
   id: string;
   name: string;
@@ -254,6 +264,53 @@ export function mentionedServers(prompt: string, tools: SourceTool[]): { use: st
   // skip gagne toujours (open-mcp-apps control-plane) : pas de use ∩ skip.
   const cleanUse = use.filter((id) => !skip.includes(id));
   return { use: cleanUse, skip };
+}
+
+const NOT_A_SERVER = new Set(['recherche', 'donnees', 'donnee', 'data', 'lecture', 'information', 'informations', 'base', 'temps', 'reel', 'reelle', 'reelles']);
+
+/**
+ * Identité demandée, lue sur le registre entier.
+ * L'état de connexion n'entre pas dans cette lecture.
+ */
+export function resolveSources(prompt: string, identities: Array<{ id: string; name?: string }>): { required: string[]; forbidden: string[]; unknown: string[] } {
+  const tools: SourceTool[] = [];
+  const seen = new Set<string>();
+  for (const item of identities) {
+    const id = item.id.trim();
+    if (id.length < 3 || seen.has(id)) continue;
+    seen.add(id);
+    tools.push({ id: `${id}__identity`, name: 'identity', serverName: item.name || id, write: false });
+  }
+  const named = mentionedServers(prompt, tools);
+  const required = [...named.use];
+  const forbidden = [...named.skip];
+  const unknown: string[] = [];
+  const text = prompt.toLowerCase().normalize('NFD').replace(/\p{M}/gu, '');
+  const pattern = /(?:serveur|mcp|moteur)\s+(?:de\s+)?([a-z0-9][a-z0-9-]{2,32})/g;
+  for (const match of text.matchAll(pattern)) {
+    const token = match[1]!;
+    if (NOT_A_SERVER.has(token)) continue;
+    const at = match.index ?? 0;
+    const before = text.slice(Math.max(0, at - 48), at);
+    const negated = /sans|aucun|jamais|n['']?utilise\s+pas|pas\s+(?:le\s+)?/.test(before);
+    const want = squash(token);
+    const hit = identities.find((item) => {
+      const id = squash(item.id);
+      const name = squash(item.name ?? '');
+      if (id === want || (name && name === want)) return true;
+      return closeName(id, want) || (name.length >= 4 && closeName(name, want));
+    });
+    if (!hit) {
+      if (!negated && !unknown.includes(token)) unknown.push(token);
+      continue;
+    }
+    if (negated) {
+      if (!forbidden.includes(hit.id)) forbidden.push(hit.id);
+      continue;
+    }
+    if (!required.includes(hit.id)) required.push(hit.id);
+  }
+  return { required: required.filter((id) => !forbidden.includes(id)), forbidden, unknown };
 }
 
 /** Si la demande nomme un serveur, on ne garde pas les lectures d'un autre. */

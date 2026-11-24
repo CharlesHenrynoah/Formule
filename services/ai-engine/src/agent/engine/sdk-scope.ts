@@ -3,6 +3,7 @@
  * Un champ commun ne rend pas deux périmètres interchangeables.
  */
 import ts from 'typescript';
+import { resolveSources } from '../../app-agents/ingest.ts';
 import { claimsFromPrompt, hitsInRows, linkChain, observedFields, quantitativeClaim, rowsAbout, termCovers, type ChainProof, type Claim } from './chain.ts';
 import { routeDemand, type DemandRoute } from './pose.ts';
 
@@ -46,6 +47,13 @@ export type Requirements = {
 /** Une acquisition a son propre contrat. Elle ne hérite pas des mesures des autres vues. */
 export type Acquisition = Requirements & { id: string; label: string; dependsOn: string[] };
 
+/** Contrainte de source. L'identité est résolue, l'état de connexion n'y entre pas. */
+export type SourceLock = {
+  required: string[];
+  forbidden: string[];
+  unknown: string[];
+};
+
 /** Contrat unique de l'intention. Les autres modules le consomment, ils ne relisent pas le prompt. */
 export type Intent = {
   version: 1;
@@ -53,7 +61,10 @@ export type Intent = {
   route: DemandRoute;
   claims: Claim[];
   acquisitions: Acquisition[];
+  sources: SourceLock;
 };
+
+const OPEN_SOURCES: SourceLock = { required: [], forbidden: [], unknown: [] };
 
 const UI_KIND = new Set(['meta', 'vue', 'action', 'operation', 'periode']);
 
@@ -139,10 +150,11 @@ function acquisitionsFrom(prompt: string, claims: Claim[]): Acquisition[] {
   return out;
 }
 
-/** Une seule compilation. La route, les claims et les acquisitions sortent du même passage. */
-export function compileIntent(prompt: string): Intent {
+/** Une seule compilation. La route, les claims, les acquisitions et la source sortent du même passage. */
+export function compileIntent(prompt: string, identities: Array<{ id: string; name?: string }> = []): Intent {
   const claims = claimsFromPrompt(prompt);
-  return { version: 1, prompt, route: routeDemand(prompt), claims, acquisitions: acquisitionsFrom(prompt, claims) };
+  const sources = identities.length ? resolveSources(prompt, identities) : OPEN_SOURCES;
+  return { version: 1, prompt, route: routeDemand(prompt), claims, acquisitions: acquisitionsFrom(prompt, claims), sources };
 }
 
 export function acquisitionsOf(prompt: string): Acquisition[] {

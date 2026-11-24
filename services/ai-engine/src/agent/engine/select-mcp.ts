@@ -8,12 +8,17 @@ import { compileIntent } from './sdk-scope.ts';
 
 export type SelectedRead = { tool: string; args: Record<string, unknown> };
 
-function intentHint(demand: string): string {
-  const intent = compileIntent(demand);
+function intentHint(intent: ReturnType<typeof compileIntent>): string {
   const contract = intent.acquisitions.map((item) => `${item.label} (${item.scope}, ${item.grain}) : ${item.measures.concat(item.entities).join(', ') || 'lecture'}`).join(' ; ');
+  const source = intent.sources.required.length
+    ? `Contrainte de source : ${intent.sources.required.join(', ')}. Aucun autre serveur.`
+    : intent.sources.unknown.length
+      ? `Contrainte de source : ${intent.sources.unknown.join(', ')} absent du registre.`
+      : 'Aucune source imposée.';
   return [
     'Chaque serveur est un moteur interchangeable. L’app est le véhicule : elle se monte sur un moteur, elle n’est pas écrite pour une marque.',
-    'Choisis le moteur dont le nom, la description ou les outils couvrent la demande. S’il en nomme un, c’est celui-là.',
+    'Choisis le moteur dont le nom, la description ou les outils couvrent la demande. S’il en nomme un, c’est celui-là, et aucun autre.',
+    source,
     intent.route.data
       ? 'La demande veut des mesures ou une liste : un outil qui renvoie des données (list, get, execute). Une doc seule ne suffit pas.'
       : 'Aucune lecture de données n’est demandée.',
@@ -21,7 +26,7 @@ function intentHint(demand: string): string {
   ].join('\n');
 }
 
-export function selectorPrompt(demand: string, tools: SourceTool[]): string {
+export function selectorPrompt(demand: string, tools: SourceTool[], intent = compileIntent(demand)): string {
   const groups = new Map<string, SourceTool[]>();
   for (const tool of tools) {
     if (tool.write || !tool.id || tool.id.startsWith('app-')) continue;
@@ -42,9 +47,9 @@ export function selectorPrompt(demand: string, tools: SourceTool[]): string {
     'Tu raisonnes sur l’intention (ce qu’il faut afficher) et sur les moteurs réellement branchés, pas sur une marque par défaut.',
     'Règles :',
     '1. Un moteur = un serveur. Tu compares son nom, son serverName et la description de ses outils à la demande.',
-    '2. Si la demande nomme un moteur, même approximativement, tu le privilégies.',
+    '2. Si la demande nomme un moteur, tu ne choisis que celui-là. Son absence n’autorise aucun autre.',
     '3. Tu ne choisis jamais un moteur que la demande écarte.',
-    '4. Sans exclusion explicite : le moteur de démo ne sert que si aucun autre moteur ne couvre la demande.',
+    '4. Le moteur de démo n’est choisi que si la demande le nomme. Il ne remplace pas une source réelle.',
     '5. Une mesure se lit avec un outil de lecture, de recherche ou d’exécution SDK. Un outil de validation, de déclenchement ou d’écriture ne fournit pas les données. Un paramètre code ne suffit pas à reconnaître un exécuteur SDK.',
     '6. Tu n’inventes aucun identifiant. Au plus 3 outils en lecture, de préférence sur le même moteur.',
     '7. Un identifiant présent dans la demande (dépôt, ville, id) est recopié tel quel dans les arguments.',
@@ -52,7 +57,7 @@ export function selectorPrompt(demand: string, tools: SourceTool[]): string {
     '9. Tu ne transmets jamais de code. Un exécuteur SDK se nomme avec args vide : le moteur d’exécution écrira le script. Tu ne choisis pas un outil de validation pour une lecture.',
     'Réponds uniquement par un JSON : {"reads":[{"tool":"identifiant","args":{}}],"why":"une phrase"}',
     '',
-    intentHint(demand),
+    intentHint(intent),
     '',
     'Serveurs disponibles :',
     lines.join('\n') || '- aucun',

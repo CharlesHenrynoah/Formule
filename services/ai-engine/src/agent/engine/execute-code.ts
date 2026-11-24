@@ -264,7 +264,7 @@ export function classifyDiagnostic(error: string): DiagnosticClass {
   if (restriction === 'QUOTA_EXCEEDED' || restriction === 'RATE_LIMIT') return 'quota';
   if (restriction === 'INVALID_ARGUMENT') return 'signature';
   const link = classifyLink(error);
-  if (link.obstacle === 'transport' || link.obstacle === 'session') return link.obstacle;
+  if (link.obstacle === 'transport' || link.obstacle === 'session' || link.obstacle === 'availability') return link.obstacle;
   if (/401|unauthorized|invalid api key|invalid token|authentication failed/i.test(error)) return 'auth';
   if (/429|quota|rate limit|too many requests/i.test(error)) return 'quota';
   if (/503|502|504|unavailable|econn|etimedout|timeout|temporairement/i.test(error)) return 'availability';

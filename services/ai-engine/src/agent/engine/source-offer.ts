@@ -3,7 +3,7 @@
  * L’agent Sélecteur choisit le MCP ; le déterministe ne sert qu’en repli.
  * Le dépôt et les garde-fous (keepNamedServer, Product Owner) restent déterministes.
  */
-import { argsForTool, keepNamedServer, mentionedServers, readsForCollections, readsForUnmatched, valueFits, type SourceTool } from '../../app-agents/ingest.ts';
+import { argsForTool, keepNamedServer, mentionedServers, readsForCollections, readsForUnmatched, valueFits, type ServerRecord, type SourceTool } from '../../app-agents/ingest.ts';
 import {
   classifyRestriction,
   correctAcquisition,
@@ -268,11 +268,16 @@ async function runReads(
   reads: Array<{ tool: string; args: Record<string, unknown> }>,
   call: (tool: string, args: Record<string, unknown>) => Promise<unknown>,
   admit?: (tool: string, args: Record<string, unknown>) => string | null,
+  lock?: { required: string[]; forbidden: string[] },
 ): Promise<SourceRead[]> {
   const done: SourceRead[] = [];
   const dead = new Set<string>();
   for (const read of reads) {
     const server = serverOf(read.tool);
+    if (lock && (lock.forbidden.includes(server) || (lock.required.length > 0 && !lock.required.includes(server)))) {
+      done.push({ ...read, ok: false, error: `source refusée : ${server || read.tool}`, rows: [], state: 'erreur', diagnostic: 'signature' });
+      continue;
+    }
     if (server && dead.has(server)) continue;
     const refusal = admit?.(read.tool, read.args) ?? null;
     if (refusal === 'defer') continue;
@@ -376,7 +381,8 @@ async function coverEntities(
   const notes: string[] = [];
   let gap = '';
   let changed = false;
-  const { use, skip } = mentionedServers(prompt, catalog);
+  const locked = sourceLock(intent);
+  const { use, skip } = locked ? { use: locked.required, skip: locked.forbidden } : mentionedServers(prompt, catalog);
   const fromReads = [...new Set(done.map((read) => serverOf(read.tool)).filter(Boolean))];
   const preferred = use.length ? use : fromReads.filter((id) => !skip.includes(id) && !/^demo/.test(id));
   const down = new Set(done.filter((read) => !read.ok && (read.diagnostic === 'transport' || classifyRestriction(read.error ?? '') === 'TRANSPORT_ERROR')).map((read) => serverOf(read.tool)));
@@ -410,7 +416,7 @@ async function coverEntities(
       continue;
     }
     const already = done.find((read) => read.tool === tool.id && JSON.stringify(read.args) === JSON.stringify(args));
-    const extra = already ? [already] : await runReads([{ tool: tool.id, args }], call);
+    const extra = already ? [already] : await runReads([{ tool: tool.id, args }], call, undefined, sourceLock(intent));
     if (!already) {
       done = keepFootholds(done, extra);
       changed = true;
@@ -432,6 +438,105 @@ async function coverEntities(
   return { done, log: notes.join('\n'), gap, changed };
 }
 
+function catalogOf(listed: Listed[]): SourceTool[] {
+  return listed.filter((tool) => !(tool.write || tool.ecriture)).map((tool) => ({
+    id: tool.id,
+    name: tool.id.includes('__') ? tool.id.split('__').slice(1).join('__') : tool.id,
+    description: tool.description,
+    serverName: tool.serverName,
+    write: false,
+    inputSchema: (tool.schema ?? tool.inputSchema) as SourceTool['inputSchema'],
+  }));
+}
+
+function mergeRecords(registry: ServerRecord[], catalog: SourceTool[]): ServerRecord[] {
+  const map = new Map<string, ServerRecord>();
+  for (const server of registry) map.set(server.id, { ...server, name: server.name || server.id });
+  for (const tool of catalog) {
+    const id = serverOf(tool.id);
+    if (id.length < 3) continue;
+    const have = map.get(id);
+    if (!have) {
+      map.set(id, { id, name: tool.serverName || id, enabled: true, status: 'connected', authorized: 1 });
+      continue;
+    }
+    if (have.enabled === false || have.status === 'disabled') continue;
+    have.status = 'connected';
+    have.authorized = Math.max(have.authorized, 1);
+    if (tool.serverName) have.name = have.name || tool.serverName;
+  }
+  return [...map.values()];
+}
+
+function sourceLock(intent: Intent): { required: string[]; forbidden: string[] } | undefined {
+  if (!intent.sources.required.length && !intent.sources.forbidden.length) return undefined;
+  return { required: intent.sources.required, forbidden: intent.sources.forbidden };
+}
+
+function narrowCatalog(catalog: SourceTool[], intent: Intent): SourceTool[] {
+  const { required, forbidden } = intent.sources;
+  const real = catalog.some((tool) => {
+    const id = serverOf(tool.id);
+    return id.length > 0 && !/^demo/.test(id) && !forbidden.includes(id);
+  });
+  return catalog.filter((tool) => {
+    const id = serverOf(tool.id);
+    if (!id || forbidden.includes(id)) return false;
+    if (required.length && !required.includes(id)) return false;
+    if (!required.length && /^demo/.test(id) && real) return false;
+    return true;
+  });
+}
+
+function sourceBlocked(lines: string[]): SourceOffer {
+  const detail = lines.join(' ; ');
+  const text = [
+    'Sélecteur : contrainte de source tenue.',
+    'Données obtenues : aucune.',
+    `Données manquantes : ${detail}.`,
+    `Obstacle : ${detail}.`,
+    'Correction : aucune.',
+    'Résultat : source indisponible.',
+    'Voici les données pour cette demande.',
+    'Rien ne peut être généré tant que la source demandée n’est pas disponible.',
+  ].join('\n');
+  return { canBuild: false, text, brief: text, samples: [], log: text };
+}
+
+async function holdSources(
+  intent: Intent,
+  identities: ServerRecord[],
+  reconnect?: (id: string) => Promise<ServerRecord | null>,
+): Promise<{ identities: ServerRecord[]; blocked: string[]; refresh: boolean }> {
+  const blocked: string[] = [];
+  let refresh = false;
+  const next = identities.map((item) => ({ ...item }));
+  for (const id of intent.sources.required) {
+    const state = next.find((item) => item.id === id);
+    if (!state) {
+      blocked.push(`${id} : inconnu du registre`);
+      continue;
+    }
+    if (state.enabled === false || state.status === 'disabled') {
+      blocked.push(`${id} : désactivé`);
+      continue;
+    }
+    if (state.status === 'connected') continue;
+    let revived: ServerRecord | null = null;
+    try { revived = reconnect ? await reconnect(id) : null; } catch (error) {
+      revived = { ...state, status: 'error', authorized: 0, error: (error as Error).message };
+    }
+    if (revived && revived.status === 'connected' && revived.enabled !== false) {
+      const index = next.findIndex((item) => item.id === id);
+      next[index] = { ...state, ...revived, id };
+      refresh = true;
+      continue;
+    }
+    blocked.push(`${id} : indisponible (${revived?.error || state.error || 'connexion impossible'})`);
+  }
+  return { identities: next, blocked, refresh };
+}
+
 /** Lit les outils. Le sélecteur choisit le serveur. Le Product Owner valide avant Valider. */
 export async function collectSource(
   prompt: string,
@@ -440,20 +545,27 @@ export async function collectSource(
   call: (tool: string, args: Record<string, unknown>) => Promise<unknown>,
   select?: (mission: string) => Promise<string>,
   writeCode?: (mission: string) => Promise<string>,
+  options?: { registry?: ServerRecord[]; registryUnreadable?: boolean; reconnect?: (id: string) => Promise<ServerRecord | null> },
 ): Promise<SourceOffer> {
-  const intent = compileIntent(prompt);
+  let intent = compileIntent(prompt);
   if (presentLabel(prompt, page)) return offerFromReads(prompt, [], page, intent);
   if (!intent.route.data) return offerFromReads(prompt, [], page, intent);
   try {
     const listed = await list();
-    const catalog: SourceTool[] = listed.filter((tool) => !(tool.write || tool.ecriture)).map((tool) => ({
-      id: tool.id,
-      name: tool.id.includes('__') ? tool.id.split('__').slice(1).join('__') : tool.id,
-      description: tool.description,
-      serverName: tool.serverName,
-      write: false,
-      inputSchema: (tool.schema ?? tool.inputSchema) as SourceTool['inputSchema'],
-    }));
+    let catalog = catalogOf(listed);
+    let identities = mergeRecords(options?.registry ?? [], catalog);
+    intent = compileIntent(prompt, identities.map((item) => ({ id: item.id, name: item.name })));
+    if (options?.registryUnreadable && intent.sources.unknown.length) return sourceBlocked(intent.sources.unknown.map((id) => `${id} : registre illisible`));
+    if (intent.sources.unknown.length) return sourceBlocked(intent.sources.unknown.map((id) => `${id} : inconnu du registre`));
+    const held = await holdSources(intent, identities, options?.reconnect);
+    identities = held.identities;
+    if (held.refresh) catalog = catalogOf(await list());
+    for (const id of intent.sources.required) {
+      if (held.blocked.some((line) => line.startsWith(`${id} :`))) continue;
+      if (!catalog.some((tool) => serverOf(tool.id) === id)) held.blocked.push(`${id} : aucun outil autorisé`);
+    }
+    if (held.blocked.length) return sourceBlocked(held.blocked);
+    catalog = narrowCatalog(catalog, intent);
     const demand = `${prompt}\n${page}`;
     let reads: Array<{ tool: string; args: Record<string, unknown> }> = [];
     let via: 'agent' | 'collections' | 'unmatched' | 'none' = 'none';
@@ -461,7 +573,7 @@ export async function collectSource(
     // 1) Agent Sélecteur d’abord : choix intelligent du serveur / des outils.
     if (select) {
       try {
-        const picked = keepNamedServer(demand, catalog, readsFromSelector(await select(selectorPrompt(demand, catalog)), catalog, demand));
+        const picked = keepNamedServer(demand, catalog, readsFromSelector(await select(selectorPrompt(demand, catalog, intent)), catalog, demand));
         if (picked.length) {
           reads = picked.slice(0, 3);
           via = 'agent';
@@ -494,7 +606,7 @@ export async function collectSource(
       const verdict = admitExecute(String(args.code), liveDocs);
       return verdict.ok ? null : verdict.reason;
     };
-    let done = await runReads(reads, call, admitCall);
+    let done = await runReads(reads, call, admitCall, sourceLock(intent));
     let owner = reviewSource(prompt, catalog, done, intent);
     let lastCorrection = 'aucune';
     let lastLayer = '';
@@ -510,7 +622,8 @@ export async function collectSource(
     // Une acquisition à la fois. Une erreur ne retire pas les appuis déjà validés.
     // Une entité, un filtre ou une validation ne partent pas vers un exécuteur de code.
     if (!owner.ok && writeCode && hasDataNeed(prompt, done, intent)) {
-      const { use, skip } = mentionedServers(prompt, catalog);
+      const locked = sourceLock(intent);
+      const { use, skip } = locked ? { use: locked.required, skip: locked.forbidden } : mentionedServers(prompt, catalog);
       const fromReads = [...new Set(done.map((read) => serverOf(read.tool)).filter(Boolean))];
       const preferred = use.length ? use : fromReads.filter((id) => !skip.includes(id) && !/^demo/.test(id));
       const codeTool = findCodeTool(catalog, preferred, skip);
@@ -525,7 +638,7 @@ export async function collectSource(
         if (!docs.length) {
           const docsTool = findDocsTool(catalog, preferred.length ? preferred : [server], skip);
           if (docsTool) {
-            const dug = await runReads([{ tool: docsTool.id, args: { query: prompt.slice(0, 160), language: 'en' } }], call);
+            const dug = await runReads([{ tool: docsTool.id, args: { query: prompt.slice(0, 160), language: 'en' } }], call, undefined, sourceLock(intent));
             done = [...done.filter((read) => !skip.includes(serverOf(read.tool))), ...dug];
             docs = sdkHintsFromDocs(dug.flatMap((read) => documented(read.rows)));
           }
@@ -661,7 +774,7 @@ export async function collectSource(
             }
             seen.add(key);
             box.lastCode = code;
-            const extra = (await runReads([{ tool: codeTool.id, args: { code, intent: claim.slice(0, 160) } }], call, admitCall)).map((read) => ({ ...read, acquisition: acq.id, observedAt: new Date().toISOString() }));
+            const extra = (await runReads([{ tool: codeTool.id, args: { code, intent: claim.slice(0, 160) } }], call, admitCall, sourceLock(intent))).map((read) => ({ ...read, acquisition: acq.id, observedAt: new Date().toISOString() }));
             done = keepFootholds(done, extra);
             const fresh = extra.find((read) => read.raw != null);
             if (fresh?.raw != null) box.observed = observeShape(fresh.raw);
@@ -762,18 +875,27 @@ export async function collectSource(
       ? 'Sélecteur : repli outils non appariés.'
       : '';
     // Afficher seulement les lectures hors skip (quests : séparer erreur / ok).
-    const { skip: skipShow } = mentionedServers(prompt, catalog);
-    const visible = done.filter((read) => !skipShow.includes(serverOf(read.tool)) && !(/^demo/.test(serverOf(read.tool)) && skipShow.some((id) => /^demo/.test(id))));
-    const offer = offerFromReads(prompt, visible.length ? visible : done.filter((read) => !/^demo/.test(serverOf(read.tool))), page, intent);
+    const shown = sourceLock(intent);
+    const useShow = shown?.required ?? [];
+    const skipShow = shown?.forbidden ?? mentionedServers(prompt, catalog).skip;
+    const visible = done.filter((read) => {
+      const server = serverOf(read.tool);
+      if (skipShow.includes(server)) return false;
+      if (useShow.length && server && !useShow.includes(server)) return false;
+      if (/^demo/.test(server) && skipShow.some((id) => /^demo/.test(id))) return false;
+      return true;
+    });
+    const offer = offerFromReads(prompt, useShow.length ? visible : (visible.length ? visible : done.filter((read) => !/^demo/.test(serverOf(read.tool)))), page, intent);
     const sawBusiness = done.some((read) => read.ok && read.rows.some((row) => !isDocumentationRow(row)));
     const linkDown = done.some((read) => !read.ok && (read.diagnostic === 'transport' || read.diagnostic === 'availability' || read.diagnostic === 'session' || classifyRestriction(read.error ?? '') === 'TRANSPORT_ERROR'));
     if (sawBusiness || linkDown) gap = '';
     const missing = owner.ok ? 'aucune' : (owner.missing.filter((item) => item !== 'lecture métier').join(', ') || gap || 'lecture exploitable');
     const result = owner.ok && offer.canBuild ? 'exigences tenues' : linkDown && !sawBusiness ? 'liaison interrompue' : gap || (offer.samples.length ? 'acquisitions réussies conservées, exigences encore ouvertes' : 'rien ne peut être généré');
-    const text = [
+    let text = [
       selectLine,
       offer.text.replace('Données manquantes : aucune.', `Données manquantes : ${missing}.`).replace('Données manquantes : lecture exploitable.', `Données manquantes : ${missing}.`).replace('Correction : aucune.', `Correction : ${lastCorrection}.`).replace('Résultat : lecture exploitable.', `Résultat : ${result}.`).replace('Résultat : rien ne peut être généré.', `Résultat : ${result}.`),
     ].filter(Boolean).join('\n\n');
+    if (!owner.ok) text = text.replace(/Ce qui peut être généré :[^\n]*/g, 'Rien ne peut être généré.');
     const focus = <T extends { rows: Array<Record<string, unknown>> }>(samples: T[]): T[] => {
       const needles = intent.claims.filter((claim) => claim.kind === 'entite' || claim.kind === 'filtre').map((claim) => claim.text);
       if (!needles.length) return samples;
