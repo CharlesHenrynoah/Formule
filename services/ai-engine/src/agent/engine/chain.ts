@@ -6,7 +6,7 @@
  */
 import { createHash } from 'node:crypto';
 
-export type ClaimKind = 'vue' | 'mesure';
+export type ClaimKind = 'entite' | 'mesure' | 'unite' | 'periode' | 'dimension' | 'collection' | 'vue';
 export type Claim = { id: string; kind: ClaimKind; text: string };
 export type LinkState = 'tenu' | 'ouvert';
 export type Link = { claim: string; text: string; state: LinkState; field?: string };
@@ -20,6 +20,7 @@ export type Chain = {
   prompt: Seal;
   data: Seal;
   text: string;
+  missing: string[];
 };
 
 const DOC_FIELD = /^(method|endpoint|summary|description|params|response|query|language|path|url)$/i;
@@ -76,8 +77,16 @@ export function claimsFromPrompt(prompt: string): Claim[] {
   const subject = prompt.match(/donn[ée]es de\s+([^,(.]{2,40})/i);
   if (subject) add('mesure', subject[1]);
   for (const match of prompt.matchAll(MEASURE)) add('mesure', match[1]);
+  for (const match of prompt.matchAll(/\b(\d+\s*(?:jours?|heures?|semaines?|mois))\b/gi)) add('periode', match[1]);
+  for (const match of prompt.matchAll(/\b(EUR|USD|GBP|JPY|CHF)\b/g)) add('unite', match[1]);
+  for (const match of prompt.matchAll(/\bpar\s+([A-Za-zÀ-ÿ][\w-]{2,30})/gi)) add('dimension', match[1]);
+  for (const match of prompt.matchAll(/[«"]([^»"]{2,60})[»"]/g)) add('entite', match[1]);
+  for (const match of prompt.matchAll(/\b([A-Z]{2,6})\b/g)) {
+    if (!/^(MCP|API|EUR|USD|GBP|JPY|CHF|GET|SDK|HTTP)$/.test(match[1])) add('entite', match[1]);
+  }
+  for (const match of prompt.matchAll(/\b(issues?|commits?|releases?|pull requests?|commandes?|topics?|orders?)\b/gi)) add('collection', match[1]);
   if (!claims.length) add('vue', 'écran des données demandées');
-  return claims.slice(0, 12);
+  return claims.slice(0, 24);
 }
 
 function covers(claim: string, field: string): boolean {
@@ -106,22 +115,39 @@ export function linkChain(prompt: string, fields: string[]): Chain {
   const claims = claimsFromPrompt(prompt);
   const clean = [...new Set(fields.map((field) => field.trim()).filter(Boolean))].slice(0, 12);
   const docsOnly = clean.length > 0 && clean.every((field) => DOC_FIELD.test(field));
+  const business = clean.filter((field) => !DOC_FIELD.test(field));
   const links: Link[] = claims.map((claim) => {
-    if (claim.kind === 'mesure') {
+    const open = { claim: claim.id, text: claim.text, state: 'ouvert' as const };
+    if (claim.kind === 'mesure' || claim.kind === 'dimension') {
       const field = clean.find((item) => !DOC_FIELD.test(item) && covers(claim.text, item))
         ?? (wantsDocs(prompt) ? clean.find((item) => covers(claim.text, item)) : undefined);
-      return field
-        ? { claim: claim.id, text: claim.text, state: 'tenu' as const, field }
-        : { claim: claim.id, text: claim.text, state: 'ouvert' as const };
+      return field ? { claim: claim.id, text: claim.text, state: 'tenu' as const, field } : open;
+    }
+    if (claim.kind === 'entite') {
+      const short = fold(claim.text).length <= 12 && !fold(claim.text).includes(' ');
+      const field = business.find((item) => covers(claim.text, item) || (short && /^(name|title|nom|titre|id|symbol|slug)$/i.test(item)));
+      return field ? { claim: claim.id, text: claim.text, state: 'tenu' as const, field } : open;
+    }
+    if (claim.kind === 'unite') {
+      const token = fold(claim.text);
+      const field = business.find((item) => fold(item).includes(token) || /currency|devise|unit/i.test(item));
+      return field ? { claim: claim.id, text: claim.text, state: 'tenu' as const, field } : open;
+    }
+    if (claim.kind === 'periode') {
+      const field = business.find((item) => /date|time|timestamp|jour|heure/i.test(item));
+      return field ? { claim: claim.id, text: claim.text, state: 'tenu' as const, field } : open;
+    }
+    if (claim.kind === 'collection') {
+      return business.length ? { claim: claim.id, text: claim.text, state: 'tenu' as const, field: business[0] } : open;
     }
     const held = wantsDocs(prompt) ? docsOnly || viewHeld(claim.text, clean) : !docsOnly && viewHeld(claim.text, clean);
     const field = clean.find((item) => covers(claim.text, item));
     return held
       ? { claim: claim.id, text: claim.text, state: 'tenu' as const, field }
-      : { claim: claim.id, text: claim.text, state: 'ouvert' as const };
+      : open;
   });
 
-  const required = new Set(claims.filter((claim) => claim.kind === 'mesure' || (claim.kind === 'vue' && !/écran des données demandées|horodat/i.test(claim.text))).map((claim) => claim.id));
+  const required = new Set(claims.filter((claim) => claim.kind !== 'vue' || !/écran des données demandées|horodat/i.test(claim.text)).map((claim) => claim.id));
   const missing = links.filter((link) => required.has(link.claim) && link.state !== 'tenu');
   const viewsHold = links.some((link) => claims.find((claim) => claim.id === link.claim)?.kind === 'vue' && link.state === 'tenu');
   const ok = clean.length > 0 && !(docsOnly && !wantsDocs(prompt)) && missing.length === 0;
@@ -152,5 +178,5 @@ export function linkChain(prompt: string, fields: string[]): Chain {
       : `Écran : chaîne rompue en ${dataSeal.hash}. Rien ne s'affiche tant qu'un maillon ouvert n'a pas de champ.`,
   ].join('\n');
 
-  return { ok, claims, links, allowed, prompt: promptSeal, data: dataSeal, text };
+  return { ok, claims, links, allowed, prompt: promptSeal, data: dataSeal, text, missing: missing.map((link) => link.text) };
 }

@@ -88,12 +88,13 @@ export async function runEngine(input: CrewInput, cfg: CrewConfig, ctx: { mcp?: 
             'Tu génères le corps d’un outil MCP « execute » pour n’importe quel serveur.',
             'Réponds uniquement par du JavaScript : async function run(client) { … }.',
             'client est le SDK du fournisseur, jamais le hub MCP : n’appelle pas search_docs, execute, list_tools sur client.',
-            'Utilise les méthodes SDK indiquées dans la mission. Pas de markdown.',
+            'Utilise une méthode SDK indiquée. Retourne sa réponse brute, sans agrégation. Pas de markdown, pas de @ts-nocheck.',
           ].join(' '),
         }, { role: 'user', content: mission }],
         { hint: { task: 'tools', prompt: input.prompt }, maxTokens: 2500, signal: ctx.signal },
       ),
     );
+    if (offer.log) note('Sélecteur', 'diagnostic', offer.log.slice(0, 4000), 'info');
     emit({ type: 'agent', kind: 'message', role: 'data', text: offer.text.slice(0, 500) });
     emit({ type: 'agent', kind: 'role', role: 'po', label: 'Product Owner' });
     emit({ type: 'agent', kind: 'message', role: 'po', text: (offer.canBuild ? 'Lectures acceptées.' : 'Lectures refusées.') + ' ' + offer.text.slice(0, 400) });

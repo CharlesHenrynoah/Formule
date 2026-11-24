@@ -15,6 +15,8 @@ export type OwnerVerdict = {
   brief: string;
   samples: OwnerSample[];
   thought?: DemandThought;
+  missing: string[];
+  retryable: boolean;
 };
 
 /** Intention déduite du prompt — générique, pas liée à un MCP. */
@@ -192,7 +194,7 @@ export function reviewSource(
       skip.length ? `Serveur écarté : ${skip.join(', ')}.` : '',
       'Rien ne peut être généré tant que ce serveur ne renvoie pas de lignes.',
     ].filter(Boolean).join('\n');
-    return { ok: false, text, brief: text, samples: [], thought };
+    return { ok: false, text, brief: text, samples: [], thought, missing: ['lecture du serveur demandé'], retryable: false };
   }
 
   const wrong = okReads.filter((read) => {
@@ -211,16 +213,17 @@ export function reviewSource(
       skip.length ? `Serveur exclu : ${skip.join(', ')}.` : '',
       'Rien ne peut être généré avec ces lectures.',
     ].filter(Boolean).join('\n');
-    return { ok: false, text, brief: text, samples: [], thought };
+    return { ok: false, text, brief: text, samples: [], thought, missing: ['lecture hors demande'], retryable: false };
   }
 
   if (!okReads.length) {
-    const text = [thinking, '', 'Product Owner : aucune ligne exploitable. Rien ne peut être généré.'].join('\n');
-    return { ok: false, text, brief: text, samples: [], thought };
+    const text = [thinking, '', 'Product Owner : aucune ligne exploitable. Rien ne peut être généré.', 'Acquisitions manquantes : lecture métier.', 'Elles retournent au sourcing avant un refus définitif.'].join('\n');
+    return { ok: false, text, brief: text, samples: [], thought, missing: ['lecture métier'], retryable: true };
   }
 
   const chain = linkChain(prompt, fields);
   if (docsMismatchIntent(thought, fields) || !chain.ok) {
+    const missing = chain.missing.length ? chain.missing : thought.expectedFields;
     const text = [
       thinking,
       '',
@@ -229,13 +232,15 @@ export function reviewSource(
         ? `Champs observés : ${fields.join(', ') || '(aucun)'} — ce sont des métadonnées de documentation d’API.`
         : `Champs observés : ${fields.join(', ') || '(aucun)'} — ils ne témoignent pas de la demande.`,
       `L’utilisateur attend : ${thought.ui} sur « ${thought.subject} » (champs du type ${thought.expectedFields.join(', ')}).`,
+      `Acquisitions manquantes : ${missing.join(' ; ')}.`,
+      'Elles retournent au sourcing avant un refus définitif.',
       'search_docs (ou équivalent) ne suffit pas : il faut une lecture métier (souvent execute / list / get) qui renvoie ces mesures.',
       'Interdit de poser un dashboard « répartition de method/summary ».',
       'Rien ne peut être généré tant que ces champs manquent.',
       '',
       chain.text,
     ].join('\n');
-    return { ok: false, text, brief: text, samples: [], thought };
+    return { ok: false, text, brief: text, samples: [], thought, missing, retryable: true };
   }
 
   const structure = [
@@ -256,5 +261,7 @@ export function reviewSource(
     brief: structure,
     samples,
     thought,
+    missing: [],
+    retryable: false,
   };
 }

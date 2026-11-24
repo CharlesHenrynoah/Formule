@@ -68,6 +68,17 @@ test('Solana en direct : refuse un écran method/summary', () => {
   assert.match(verdict.text, /Interdit de poser un dashboard/);
 });
 
+test('le Product Owner renvoie les acquisitions manquantes au sourcing', () => {
+  const verdict = reviewSource('Affiche le prix et le volume.', [exec], [
+    { tool: 'coingecko__execute', args: {}, ok: true, rows: [{ name: 'Nord', price: 12 }] },
+  ]);
+  assert.equal(verdict.ok, false);
+  assert.equal(verdict.retryable, true);
+  assert.ok(verdict.missing.some((item) => /volume/i.test(item)));
+  assert.match(verdict.text, /Acquisitions manquantes/);
+  assert.match(verdict.text, /avant un refus définitif/);
+});
+
 test('le Product Owner accepte des mesures CoinGecko', () => {
   const verdict = reviewSource(prompt, [gecko, exec], [
     { tool: 'coingecko__execute', args: {}, ok: true, rows: [{ name: 'Bitcoin', price: 90000, change_24h: 1.2, volume: 1e9 }] },

@@ -40,6 +40,19 @@ test('des issues ne tiennent pas une demande de prix', () => {
   assert.equal(chain.ok, false);
 });
 
+test('entité, unité, période et collection ont chacune une preuve', () => {
+  const chain = linkChain('Montre le tableau des commandes d’ACME en USD sur 7 jours, avec le total.', ['name', 'total', 'date']);
+  assert.ok(chain.claims.some((claim) => claim.kind === 'unite' && claim.text === 'USD'));
+  assert.ok(chain.claims.some((claim) => claim.kind === 'periode' && /7 jours/i.test(claim.text)));
+  assert.ok(chain.claims.some((claim) => claim.kind === 'collection' && /commandes/i.test(claim.text)));
+  assert.ok(chain.claims.some((claim) => claim.kind === 'entite' && claim.text === 'ACME'));
+  assert.equal(chain.links.find((link) => link.text === 'USD')?.state, 'ouvert');
+  assert.equal(chain.links.find((link) => /7 jours/i.test(link.text))?.state, 'tenu');
+  assert.equal(chain.links.find((link) => /commandes/i.test(link.text))?.state, 'tenu');
+  assert.equal(chain.ok, false);
+  assert.ok(chain.missing.includes('USD'));
+});
+
 test('deux prompts différents ne partagent pas le même sceau', () => {
   const a = linkChain('Affiche le prix.', ['price']);
   const b = linkChain('Affiche le volume.', ['volume']);

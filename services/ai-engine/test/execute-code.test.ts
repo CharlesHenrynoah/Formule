@@ -1,7 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  classifyDiagnostic,
   classifyShapeError,
+  correctAcquisition,
+  observeShape,
   dualCallExamples,
   ensureRunClient,
   executeCodePrompt,
@@ -100,6 +103,50 @@ test('rewrite : Did you mean property', () => {
   const err = "Property 'price_change_percentage_7d' does not exist on type 'X'. Did you mean 'price_change_percentage_24h'?";
   const fixed = rewriteCallsFromDiagnostics(code, err);
   assert.match(fixed!, /price_change_percentage_24h/);
+});
+
+test('un SDK inconnu conserve schéma, retour, exemple et signature', () => {
+  const hints = sdkHintsFromDocs([{
+    method: 'client.records.history.get',
+    endpoint: 'GET /records/{id}/history',
+    params: ['id: string;', 'window: string;'],
+    example: 'const page = await client.records.history.get(\'id\', {\n  window: \'30\',\n});\nreturn page.items;',
+    response: { items: [{ at: '2024-01-01T00:00:00Z', value: 1 }] },
+    returns: 'HistoryPage',
+    summary: 'history',
+  }]);
+  assert.match(hints[0]?.signature ?? '', /history\.get\('…'/);
+  assert.match(hints[0]?.example ?? '', /return page\.items/);
+  assert.match(hints[0]?.response ?? '', /"items"/);
+  assert.equal(hints[0]?.returns, 'HistoryPage');
+});
+
+test('une réponse imbriquée est lue avant toute transformation', () => {
+  const shape = observeShape({ data: { items: [{ label: 'nord', amount: 3 }] } });
+  assert.match(shape, /data: \{ items: array\(1\) of \{ label: string, amount: number \}/);
+});
+
+test('une propriété absente n’est pas inventée', () => {
+  const code = 'const row = await client.records.get({ id: \'a\' }); return row.missing_field;';
+  const error = "Property 'missing_field' does not exist on type 'Record'.";
+  assert.equal(classifyDiagnostic(error), 'property');
+  const fixed = correctAcquisition(code, error, '{ id: string, amount: number }');
+  assert.equal(fixed.code, null);
+  assert.equal(fixed.strategy, 'reinspect');
+  assert.equal(classifyDiagnostic('401 unauthorized'), 'auth');
+  assert.equal(classifyDiagnostic('429 quota exceeded'), 'quota');
+  assert.equal(correctAcquisition(code, '401 unauthorized').strategy, 'stop');
+});
+
+test('une signature incompatible est corrigée sans toucher un autre appel', () => {
+  const code = `async function run(client) {
+  const kept = await client.other.list();
+  return await client.records.get({ id: 'alpha', window: '30' });
+}`;
+  const fixed = correctAcquisition(code, 'Expected 2-3 arguments, but got 1.');
+  assert.equal(fixed.diagnostic, 'signature');
+  assert.match(fixed.code ?? '', /records\.get\('alpha', \{ window: '30' \}\)/);
+  assert.match(fixed.code ?? '', /other\.list\(\)/);
 });
 
 test('executeCodePrompt accepte hybride + objet', () => {

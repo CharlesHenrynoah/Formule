@@ -6,6 +6,7 @@
  * L'exemple renvoyé par la doc gagne. Le diagnostic (nombre d'arguments, type string, Params) départage le reste.
  */
 import type { SourceTool } from '../../app-agents/ingest.ts';
+import { claimsFromPrompt } from './chain.ts';
 
 export type DocHint = {
   method?: string;
@@ -14,10 +15,14 @@ export type DocHint = {
   description?: string;
   params?: string;
   example?: string;
+  response?: string;
+  returns?: string;
+  signature?: string;
 };
 
 export type CallShape = 'object' | 'hybrid' | 'unknown';
 export type ShapeErrorKind = 'want_string_first' | 'want_object' | 'want_more_args' | 'bad_property' | 'other';
+export type DiagnosticClass = 'signature' | 'property' | 'type' | 'structure' | 'auth' | 'availability' | 'quota' | 'other';
 
 function serverOf(id: string): string {
   return id.includes('__') ? id.split('__')[0] : '';
@@ -98,9 +103,25 @@ export function shapeFromExample(example: string): CallShape | null {
   return null;
 }
 
+function clipDoc(value: unknown): string {
+  if (value == null || value === '') return '';
+  const text = typeof value === 'string' ? value : JSON.stringify(value);
+  return text.trim().slice(0, 1500);
+}
+
+/** Exemple complet du fournisseur. Une seule ligne ne suffit pas à connaître la forme de retour. */
 export function sdkCallLine(example: unknown): string {
-  const line = String(example ?? '').split('\n').map((item) => item.trim()).find((item) => /await\s+[\w.]+\(/.test(item));
-  return line ? line.replace(/\s+/g, ' ').replace(/;\s*$/, '').slice(0, 240) : '';
+  const raw = String(example ?? '').trim();
+  if (!raw) return '';
+  return raw.replace(/\n{3,}/g, '\n\n').slice(0, 1500);
+}
+
+export function sdkSignature(method: string, params: string[], endpoint = ''): string {
+  if (!method) return '';
+  const shape = inferCallShape(params, endpoint);
+  if (shape === 'hybrid') return hybridCallExample(method, params, endpoint).replace(/^await\s+/, '');
+  if (shape === 'object') return objectCallExample(method, params).replace(/^await\s+/, '');
+  return method;
 }
 
 export function objectCallExample(method: string, params: string[]): string {
@@ -140,7 +161,9 @@ export function sdkHintsFromDocs(rows: Array<Record<string, unknown>>): DocHint[
     const summary = String(row.summary ?? row.title ?? '').trim();
     const description = String(row.description ?? row.texte ?? '').trim();
     const list = paramsList(row.params ?? row.parameters);
-    if (!method && !endpoint && !summary) continue;
+    const response = clipDoc(row.response ?? row.responseSchema ?? row.schema ?? row.returnsSchema);
+    const returns = clipDoc(row.returns ?? row.return ?? row.returnType);
+    if (!method && !endpoint && !summary && !response) continue;
     const sdk = sdkCallLine(row.example);
     const shape = shapeFromExample(sdk) ?? (method ? inferCallShape(list, endpoint) : 'unknown');
     const generated = method
@@ -148,13 +171,17 @@ export function sdkHintsFromDocs(rows: Array<Record<string, unknown>>): DocHint[
         ? `préféré → ${hybridCallExample(method, list, endpoint)} | alternative → ${objectCallExample(method, list)}`
         : dualCallExamples(method, list, endpoint))
       : '';
+    const signature = method ? sdkSignature(method, list, endpoint) : '';
     out.push({
       method: method || undefined,
       endpoint: endpoint || undefined,
       summary: summary || undefined,
-      description: description.slice(0, 200) || undefined,
-      params: list.length ? list.join(' | ').slice(0, 400) : undefined,
-      example: [sdk ? `exemple SDK → ${sdk}` : '', generated].filter(Boolean).join(' | ') || undefined,
+      description: description.slice(0, 400) || undefined,
+      params: list.length ? list.join(' | ').slice(0, 800) : undefined,
+      example: [sdk ? `exemple SDK → ${sdk}` : '', generated].filter(Boolean).join('\n') || undefined,
+      response: response || undefined,
+      returns: returns || undefined,
+      signature: signature || undefined,
     });
     if (out.length >= 12) break;
   }
@@ -177,6 +204,66 @@ export function ensureRunClient(code: string): string {
     trimmed.split('\n').map((line) => (line ? `  ${line}` : '')).join('\n'),
     '}',
   ].join('\n');
+}
+
+/** Sept familles. Chaque famille a sa propre suite, sans réécrire tout le script. */
+export function classifyDiagnostic(error: string): DiagnosticClass {
+  if (/401|403|unauthorized|forbidden|api[_ ]?key|authent|permission refus/i.test(error)) return 'auth';
+  if (/429|quota|rate limit|too many requests/i.test(error)) return 'quota';
+  if (/503|502|504|unavailable|econn|etimedout|timeout|temporairement/i.test(error)) return 'availability';
+  if (/does not exist|did you mean|unknown property|no such property/i.test(error)) return 'property';
+  if (/expected \d+\s*(?:-\d+)?\s+arguments?|not assignable to parameter of type 'string'|no properties in common with type \w*params/i.test(error)) return 'signature';
+  if (/is not assignable to (?:type|parameter)|type '.*' is not assignable/i.test(error)) return 'type';
+  if (/cannot read propert|is not iterable|is not a function|undefined is not|nested|syntaxerror/i.test(error)) return 'structure';
+  return 'other';
+}
+
+export function missingProperty(error: string): string | null {
+  return error.match(/property '([^']+)' does not exist/i)?.[1] ?? null;
+}
+
+/** Forme réellement observée, avant tout sélecteur ou agrégat. */
+export function observeShape(data: unknown, depth = 0): string {
+  if (data == null) return 'null';
+  if (typeof data !== 'object') return typeof data;
+  if (depth > 4) return '…';
+  if (Array.isArray(data)) {
+    return data.length ? `array(${data.length}) of ${observeShape(data[0], depth + 1)}` : 'array(0)';
+  }
+  if (typeof data === 'object') {
+    const entries = Object.entries(data as Record<string, unknown>).slice(0, 16);
+    return `{ ${entries.map(([key, value]) => `${key}: ${observeShape(value, depth + 1)}`).join(', ')} }`;
+  }
+  return typeof data;
+}
+
+export function stripTypeSuppression(code: string): string {
+  return code.replace(/^\s*\/\/\s*@ts-(?:nocheck|ignore|expect-error).*$/gm, '').trim();
+}
+
+/**
+ * Correction d'une seule acquisition.
+ * Une propriété absente n'est renommée que si le schéma la suggère et qu'elle n'est pas contredite par la réponse brute.
+ */
+export function correctAcquisition(code: string, error: string, observed = ''): { code: string | null; diagnostic: DiagnosticClass; strategy: 'stop' | 'once' | 'reinspect' | 'raw' | 'rewrite' | 'minimal' } {
+  const diagnostic = classifyDiagnostic(error);
+  if (diagnostic === 'auth' || diagnostic === 'quota') return { code: null, diagnostic, strategy: 'stop' };
+  if (diagnostic === 'availability') return { code: null, diagnostic, strategy: 'once' };
+  if (diagnostic === 'structure') return { code: null, diagnostic, strategy: 'raw' };
+  if (diagnostic === 'property') {
+    const missing = missingProperty(error);
+    const suggestion = error.match(/did you mean '([^']+)'/i)?.[1];
+    if (!suggestion || (observed && !observed.includes(suggestion)) || (missing && observed && observed.includes(missing))) {
+      return { code: null, diagnostic, strategy: 'reinspect' };
+    }
+    const rewritten = rewriteCallsFromDiagnostics(code, error);
+    return { code: rewritten, diagnostic, strategy: rewritten ? 'rewrite' : 'reinspect' };
+  }
+  if (diagnostic === 'signature' || diagnostic === 'type') {
+    const rewritten = rewriteCallsFromDiagnostics(code, error);
+    return { code: rewritten, diagnostic, strategy: rewritten ? 'rewrite' : 'minimal' };
+  }
+  return { code: null, diagnostic, strategy: 'minimal' };
 }
 
 /** Classe le diagnostic TS comme github-robust classe les 422. */
@@ -299,29 +386,48 @@ export function paramsErrorHint(lastError: string): string {
   return '';
 }
 
+/** Une acquisition = une exigence, une méthode, un retour brut. */
+export function planAcquisitions(prompt: string, docs: DocHint[]): Array<{ id: string; claim: string; hint?: DocHint }> {
+  const claims = claimsFromPrompt(prompt).filter((claim) => claim.kind === 'mesure' || claim.kind === 'vue' || claim.kind === 'periode' || claim.kind === 'collection');
+  if (!docs.length) {
+    return (claims.length ? claims : [{ id: 'c1', text: prompt.slice(0, 80) }]).slice(0, 4).map((claim) => ({ id: claim.id, claim: claim.text }));
+  }
+  return docs.slice(0, 6).map((hint, index) => {
+    const hay = `${hint.method ?? ''} ${hint.summary ?? ''} ${hint.endpoint ?? ''} ${hint.signature ?? ''}`.toLowerCase();
+    const claim = claims.find((item) => hay.includes(item.text.toLowerCase().slice(0, 16)))?.text ?? claims[index]?.text ?? prompt.slice(0, 80);
+    return { id: `a${index + 1}`, claim, hint };
+  });
+}
+
 export function executeCodePrompt(input: {
   prompt: string;
   tool: SourceTool;
   docs: DocHint[];
   metaNames: string[];
   lastError?: string;
+  observed?: string;
+  claim?: string;
+  minimal?: boolean;
 }): string {
   const server = serverOf(input.tool.id) || input.tool.serverName || 'mcp';
   const forbidden = input.metaNames.length
     ? input.metaNames.map((name) => `client.${name}`).join(', ')
     : 'client.search_docs, client.execute, client.list_tools';
-  const methods = input.docs.length
+    const methods = input.docs.length
     ? input.docs.map((doc) => {
       const lines = [
         doc.method,
+        doc.signature ? `signature → ${doc.signature}` : '',
         doc.endpoint ? `endpoint ${doc.endpoint}` : '',
         doc.summary,
         doc.params ? `params → ${doc.params}` : '',
+        doc.returns ? `retour → ${doc.returns}` : '',
+        doc.response ? `schéma de réponse → ${doc.response}` : '',
         doc.example ? `exemples → ${doc.example}` : '',
       ].filter(Boolean);
       return `- ${lines.join('\n    ')}`;
     }).join('\n')
-    : '- (aucune doc : essaie objet {…} ; si erreur string, passe en hybride id + opts)';
+    : '- (aucune doc : un seul appel, objet {…} ; si le diagnostic attend une string, passe en hybride)';
 
   return [
     'Tu écris uniquement du JavaScript exécutable, sans markdown ni commentaire hors code.',
@@ -344,12 +450,17 @@ export function executeCodePrompt(input: {
     '   Si une ligne « exemple SDK » est donnée, reproduis SA forme.',
     '   Sinon suis « préféré ». Un paramètre présent dans le chemin {…} de l’endpoint est une string ; le reste va dans l’objet.',
     '   Interdit : un seul objet quand l’exemple ou le diagnostic attend plusieurs arguments.',
-    '6. N’utilise que des champs présents dans la réponse typée.',
-    '7. Renvoie un tableau d’objets plats (mesures, libellés, dates). Pas d’import, pas de fetch si le SDK suffit.',
+    '6. N’utilise que des champs présents dans la signature, le schéma de réponse ou la réponse déjà observée. N’invente aucune propriété.',
+    '7. Retourne la valeur brute du SDK. Pas de map, pas d’agrégation, pas de calcul, pas de renommage.',
+    '8. Interdit : @ts-nocheck, @ts-ignore, as any, et toute désactivation de vérification.',
+    '9. Un seul appel SDK pour l’exigence indiquée. Les autres exigences auront leur propre acquisition.',
     '',
     'Méthodes SDK (documentation) :',
     methods,
     '',
+    input.claim ? `Exigence de cette acquisition : ${input.claim}` : '',
+    input.observed ? `Réponse déjà observée, à respecter : ${input.observed}` : '',
+    input.minimal ? 'Trajectoire minimale : un appel, le retour brut, aucune transformation.' : '',
     `Demande utilisateur : ${input.prompt.slice(0, 900)}`,
     input.lastError
       ? `\nÉchec précédent — corrige exactement :\n${input.lastError.slice(0, 900)}\n${paramsErrorHint(input.lastError)}`

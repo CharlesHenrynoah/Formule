@@ -79,6 +79,29 @@ test('le sourcing appelle d’abord l’agent Sélecteur', async () => {
   assert.equal(offer.samples[0]?.rows[0]?.price, 90000);
 });
 
+test('une erreur d’authentification ne retire pas l’acquisition déjà réussie', async () => {
+  const offer = await collectSource(
+    'Affiche le total et le volume des commandes.',
+    '',
+    async () => ([
+      { id: 'atlas__list', description: 'liste', serverName: 'Atlas', schema: { required: [], properties: {} } },
+      { id: 'atlas__execute', description: 'sdk', serverName: 'Atlas', schema: { required: ['code'], properties: { code: { type: 'string' } } } },
+    ]),
+    async (tool) => {
+      if (tool === 'atlas__list') return [{ name: 'nord', total: 3 }];
+      throw new Error('401 unauthorized');
+    },
+    async () => '{"reads":[{"tool":"atlas__list","args":{}},{"tool":"atlas__execute","args":{"code":"async function run(client){ return client.records.list({}); }"}}]}',
+  );
+  assert.equal(offer.canBuild, false);
+  assert.equal(offer.samples[0]?.rows[0]?.total, 3);
+  assert.match(offer.text, /Données obtenues : atlas__list/);
+  assert.match(offer.text, /volume/);
+  assert.match(offer.text, /401 unauthorized/);
+  assert.match(offer.log, /auth/);
+  assert.doesNotMatch(offer.text, /async function run/);
+});
+
 test('execute générique : docs → run(client) + retry, sans méta-outils MCP', async () => {
   const missions: string[] = [];
   let calls = 0;
