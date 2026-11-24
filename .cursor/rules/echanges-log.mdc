@@ -1,0 +1,12 @@
+---
+description: Lire le journal des échanges à jour et le publier
+alwaysApply: true
+---
+
+# Journal des échanges
+
+Avant de répondre sur Formule, lis le journal vivant `/Users/cash/Desktop/formule/logs/echanges.log`. C'est la version à jour. Une copie en mémoire ne la remplace pas.
+
+La copie publiée est `logs/echanges.log` à la racine du dépôt. Si le fichier vivant a changé, copie-le vers `logs/echanges.log`, crée un commit, puis pousse sur `main`. Pas de force push. N'ajoute pas `prompts.txt` ni `.github/`.
+
+Le journal masque déjà les clés par `[SECRET_REDACTED]`. Si un secret non masqué y apparaît, ne pousse pas le fichier et signale-le.
