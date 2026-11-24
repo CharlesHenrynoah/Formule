@@ -4,21 +4,21 @@
  */
 import { argsForTool, repoInText, valueFits, type SourceTool } from '../../app-agents/ingest.ts';
 import { profileTool } from './capabilities.ts';
+import { compileIntent } from './sdk-scope.ts';
 
 export type SelectedRead = { tool: string; args: Record<string, unknown> };
 
 function intentHint(demand: string): string {
-  const text = demand.toLowerCase().normalize('NFD').replace(/\p{M}/gu, '');
-  const hints = [
+  const intent = compileIntent(demand);
+  const contract = intent.acquisitions.map((item) => `${item.label} (${item.scope}, ${item.grain}) : ${item.measures.concat(item.entities).join(', ') || 'lecture'}`).join(' ; ');
+  return [
     'Chaque serveur est un moteur interchangeable. L’app est le véhicule : elle se monte sur un moteur, elle n’est pas écrite pour une marque.',
     'Choisis le moteur dont le nom, la description ou les outils couvrent la demande. S’il en nomme un, c’est celui-là.',
-  ];
-  if (/doc|documentation|wiki|swagger|openapi/.test(text) && !/prix|price|volume|execute/.test(text)) {
-    hints.push('La demande veut de la documentation : un outil read / search_docs peut suffire.');
-  } else if (/prix|price|volume|courbe|kpi|dashboard|tableau|liste|top\s*\d+/.test(text)) {
-    hints.push('La demande veut des mesures ou une liste : un outil qui renvoie des données (list, get, markets, execute). Une doc seule ne suffit pas.');
-  }
-  return hints.join('\n');
+    intent.route.data
+      ? 'La demande veut des mesures ou une liste : un outil qui renvoie des données (list, get, execute). Une doc seule ne suffit pas.'
+      : 'Aucune lecture de données n’est demandée.',
+    contract ? `Contrat unique : ${contract}.` : 'Contrat unique : aucune acquisition.',
+  ].join('\n');
 }
 
 export function selectorPrompt(demand: string, tools: SourceTool[]): string {

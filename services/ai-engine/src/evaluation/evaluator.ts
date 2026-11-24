@@ -13,9 +13,10 @@ export function evaluate(input: {
   contract?: DataContract;
 }): Report {
   const raw = input.raw ?? [];
-  const stored = input.stored ?? raw;
+  const stored = input.stored ?? [];
   const checks: Check[] = [];
-  if (input.contract) checks.push(testSchema(stored, input.contract), testDataIntegrity(raw, stored, input.contract));
+  if (input.contract) checks.push(testSchema(stored.length ? stored : raw, input.contract));
+  if (input.contract && input.stored && input.stored !== input.raw) checks.push(testDataIntegrity(raw, stored, input.contract));
   const keys = [...new Set([...raw, ...stored].flatMap((row) => Object.keys(row)))];
   if (input.prompt) {
     const chain = linkChain(input.prompt, keys);

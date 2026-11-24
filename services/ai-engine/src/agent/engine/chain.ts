@@ -251,8 +251,7 @@ export function acquisitionNeeds(chain: Chain): Array<{ text: string; kind: Clai
   });
 }
 
-export function linkChain(prompt: string, fields: string[], proof?: ChainProof): Chain {
-  const claims = claimsFromPrompt(prompt);
+export function linkChain(prompt: string, fields: string[], proof?: ChainProof, claims: Claim[] = claimsFromPrompt(prompt)): Chain {
   const clean = [...new Set(fields.map((field) => field.trim()).filter(Boolean))].slice(0, 32);
   const docsOnly = clean.length > 0 && clean.every((field) => DOC_FIELD.test(field));
   const business = clean.filter((field) => !DOC_FIELD.test(field));

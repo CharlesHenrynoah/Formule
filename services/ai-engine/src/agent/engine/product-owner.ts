@@ -4,8 +4,8 @@
  */
 import { keepNamedServer, mentionedServers, type SourceTool } from '../../app-agents/ingest.ts';
 import { keepSpan } from './series.ts';
-import { claimsFromPrompt, hitsInRows, linkChain, measurableFields, observedFields, rowsAbout, type ChainProof } from './chain.ts';
-import { globalShape } from './sdk-scope.ts';
+import { hitsInRows, linkChain, measurableFields, observedFields, rowsAbout, type ChainProof } from './chain.ts';
+import { compileIntent, globalShape, type Intent } from './sdk-scope.ts';
 import { classifyLink } from '../../../../mcp-hub/src/link-state.ts';
 
 export type OwnerRead = { tool: string; args: Record<string, unknown>; ok: boolean; error?: string; rows: Array<Record<string, unknown>>; diagnostic?: string };
@@ -81,26 +81,25 @@ export function fieldsLookLikeMetrics(fields: string[]): boolean {
  * Petite chaîne de pensée : ce que l’utilisateur attend vraiment,
  * pour n’importe quel moteur branché. Le domaine vient de la demande, pas d’une marque de serveur.
  */
-export function thinkAboutDemand(prompt: string): DemandThought {
+export function thinkAboutDemand(prompt: string, intent: Intent = compileIntent(prompt)): DemandThought {
   const text = prompt.replace(/\s+/g, ' ').trim();
   const lower = text.toLowerCase().normalize('NFD').replace(/\p{M}/gu, '');
 
   const needsDocsCatalog = /catalogue\s+d['']?api|liste\s+des\s+(?:method|méthodes|endpoints)|montre\s+la\s+doc|documentation\s+seule|search_docs\s+seulement/i.test(text)
-    && !/execute|prix|price|volume|dashboard|cartes?|courbe|tableau\s+du\s+top/i.test(text);
+    && intent.acquisitions.every((item) => item.measures.length === 0);
 
-  const needsLiveData = /prix|price|volume|capitalisation|variation|en\s+direct|dashboard|cartes?|kpi|metric|solana|bitcoin|btc|eth|token|crypto|march[eé]|market|ath|plus\s+haut|execute/i.test(lower)
-    || /\b(issues?|commits?|pulls?|prs?|workflows?)\b/i.test(lower);
-
-  const needsTimeSeries = /courbe|chart|historique|30\s*jours|7\s*jours|sparkline|série|serie|par\s+jour|par\s+semaine/i.test(lower);
-  const needsRanking = /top\s*\d+|classement|ranking|par\s+capitalisation|les\s+\d+\s+(?:premiers|plus)/i.test(lower);
+  const needsTimeSeries = intent.acquisitions.some((item) => item.grain === 'serie');
+  const needsRanking = intent.acquisitions.some((item) => item.grain === 'liste');
+  const needsLiveData = intent.route.data || intent.claims.some((claim) => claim.kind === 'collection');
 
   const quoted = [...text.matchAll(/[«"]([^»"]{2,60})[»"]/g)].map((match) => match[1].trim());
   const dashboardName = quoted.find((label) => /en\s+direct|dashboard|pilotage|vue|board/i.test(label))
     || quoted.find((label) => !/coins?\s|market|chart|endpoint|method/i.test(label));
-  const subject = (lower.match(/\b(solana|bitcoin|ethereum|btc|eth|sol)\b/i)?.[1])
+  const entities = intent.claims.filter((claim) => claim.kind === 'entite').map((claim) => claim.text);
+  const subject = entities.find((entity) => entity.length > 3)
     || dashboardName
     || (lower.match(/d[eé]p[oô]t\s+([a-z0-9_.-]+\/[a-z0-9_.-]+)/i)?.[1])
-    || (lower.match(/mcp\s+([a-z0-9_-]+)/i)?.[1])
+    || entities[0]
     || quoted[0]
     || 'la demande';
 
@@ -192,20 +191,18 @@ function samplesOf(reads: OwnerRead[]): OwnerSample[] {
 }
 
 function proofOf(reads: OwnerRead[]): ChainProof {
-  const args: Record<string, unknown> = {};
+  const business = reads.filter((read) => read.ok && read.rows.some((row) => !isDocRow(row)));
+  const source = business.length === 1 ? business[0] : undefined;
   const values: unknown[] = [];
   const docs: string[] = [];
+  if (typeof source?.args.code === 'string') docs.push(source.args.code);
   for (const read of reads) {
-    Object.assign(args, read.args);
-    if (typeof read.args.code === 'string') docs.push(read.args.code);
     for (const row of read.rows) {
-      const keys = Object.keys(row);
-      const doc = keys.length > 0 && keys.every((key) => /^(method|endpoint|summary|description|params|response|query|language|path|url)$/i.test(key));
-      if (doc) docs.push(Object.values(row).map((value) => String(value)).join(' '));
+      if (isDocRow(row)) docs.push(Object.values(row).map((value) => String(value)).join(' '));
       else for (const value of Object.values(row)) if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') values.push(value);
     }
   }
-  return { args, values, docs: docs.join('\n') };
+  return { args: source?.args ?? {}, values, docs: docs.join('\n') };
 }
 
 function thoughtBlock(thought: DemandThought): string {
@@ -220,8 +217,9 @@ export function reviewSource(
   prompt: string,
   tools: SourceTool[],
   reads: OwnerRead[],
+  intent: Intent = compileIntent(prompt),
 ): OwnerVerdict {
-  const thought = thinkAboutDemand(prompt);
+  const thought = thinkAboutDemand(prompt, intent);
   const thinking = thoughtBlock(thought);
   const { use, skip } = mentionedServers(prompt, tools);
   const kept = keepNamedServer(prompt, tools, reads);
@@ -283,12 +281,12 @@ export function reviewSource(
     return { ok: false, text, brief: text, samples: [], thought, missing: ['lecture métier'], retryable: true };
   }
 
-  const needles = claimsFromPrompt(prompt).filter((claim) => claim.kind === 'entite' || claim.kind === 'filtre').map((claim) => claim.text);
+  const needles = intent.claims.filter((claim) => claim.kind === 'entite' || claim.kind === 'filtre').map((claim) => claim.text);
   const hits = okReads.filter((read) => read.rows.some((row) => !Object.keys(row).every((key) => /^(method|endpoint|summary|description|params|response|query|language|path|url)$/i.test(key)))).flatMap((read) => hitsInRows(read.rows, needles, read.tool));
   const businessRows = okReads.flatMap((read) => read.rows.filter((row) => !isDocRow(row)));
   const seen = observedFields(rowsAbout(businessRows, needles));
   const proof: ChainProof = { ...proofOf(okReads), hits, measured: seen.measured, witness: seen.witness, population: businessRows.length };
-  const chain = linkChain(prompt, fields, proof);
+  const chain = linkChain(prompt, fields, proof, intent.claims);
   if (docsMismatchIntent(thought, fields) || !chain.ok) {
     const missing = chain.missing.length ? chain.missing : thought.expectedFields;
     const acquired = chain.links.filter((link) => {

@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { classifyRestriction, dropOptionalArgument, planAcquisitions } from '../src/agent/engine/execute-code.ts';
 import { claimsFromPrompt, linkChain, observedFields } from '../src/agent/engine/chain.ts';
-import { acquisitionsOf, attemptKey, callIdentity, methodFits, registerMethods, requirementsOf, responseInScope, selectMethod, type MethodDoc } from '../src/agent/engine/sdk-scope.ts';
+import { acquisitionsOf, attemptKey, callIdentity, compileIntent, methodFits, registerMethods, requirementsOf, responseInScope, selectMethod, type MethodDoc } from '../src/agent/engine/sdk-scope.ts';
 import { collectSource } from '../src/agent/engine/source-offer.ts';
 import { reviewSource } from '../src/agent/engine/product-owner.ts';
 
@@ -358,4 +358,57 @@ test('un constat de découverte ne parle plus à la place d’une lecture déjà
   assert.doesNotMatch(offer.text, /recherche incomplète/);
   assert.match(offer.text, /Nord/);
   assert.equal(offer.canBuild, false);
+});
+
+test('une intention compilée est la même pour des domaines différents', () => {
+  const prompts = [
+    'Affiche le prix de Orion.',
+    'Affiche le nombre d’issues du dépôt Acme.',
+    'Affiche le score du spécimen Cedrus.',
+  ];
+  for (const prompt of prompts) {
+    const intent = compileIntent(prompt);
+    assert.equal(intent.version, 1);
+    assert.equal(intent.route.data, true);
+    assert.equal(intent.acquisitions.length, acquisitionsOf(prompt).length);
+    assert.ok(intent.acquisitions.some((item) => item.measures.length > 0));
+    const dominant = requirementsOf(prompt);
+    assert.ok(intent.acquisitions.some((item) => item.grain === dominant.grain && item.measures.includes(dominant.measures[0] ?? '')));
+  }
+});
+
+test('les arguments d’une lecture ne prouvent pas l’entité d’une autre', () => {
+  const verdict = reviewSource('Affiche le prix de Orion.', [], [
+    { tool: 'atlas__execute', args: { code: 'async function run(client) { return client.items.get({ id: "Orion" }); }' }, ok: true, rows: [{ name: 'A', price: 1 }] },
+    { tool: 'atlas__execute', args: { code: 'async function run(client) { return client.catalog.totals(); }' }, ok: true, rows: [{ active_count: 4, total_market_cap: 9 }] },
+  ]);
+  assert.equal(verdict.ok, false);
+  assert.ok(verdict.missing.some((item) => /Orion/i.test(item)));
+});
+
+test('une méthode absente du registre n’est pas exécutée', async () => {
+  const calls: string[] = [];
+  const offer = await collectSource(
+    'Affiche le prix de Orion.',
+    '',
+    async () => ([
+      { id: 'atlas__search_docs', description: 'docs SDK', serverName: 'Atlas', schema: { required: ['query'], properties: { query: { type: 'string' } } } },
+      { id: 'atlas__execute', description: 'Runs JavaScript code to interact with the API', serverName: 'Atlas', schema: { required: ['code'], properties: { code: { type: 'string' } } } },
+    ]),
+    async (tool, args) => {
+      const code = String(args.code ?? '');
+      calls.push(code || tool);
+      if (tool.endsWith('search_docs')) return catalog;
+      if (/items\.get/.test(code)) return [{ name: 'Orion', price: 4 }];
+      return [{ name: 'autre', price: 1 }];
+    },
+    async () => '{"reads":[{"tool":"atlas__search_docs","args":{"query":"prix"}}]}',
+    async (mission) => mission.includes('non documentée')
+      ? 'async function run(client) { return client.items.get("Orion"); }'
+      : 'async function run(client) { return client.unknown.scan(); }',
+  );
+  assert.equal(calls.some((code) => /unknown\.scan/.test(code)), false);
+  assert.equal(calls.some((code) => /items\.get/.test(code)), true);
+  assert.equal(offer.canBuild, true);
+  assert.match(offer.text, /Preuve instant/);
 });

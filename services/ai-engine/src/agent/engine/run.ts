@@ -14,7 +14,8 @@ import type { AgentName, SessionMessage } from './agents/types.ts';
 import { collectionsInScreen, readsForCollections, type SourceTool } from '../../app-agents/ingest.ts';
 import { runAgentLoop } from './loop.ts';
 import { bindCharts } from './bind-charts.ts';
-import { dropIncomplete, liaisonMission, poseRequest, repairDateSort, routeDemand } from './pose.ts';
+import { dropIncomplete, liaisonMission, poseRequest, repairDateSort } from './pose.ts';
+import { compileIntent } from './sdk-scope.ts';
 import { collectSource } from './source-offer.ts';
 import { evaluate } from '../../evaluation/evaluator.ts';
 import { inferContract } from '../../semantic/infer.ts';
@@ -110,6 +111,7 @@ export async function runEngine(input: CrewInput, cfg: CrewConfig, ctx: { mcp?: 
   const tb = new Toolbox(ws, input.useTools === false ? undefined : ctx.mcp, emit);
   const llm = providerFor(cfg);
   const incremental = !!input.previous?.files && !input.fullRebuild;
+  const intent = compileIntent(input.prompt);
   const pageBefore = ws.files.get('src/App.tsx') ?? '';
   const datasets = profileDatasets((input.datasets ?? []) as Dataset[]);
   let liaisonReport = '';
@@ -234,7 +236,7 @@ export async function runEngine(input: CrewInput, cfg: CrewConfig, ctx: { mcp?: 
   if (fields.length) liaisonReport = [liaisonReport, interfaceChecklist(fields, input.prompt)].filter(Boolean).join('\n\n');
 
   if (incremental) {
-    const route = routeDemand(input.prompt);
+    const route = intent.route;
     const subject = route.collections.length > 1 ? `collections ${route.collections.join(', ')}` : `collection ${route.collection}`;
     counted({ type: 'agent', kind: 'message', role: 'data', text: `Routeur : ${route.kind} « ${route.title} », ${subject}${route.data ? '' : ', sans lecture'}.` });
     if (input.sourceBrief) {
@@ -310,7 +312,7 @@ export async function runEngine(input: CrewInput, cfg: CrewConfig, ctx: { mcp?: 
       ...cleanSourceSamples(input.sourceSamples).map((sample) => ({ tool: sample.tool, args: sample.args, result: sample.rows })),
       ...tb.mcpSamples.map((sample) => ({ tool: sample.tool, args: sample.args, result: sample.full ?? sample.result })),
     ],
-    [...new Set([...collectionsInScreen(ws.files.get('src/App.tsx') ?? ''), ...routeDemand(input.prompt).collections])],
+    [...new Set([...collectionsInScreen(ws.files.get('src/App.tsx') ?? ''), ...intent.route.collections])],
   );
   const app: AppBundle = { contract, agent: agentDef, backend: 'server/tools.ts', backendOk: !!tb.lastBackendTest?.ok, title };
   if (Object.keys(sampled).length) app.seed = sampled;

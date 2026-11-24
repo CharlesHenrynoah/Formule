@@ -3,7 +3,8 @@
  * Un champ commun ne rend pas deux périmètres interchangeables.
  */
 import ts from 'typescript';
-import { claimsFromPrompt, hitsInRows, linkChain, observedFields, quantitativeClaim, rowsAbout, termCovers, type ChainProof } from './chain.ts';
+import { claimsFromPrompt, hitsInRows, linkChain, observedFields, quantitativeClaim, rowsAbout, termCovers, type ChainProof, type Claim } from './chain.ts';
+import { routeDemand, type DemandRoute } from './pose.ts';
 
 export type Scope = 'global' | 'individuel' | 'agrege' | 'historique';
 export type Grain = 'point' | 'serie' | 'liste';
@@ -45,6 +46,15 @@ export type Requirements = {
 /** Une acquisition a son propre contrat. Elle ne hérite pas des mesures des autres vues. */
 export type Acquisition = Requirements & { id: string; label: string; dependsOn: string[] };
 
+/** Contrat unique de l'intention. Les autres modules le consomment, ils ne relisent pas le prompt. */
+export type Intent = {
+  version: 1;
+  prompt: string;
+  route: DemandRoute;
+  claims: Claim[];
+  acquisitions: Acquisition[];
+};
+
 const UI_KIND = new Set(['meta', 'vue', 'action', 'operation', 'periode']);
 
 function fold(value: string): string {
@@ -77,9 +87,8 @@ function mentions(text: string, measure: string): boolean {
   return fold(text).includes(fold(measure));
 }
 
-/** Découpe la demande en acquisitions indépendantes, puis fusionne celles qui partagent grain, entité et période. */
-export function acquisitionsOf(prompt: string): Acquisition[] {
-  const claims = claimsFromPrompt(prompt);
+/** Découpe la demande en acquisitions indépendantes, à partir des claims déjà compilés. */
+function acquisitionsFrom(prompt: string, claims: Claim[]): Acquisition[] {
   const measures = unique(claims.filter((claim) => claim.kind === 'mesure').map((claim) => claim.text));
   const entities = unique(claims.filter((claim) => claim.kind === 'entite').map((claim) => claim.text));
   const units = unique(claims.filter((claim) => claim.kind === 'unite').map((claim) => claim.text));
@@ -128,6 +137,16 @@ export function acquisitionsOf(prompt: string): Acquisition[] {
     out.push({ ...base, id: grain, label: grain, entities, measures, periods, grain, scope });
   }
   return out;
+}
+
+/** Une seule compilation. La route, les claims et les acquisitions sortent du même passage. */
+export function compileIntent(prompt: string): Intent {
+  const claims = claimsFromPrompt(prompt);
+  return { version: 1, prompt, route: routeDemand(prompt), claims, acquisitions: acquisitionsFrom(prompt, claims) };
+}
+
+export function acquisitionsOf(prompt: string): Acquisition[] {
+  return compileIntent(prompt).acquisitions;
 }
 
 /** Exigences d'une acquisition. Le grain dominant reste disponible pour les appels qui visent une seule vue. */

@@ -23,16 +23,16 @@ import {
 import { classifyLink } from '../../../../mcp-hub/src/link-state.ts';
 import { admitExecute } from './execute-gate.ts';
 import { reviewSource } from './product-owner.ts';
-import { acquisitionNeeds, claimsFromPrompt, hitsInRows, linkChain, measurableFields, observedFields, rowsAbout } from './chain.ts';
+import { acquisitionNeeds, hitsInRows, linkChain, observedFields, rowsAbout } from './chain.ts';
 import { classifySearch, profileTool } from './capabilities.ts';
 import { readsFromSelector, selectorPrompt } from './select-mcp.ts';
 import { routeDemand } from './pose.ts';
 import { splitAcquisition } from '../../discovery/acquire.ts';
-import { acquisitionProgress, acquisitionsOf, attemptKey, callIdentity, methodFits, methodJournal, registerMethods, responseInScope, selectMethod, type Acquisition } from './sdk-scope.ts';
+import { attemptKey, callIdentity, compileIntent, methodFits, methodJournal, registerMethods, responseInScope, selectMethod, type Acquisition, type Intent } from './sdk-scope.ts';
 import { alignPairSeries, keepSpan } from './series.ts';
 
 export type ResponseState = 'vide' | 'erreur' | 'inconnu' | 'valide';
-export type SourceRead = { tool: string; args: Record<string, unknown>; ok: boolean; error?: string; rows: Array<Record<string, unknown>>; raw?: unknown; diagnostic?: DiagnosticClass; state?: ResponseState };
+export type SourceRead = { tool: string; args: Record<string, unknown>; ok: boolean; error?: string; rows: Array<Record<string, unknown>>; raw?: unknown; diagnostic?: DiagnosticClass; state?: ResponseState; acquisition?: string; observedAt?: string };
 export type SourceSample = { tool: string; args: Record<string, unknown>; rows: Array<Record<string, unknown>> };
 export type SourceOffer = { canBuild: boolean; text: string; brief: string; samples: SourceSample[]; log: string };
 
@@ -177,19 +177,19 @@ export function presentLabel(prompt: string, page: string): string | null {
 }
 
 /** Texte montré à l'utilisateur, et le brief que le développement réutilise s'il valide. */
-export function offerFromReads(prompt: string, reads: SourceRead[], page = ''): SourceOffer {
+export function offerFromReads(prompt: string, reads: SourceRead[], page = '', intent: Intent = compileIntent(prompt)): SourceOffer {
   const present = presentLabel(prompt, page);
   if (present) {
     const text = `Cet élément est déjà présent sur l'interface : « ${present} ».\nRien de nouveau ne sera généré.`;
     return { canBuild: false, text, brief: text, samples: [], log: text };
   }
-  const route = routeDemand(prompt);
-  const needles = claimsFromPrompt(prompt).filter((claim) => claim.kind === 'entite' || claim.kind === 'filtre').map((claim) => claim.text);
+  const route = intent.route;
+  const needles = intent.claims.filter((claim) => claim.kind === 'entite' || claim.kind === 'filtre').map((claim) => claim.text);
   const holdsDemand = (row: Record<string, unknown>) => {
     const fields = Object.keys(row).filter((key) => key !== 'collection');
     const hits = hitsInRows([row], needles);
     const seen = observedFields([row]);
-    const chain = linkChain(prompt, fields, { hits, measured: seen.measured, witness: seen.witness, population: 1 });
+    const chain = linkChain(prompt, fields, { hits, measured: seen.measured, witness: seen.witness, population: 1 }, intent.claims);
     const needs = acquisitionNeeds(chain);
     if (!needs.length) return true;
     const entityNeeds = needs.some((need) => need.kind === 'entite' || need.kind === 'filtre');
@@ -208,9 +208,10 @@ export function offerFromReads(prompt: string, reads: SourceRead[], page = ''): 
     ? reads.map((read) => {
       const where = [read.args.owner, read.args.repo].filter(Boolean).join('/') || String(Object.entries(read.args).find(([key, value]) => key !== 'language' && key !== 'code' && typeof value === 'string' && value.length > 2 && value.length < 80 && !/function|=>|client\./.test(value))?.[1] ?? '');
       if (!read.ok) return `${read.tool}${where ? ` sur ${where}` : ''} a échoué : ${read.error ?? 'lecture impossible'}.`;
+      const proof = read.acquisition ? ` Preuve ${read.acquisition}.` : '';
       const fields = fieldsOf(read.rows);
-      if (read.rows.length && !read.rows.every((row) => isDocumentationRow(row)) && !useful(read)) return `${read.tool}${where ? ` sur ${where}` : ''} : ${read.rows.length} ligne, champs hors demande : ${fields}.`;
-      return `${read.tool}${where ? ` sur ${where}` : ''} : ${read.rows.length} ligne${read.rows.length > 1 ? 's' : ''}. Champs : ${fields}.`;
+      if (read.rows.length && !read.rows.every((row) => isDocumentationRow(row)) && !useful(read)) return `${read.tool}${where ? ` sur ${where}` : ''} : ${read.rows.length} ligne, champs hors demande : ${fields}.${proof}`;
+      return `${read.tool}${where ? ` sur ${where}` : ''} : ${read.rows.length} ligne${read.rows.length > 1 ? 's' : ''}. Champs : ${fields}.${proof}`;
     })
     : ['Aucune lecture ne correspond à cette demande.'];
   const ready = !route.data || reads.some(business);
@@ -348,12 +349,12 @@ function filterArgs(tool: SourceTool, prompt: string, needle: string): Record<st
   return { ...base, [key]: needle };
 }
 
-function hasDataNeed(prompt: string, done: SourceRead[]): boolean {
+function hasDataNeed(prompt: string, done: SourceRead[], intent: Intent): boolean {
   const rows = done.filter((read) => read.ok).flatMap((read) => read.rows).filter((row) => !isDocumentationRow(row));
   const fields = [...new Set(rows.flatMap((row) => Object.keys(row)))];
-  const needles = claimsFromPrompt(prompt).filter((claim) => claim.kind === 'entite' || claim.kind === 'filtre').map((claim) => claim.text);
+  const needles = intent.claims.filter((claim) => claim.kind === 'entite' || claim.kind === 'filtre').map((claim) => claim.text);
   const seen = observedFields(rowsAbout(rows, needles));
-  const chain = linkChain(prompt, fields, { hits: hitsInRows(rows, needles), measured: seen.measured, witness: seen.witness, population: rows.length });
+  const chain = linkChain(prompt, fields, { hits: hitsInRows(rows, needles), measured: seen.measured, witness: seen.witness, population: rows.length }, intent.claims);
   return acquisitionNeeds(chain).some((need) => DATA_KINDS.has(need.kind));
 }
 
@@ -363,8 +364,9 @@ async function coverEntities(
   catalog: SourceTool[],
   done: SourceRead[],
   call: (tool: string, args: Record<string, unknown>) => Promise<unknown>,
+  intent: Intent,
 ): Promise<{ done: SourceRead[]; log: string; gap: string; changed: boolean }> {
-  const needs = claimsFromPrompt(prompt).filter((claim) => claim.kind === 'entite' || claim.kind === 'filtre');
+  const needs = intent.claims.filter((claim) => claim.kind === 'entite' || claim.kind === 'filtre');
   if (!needs.length) return { done, log: '', gap: '', changed: false };
   const notes: string[] = [];
   let gap = '';
@@ -431,9 +433,9 @@ export async function collectSource(
   select?: (mission: string) => Promise<string>,
   writeCode?: (mission: string) => Promise<string>,
 ): Promise<SourceOffer> {
-  const route = routeDemand(prompt);
-  if (presentLabel(prompt, page)) return offerFromReads(prompt, [], page);
-  if (!route.data) return offerFromReads(prompt, [], page);
+  const intent = compileIntent(prompt);
+  if (presentLabel(prompt, page)) return offerFromReads(prompt, [], page, intent);
+  if (!intent.route.data) return offerFromReads(prompt, [], page, intent);
   try {
     const listed = await list();
     const catalog: SourceTool[] = listed.filter((tool) => !(tool.write || tool.ecriture)).map((tool) => ({
@@ -461,7 +463,7 @@ export async function collectSource(
 
     // 2) Repli : collections connues, puis outils non appariés.
     if (!reads.length) {
-      const known = keepNamedServer(demand, catalog, readsForCollections(route.collections, demand, catalog));
+      const known = keepNamedServer(demand, catalog, readsForCollections(intent.route.collections, demand, catalog));
       if (known.length) {
         reads = known.slice(0, 3);
         via = 'collections';
@@ -485,39 +487,40 @@ export async function collectSource(
       return verdict.ok ? null : verdict.reason;
     };
     let done = await runReads(reads, call, admitCall);
-    let owner = reviewSource(prompt, catalog, done);
+    let owner = reviewSource(prompt, catalog, done, intent);
     let lastCorrection = 'aucune';
     let lastLayer = '';
     let gap = '';
     let selectionLog = '';
-    const covered = await coverEntities(prompt, catalog, done, call);
+    const covered = await coverEntities(prompt, catalog, done, call, intent);
     done = covered.done;
     selectionLog = covered.log;
     gap = covered.gap;
-    if (covered.changed) owner = reviewSource(prompt, catalog, done);
+    if (covered.changed) owner = reviewSource(prompt, catalog, done, intent);
     if (owner.ok) gap = '';
 
     // Une acquisition à la fois. Une erreur ne retire pas les appuis déjà validés.
     // Une entité, un filtre ou une validation ne partent pas vers un exécuteur de code.
-    if (!owner.ok && writeCode && hasDataNeed(prompt, done)) {
+    if (!owner.ok && writeCode && hasDataNeed(prompt, done, intent)) {
       const { use, skip } = mentionedServers(prompt, catalog);
       const fromReads = [...new Set(done.map((read) => serverOf(read.tool)).filter(Boolean))];
       const preferred = use.length ? use : fromReads.filter((id) => !skip.includes(id) && !/^demo/.test(id));
       const codeTool = findCodeTool(catalog, preferred, skip);
       if (codeTool) {
         const server = serverOf(codeTool.id);
-        let docs = sdkHintsFromDocs(done.flatMap((read) => (serverOf(read.tool) === server ? read.rows : [])));
+        const documented = (rows: Array<Record<string, unknown>>) => rows.filter((row) => Object.keys(row).some((key) => /^(method|endpoint|summary|description|params|response)$/i.test(key)));
+        let docs = sdkHintsFromDocs(done.flatMap((read) => (serverOf(read.tool) === server ? documented(read.rows) : [])));
         if (!docs.length) {
           const docsTool = findDocsTool(catalog, preferred.length ? preferred : [server], skip);
           if (docsTool) {
             const dug = await runReads([{ tool: docsTool.id, args: { query: prompt.slice(0, 160), language: 'en' } }], call);
             done = [...done.filter((read) => !skip.includes(serverOf(read.tool))), ...dug];
-            docs = sdkHintsFromDocs(dug.flatMap((read) => read.rows));
+            docs = sdkHintsFromDocs(dug.flatMap((read) => documented(read.rows)));
           }
         }
         const meta = mcpMetaNames(catalog, server);
         const registry = registerMethods(docs);
-        const plan = acquisitionsOf(prompt);
+        const plan = intent.acquisitions;
         const banned = new Map<string, Set<string>>();
         const blockedAcq = new Set<string>();
         const spent = new Map<string, number>();
@@ -529,29 +532,42 @@ export async function collectSource(
           banned.set(id, set);
         };
         const denied = (id: string) => [...(banned.get(id) ?? [])];
-        let lastError: string | undefined;
-        let lastCode = '';
-        let replay = '';
-        let carried = '';
-        let observed = '';
-        let strategy: 'rewrite' | 'minimal' | 'stop' = 'rewrite';
-        const prior = done.find((read) => read.tool === codeTool.id && read.error && typeof read.args.code === 'string');
-        if (prior?.error && prior.raw != null) observed = observeShape(prior.raw);
-        liveDocs = docs;
-        const businessRows = () => done.filter((read) => read.ok && read.rows.some((row) => !isDocumentationRow(row))).flatMap((read) => read.rows.filter((row) => !isDocumentationRow(row)));
-        const businessFields = () => [...new Set(businessRows().flatMap((row) => Object.keys(row)))];
-        const progress = () => {
-          const rows = businessRows();
-          const needles = claimsFromPrompt(prompt).filter((claim) => claim.kind === 'entite' || claim.kind === 'filtre').map((claim) => claim.text);
-          const seen = observedFields(rowsAbout(rows, needles));
-          return acquisitionProgress(prompt, businessFields(), { hits: hitsInRows(rows, needles), measured: seen.measured, witness: seen.witness, population: rows.length });
+        type Repair = { lastError?: string; lastCode: string; replay: string; strategy: 'rewrite' | 'minimal' | 'stop'; observed: string };
+        const repairs = new Map<string, Repair>();
+        const boxOf = (id: string): Repair => {
+          const found = repairs.get(id);
+          if (found) return found;
+          const created: Repair = { lastCode: '', replay: '', strategy: 'rewrite', observed: '' };
+          repairs.set(id, created);
+          return created;
         };
-        const satisfied = (acq: Acquisition) => businessRows().length > 0 && responseInScope(businessRows(), acq, { args: carried }).ok;
-        let held = progress().held.length;
+        const prior = done.find((read) => read.tool === codeTool.id && read.error && typeof read.args.code === 'string');
+        if (prior?.error && plan[0]) {
+          const first = boxOf(plan[0].id);
+          first.lastError = prior.error;
+          if (prior.raw != null) first.observed = observeShape(prior.raw);
+        }
+        liveDocs = docs;
+        const rowsOf = (id: string) => done.filter((read) => read.acquisition === id && read.ok).flatMap((read) => read.rows.filter((row) => !isDocumentationRow(row)));
+        const argsOf = (id: string) => {
+          const read = [...done].reverse().find((item) => item.acquisition === id && typeof item.args.code === 'string');
+          return typeof read?.args.code === 'string' ? read.args.code : '';
+        };
+        const satisfied = (acq: Acquisition) => {
+          const rows = rowsOf(acq.id);
+          return rows.length > 0 && responseInScope(rows, acq, { args: argsOf(acq.id) }).ok;
+        };
+        const heldCount = () => plan.filter((item) => satisfied(item)).reduce((sum, item) => sum + item.measures.length + item.entities.length, 0);
+        let held = heldCount();
         const ceiling = Math.min(12, Math.max(4, (plan.length || 1) * 3));
-        for (let attempt = 0; attempt < ceiling && strategy !== 'stop'; attempt++) {
+        for (let attempt = 0; attempt < ceiling; attempt++) {
           const acq = plan.find((item) => !blockedAcq.has(item.id) && (spent.get(item.id) ?? 0) < 2 && !satisfied(item));
           if (!acq) break;
+          const box = boxOf(acq.id);
+          if (box.strategy === 'stop') {
+            blockedAcq.add(acq.id);
+            continue;
+          }
           const req = acq;
           const claim = acq.measures.concat(acq.entities).join(', ') || acq.label;
           lastLayer = acq.id;
@@ -565,22 +581,22 @@ export async function collectSource(
           const shown = picked ? docs.filter((doc) => doc.method === picked.method.method) : docs.filter((doc) => !doc.method || !denied(acq.id).includes(doc.method));
           try {
             let code = '';
-            if (replay) {
-              code = replay;
-              replay = '';
-            } else if (lastCode && lastError && strategy === 'rewrite') {
-              const fixed = correctAcquisition(lastCode, lastError, observed);
+            if (box.replay) {
+              code = box.replay;
+              box.replay = '';
+            } else if (box.lastCode && box.lastError && box.strategy === 'rewrite') {
+              const fixed = correctAcquisition(box.lastCode, box.lastError, box.observed);
               lastCorrection = fixed.strategy === 'raw' ? 'retour brut, propriété absente retirée' : fixed.strategy === 'degrade' ? 'paramètre optionnel retiré' : fixed.strategy;
               if (fixed.strategy === 'stop' || (fixed.strategy === 'once' && (spent.get(acq.id) ?? 0) > 0)) {
                 blockedAcq.add(acq.id);
                 selectionLog += `restriction : branche ${acq.label} arrêtée\n`;
-                lastCode = '';
+                box.lastCode = '';
                 continue;
               }
               const rewritten = fixed.code ? callIdentity(fixed.code)[0]?.method : '';
               if (fixed.code && rewritten && denied(acq.id).includes(rewritten)) fixed.code = null;
               if (fixed.code && !seen.has(attemptKey(rewritten || 'script', callIdentity(fixed.code)[0]?.args ?? '', [acq.id]))) code = stripTypeSuppression(fixed.code);
-              else strategy = fixed.strategy === 'raw' || fixed.strategy === 'reinspect' || fixed.strategy === 'minimal' || fixed.strategy === 'degrade' ? 'minimal' : strategy;
+              else box.strategy = fixed.strategy === 'raw' || fixed.strategy === 'reinspect' || fixed.strategy === 'minimal' || fixed.strategy === 'degrade' ? 'minimal' : box.strategy;
             }
             if (!code) {
               const raw = await writeCode(executeCodePrompt({
@@ -588,32 +604,40 @@ export async function collectSource(
                 tool: codeTool,
                 docs: shown.length ? shown : docs,
                 metaNames: meta,
-                lastError,
-                observed,
+                lastError: box.lastError,
+                observed: box.observed,
                 claim,
-                minimal: strategy === 'minimal',
+                minimal: box.strategy === 'minimal',
                 excluded: denied(acq.id),
               }));
               code = stripTypeSuppression(stripCodeFence(raw));
-              lastCorrection = strategy === 'minimal' ? 'appel minimal, retour brut' : 'nouvel appel ciblé';
+              lastCorrection = box.strategy === 'minimal' ? 'appel minimal, retour brut' : 'nouvel appel ciblé';
             }
             const fact = callIdentity(code)[0];
             const method = fact?.method ?? '';
             const args = fact?.args ?? '';
             const known = method ? registry.find((item) => item.method === method) : undefined;
             const unfit = known ? methodFits(known, req) : null;
+            if (registry.length && (!method || !known)) {
+              if (method) ban(acq.id, method);
+              selectionLog += methodJournal({ method, args, scope: req.scope, expected: claim, obtained: '', decision: 'rejetée avant l’appel, méthode non documentée' }) + '\n';
+              box.lastCode = '';
+              box.lastError = `méthode ${method || 'inconnue'} non documentée`;
+              spent.set(acq.id, (spent.get(acq.id) ?? 0) + 1);
+              continue;
+            }
             if (method && (denied(acq.id).includes(method) || (unfit && !unfit.ok))) {
               ban(acq.id, method);
               selectionLog += methodJournal({ method, args, scope: req.scope, expected: claim, obtained: known?.fields.join(', ') || '', decision: `rejetée avant l’appel, ${unfit?.reason ?? 'méthode hors périmètre'}` }) + '\n';
-              lastCode = '';
-              lastError = `méthode ${method} exclue`;
+              box.lastCode = '';
+              box.lastError = `méthode ${method} exclue`;
               spent.set(acq.id, (spent.get(acq.id) ?? 0) + 1);
               continue;
             }
             const gate = admitExecute(code, shown.length ? shown : docs);
             if (!gate.ok) {
-              lastError = gate.reason;
-              lastCode = '';
+              box.lastError = gate.reason;
+              box.lastCode = '';
               spent.set(acq.id, (spent.get(acq.id) ?? 0) + 1);
               if ((spent.get(acq.id) ?? 0) >= 2) blockedAcq.add(acq.id);
               continue;
@@ -624,11 +648,11 @@ export async function collectSource(
               continue;
             }
             seen.add(key);
-            lastCode = code;
-            const extra = await runReads([{ tool: codeTool.id, args: { code, intent: claim.slice(0, 160) } }], call, admitCall);
+            box.lastCode = code;
+            const extra = (await runReads([{ tool: codeTool.id, args: { code, intent: claim.slice(0, 160) } }], call, admitCall)).map((read) => ({ ...read, acquisition: acq.id, observedAt: new Date().toISOString() }));
             done = keepFootholds(done, extra);
             const fresh = extra.find((read) => read.raw != null);
-            if (fresh?.raw != null) observed = observeShape(fresh.raw);
+            if (fresh?.raw != null) box.observed = observeShape(fresh.raw);
             const freshRows = extra.flatMap((read) => read.ok ? read.rows.filter((row) => !isDocumentationRow(row)) : []);
             const verdict = freshRows.length ? responseInScope(freshRows, req, { args }) : null;
             if (verdict) {
@@ -647,17 +671,17 @@ export async function collectSource(
             if (verdict?.ok && historyLeft && !dated && method) {
               ban(acq.id, method);
               selectionLog += methodJournal({ method, args, scope: `${req.scope}/${req.grain}`, expected: claim, obtained: verdict.obtained.join(', '), decision: 'rejetée, granularité point alors qu’une série est documentée' }) + '\n';
-              lastCode = '';
-              lastError = 'granularité : série attendue';
+              box.lastCode = '';
+              box.lastError = 'granularité : série attendue';
               spent.set(acq.id, (spent.get(acq.id) ?? 0) + 1);
               continue;
             }
             if (verdict && !verdict.ok && method) {
               ban(acq.id, method);
-              lastCode = '';
-              lastError = verdict.reason;
+              box.lastCode = '';
+              box.lastError = verdict.reason;
               spent.set(acq.id, (spent.get(acq.id) ?? 0) + 1);
-              if (verdict.scopeMismatch) strategy = 'rewrite';
+              if (verdict.scopeMismatch) box.strategy = 'rewrite';
               continue;
             }
             const failure = extra.find((read) => !read.ok && read.error);
@@ -666,43 +690,42 @@ export async function collectSource(
               blockedAcq.add(acq.id);
               selectionLog += `restriction : ${kind ?? failure.diagnostic} sur ${acq.label}\n`;
               lastCorrection = kind ?? failure.diagnostic ?? 'stop';
-              lastCode = '';
+              box.lastCode = '';
               continue;
             }
             if (failure && (failure.diagnostic === 'restriction' || kind === 'PLAN_RESTRICTION' || kind === 'PARAMETER_RESTRICTION')) {
               const param = restrictedParameter(failure.error ?? '');
               const optional = !param || parameterIsOptional(known?.doc.params ?? '', param);
-              const stripped = param && optional ? dropOptionalArgument(lastCode, param) : null;
+              const stripped = param && optional ? dropOptionalArgument(box.lastCode, param) : null;
               selectionLog += `restriction : ${kind ?? 'PLAN_RESTRICTION'}${param ? ` ${param}` : ''} sur ${acq.label}\n`;
               if (stripped && !seen.has(attemptKey(method || 'script', callIdentity(stripped)[0]?.args ?? '', [acq.id]))) {
                 const degrades = acq.periods.length > 0 && /days|interval|from|to|start|end/i.test(param ?? '');
                 selectionLog += degrades ? `dégradation : ${param} retiré, granularité par défaut\n` : `paramètre ${param} retiré, valeur par défaut conservée\n`;
-                replay = stripped;
-                lastError = '';
+                box.replay = stripped;
+                box.lastError = '';
                 continue;
               }
               ban(acq.id, method);
               if (!stripped) blockedAcq.add(acq.id);
-              lastCode = '';
+              box.lastCode = '';
               continue;
             }
-            if (verdict?.ok) carried = `${carried} ${args}`.trim();
-            owner = reviewSource(prompt, catalog, done);
-            const next = progress();
-            selectionLog += `progression : ${held} → ${next.held.length} exigences tenues\n`;
-            if (!owner.ok && next.held.length <= held) {
+            owner = reviewSource(prompt, catalog, done, intent);
+            const next = heldCount();
+            selectionLog += `progression : ${held} → ${next} exigences tenues\n`;
+            if (!owner.ok && next <= held) {
               if (method && verdict) ban(acq.id, method);
               spent.set(acq.id, (spent.get(acq.id) ?? 0) + 1);
               if ((spent.get(acq.id) ?? 0) >= 2) blockedAcq.add(acq.id);
-              strategy = strategy === 'rewrite' ? 'minimal' : strategy;
-            } else held = next.held.length;
+              box.strategy = box.strategy === 'rewrite' ? 'minimal' : box.strategy;
+            } else held = next;
             if (owner.ok) break;
-            lastError = extra.map((read) => read.error).filter(Boolean).join('\n')
+            box.lastError = extra.map((read) => read.error).filter(Boolean).join('\n')
               || (verdict && !verdict.ok ? verdict.reason : '')
               || (extra.some((read) => read.ok && read.rows.length) ? 'lignes présentes mais hors intention' : 'réponse vide ou hors mesures');
           } catch (error) {
-            lastError = (error as Error).message;
-            if (correctAcquisition('', lastError).strategy === 'stop') blockedAcq.add(acq.id);
+            box.lastError = (error as Error).message;
+            if (correctAcquisition('', box.lastError).strategy === 'stop') blockedAcq.add(acq.id);
           }
         }
         const acquired = plan.filter((item) => satisfied(item)).map((item) => item.label);
@@ -721,7 +744,7 @@ export async function collectSource(
     // Afficher seulement les lectures hors skip (quests : séparer erreur / ok).
     const { skip: skipShow } = mentionedServers(prompt, catalog);
     const visible = done.filter((read) => !skipShow.includes(serverOf(read.tool)) && !(/^demo/.test(serverOf(read.tool)) && skipShow.some((id) => /^demo/.test(id))));
-    const offer = offerFromReads(prompt, visible.length ? visible : done.filter((read) => !/^demo/.test(serverOf(read.tool))), page);
+    const offer = offerFromReads(prompt, visible.length ? visible : done.filter((read) => !/^demo/.test(serverOf(read.tool))), page, intent);
     const sawBusiness = done.some((read) => read.ok && read.rows.some((row) => !isDocumentationRow(row)));
     if (sawBusiness) gap = '';
     const missing = owner.ok ? 'aucune' : (owner.missing.filter((item) => item !== 'lecture métier').join(', ') || gap || 'lecture exploitable');
@@ -731,7 +754,7 @@ export async function collectSource(
       offer.text.replace('Données manquantes : aucune.', `Données manquantes : ${missing}.`).replace('Données manquantes : lecture exploitable.', `Données manquantes : ${missing}.`).replace('Correction : aucune.', `Correction : ${lastCorrection}.`).replace('Résultat : lecture exploitable.', `Résultat : ${result}.`).replace('Résultat : rien ne peut être généré.', `Résultat : ${result}.`),
     ].filter(Boolean).join('\n\n');
     const focus = <T extends { rows: Array<Record<string, unknown>> }>(samples: T[]): T[] => {
-      const needles = claimsFromPrompt(prompt).filter((claim) => claim.kind === 'entite' || claim.kind === 'filtre').map((claim) => claim.text);
+      const needles = intent.claims.filter((claim) => claim.kind === 'entite' || claim.kind === 'filtre').map((claim) => claim.text);
       if (!needles.length) return samples;
       return samples.map((sample) => {
         if (!hitsInRows(sample.rows, needles).length) return sample;
@@ -750,6 +773,6 @@ export async function collectSource(
       log,
     };
   } catch (error) {
-    return offerFromReads(prompt, [{ tool: 'mcp', args: {}, ok: false, error: (error as Error).message, rows: [] }], page);
+    return offerFromReads(prompt, [{ tool: 'mcp', args: {}, ok: false, error: (error as Error).message, rows: [] }], page, intent);
   }
 }

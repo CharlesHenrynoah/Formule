@@ -7,9 +7,8 @@
  */
 import ts from 'typescript';
 import type { SourceTool } from '../../app-agents/ingest.ts';
-import { claimsFromPrompt } from './chain.ts';
 import { profileTool } from './capabilities.ts';
-import { registerMethods, requirementsOf, selectMethod } from './sdk-scope.ts';
+import { compileIntent, registerMethods, selectMethod } from './sdk-scope.ts';
 import { classifyLink } from '../../../../mcp-hub/src/link-state.ts';
 
 export type DocHint = {
@@ -476,13 +475,18 @@ export function paramsErrorHint(lastError: string): string {
 
 /** Une acquisition = les exigences métier, une méthode au bon périmètre, un retour brut. */
 export function planAcquisitions(prompt: string, docs: DocHint[]): Array<{ id: string; claim: string; hint?: DocHint }> {
-  const claims = claimsFromPrompt(prompt).filter((claim) => claim.kind === 'mesure' || claim.kind === 'entite' || claim.kind === 'collection');
-  const chosen = selectMethod(registerMethods(docs), requirementsOf(prompt));
-  const hint = chosen ? docs.find((doc) => doc.method === chosen.method.method) : undefined;
+  const intent = compileIntent(prompt);
+  const claims = intent.claims.filter((claim) => claim.kind === 'mesure' || claim.kind === 'entite' || claim.kind === 'collection');
   if (!docs.length) {
     return (claims.length ? claims : [{ id: 'c1', text: prompt.slice(0, 80) }]).slice(0, 4).map((claim) => ({ id: claim.id, claim: claim.text }));
   }
-  return claims.slice(0, 4).map((claim) => ({ id: claim.id, claim: claim.text, hint }));
+  const methods = registerMethods(docs);
+  return intent.acquisitions.flatMap((acq) => {
+    const chosen = selectMethod(methods, acq);
+    const hint = chosen ? docs.find((doc) => doc.method === chosen.method.method) : undefined;
+    const labels = [...acq.measures, ...acq.entities];
+    return (labels.length ? labels : [acq.label]).map((claim) => ({ id: acq.id, claim, hint }));
+  }).slice(0, 8);
 }
 
 export function executeCodePrompt(input: {

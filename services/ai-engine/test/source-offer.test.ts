@@ -141,7 +141,7 @@ test('execute générique : docs → run(client) + retry, sans méta-outils MCP'
         calls += 1;
         const code = String(args.code ?? '');
         assert.match(code, /async function run\(client\)/);
-        if (calls === 1) throw new Error('Property \'search_docs\' does not exist on type');
+        assert.match(code, /coins\.markets\.get/);
         return [{ name: 'Bitcoin', symbol: 'BTC', price: 91000, volume: 2e9, timestamp: '2026-11-24' }];
       }
       return [];
@@ -160,7 +160,7 @@ test('execute générique : docs → run(client) + retry, sans méta-outils MCP'
     },
   );
   assert.equal(missions.length, 2);
-  assert.equal(calls, 2);
+  assert.equal(calls, 1);
   assert.equal(offer.canBuild, true);
   assert.equal(offer.samples[0]?.rows[0]?.price, 91000);
 });
