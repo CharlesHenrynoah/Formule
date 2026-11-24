@@ -17,6 +17,7 @@ import {
   stripTypeSuppression,
   type DiagnosticClass,
 } from './execute-code.ts';
+import { classifyLink } from '../../../../mcp-hub/src/link-state.ts';
 import { admitExecute } from './execute-gate.ts';
 import { reviewSource } from './product-owner.ts';
 import { acquisitionNeeds, linkChain } from './chain.ts';
@@ -44,6 +45,8 @@ export function failureText(data: unknown): string | null {
       ? String((data as { message: string }).message)
       : '';
   if (/TypeScript diagnostics|Expected \d+\s*(?:-\d+)?\s+arguments?, but got|SyntaxError|TypeError|ReferenceError|is not a function|Traceback \(most recent|ValidationError|ZodError/i.test(text)) return text.slice(0, 900);
+  const link = text ? classifyLink(text).obstacle : 'unknown';
+  if (link === 'transport' || link === 'session') return text.slice(0, 900);
   return null;
 }
 

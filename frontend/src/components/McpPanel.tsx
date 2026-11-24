@@ -61,6 +61,7 @@ function TokenEditor({ s, busy, onSave, open: openInit }: { s: McpServer; busy: 
 }
 
 const STATUS_FR: Record<string, string> = { connected: 'connecté', connecting: 'connexion…', error: 'erreur', disabled: 'désactivé' };
+const PHASE_FR: Record<string, string> = { degraded: 'dégradé', disconnected: 'coupé', reconnecting: 'reconnexion…', verifying: 'vérification…', failed: 'interrompu' };
 
 export function McpPanel({ open, onOpenChange, onChanged }: Props) {
   const [servers, setServers] = useState<McpServer[]>([]);
@@ -111,7 +112,7 @@ export function McpPanel({ open, onOpenChange, onChanged }: Props) {
                 <CardHeader>
                   <CardTitle className="flex flex-wrap items-center gap-2">
                     {s.name ?? s.id}
-                    <Badge variant={s.status === 'connected' ? 'secondary' : s.status === 'error' ? 'destructive' : 'outline'} className={s.status === 'connected' ? 'text-emerald-400' : ''}>{STATUS_FR[s.status] ?? s.status}</Badge>
+                    <Badge variant={s.phase === 'failed' || s.status === 'error' ? 'destructive' : s.status === 'connected' ? 'secondary' : 'outline'} className={s.status === 'connected' && s.phase !== 'degraded' ? 'text-emerald-400' : ''} data-testid={`mcp-phase-${s.id}`}>{PHASE_FR[s.phase ?? ''] ?? STATUS_FR[s.status] ?? s.status}</Badge>
                   </CardTitle>
                   <CardDescription className="font-mono text-[11px]">{s.id} · {s.transport} · {s.transport === 'stdio' ? `${s.command} ${(s.args ?? []).join(' ')}` : s.url}</CardDescription>
                   <CardAction className="flex items-center gap-2">

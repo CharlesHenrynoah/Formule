@@ -7,6 +7,7 @@
  */
 import type { SourceTool } from '../../app-agents/ingest.ts';
 import { claimsFromPrompt } from './chain.ts';
+import { classifyLink } from '../../../../mcp-hub/src/link-state.ts';
 
 export type DocHint = {
   method?: string;
@@ -22,7 +23,7 @@ export type DocHint = {
 
 export type CallShape = 'object' | 'hybrid' | 'unknown';
 export type ShapeErrorKind = 'want_string_first' | 'want_object' | 'want_more_args' | 'bad_property' | 'other';
-export type DiagnosticClass = 'signature' | 'property' | 'type' | 'structure' | 'auth' | 'availability' | 'quota' | 'other';
+export type DiagnosticClass = 'signature' | 'property' | 'type' | 'structure' | 'auth' | 'availability' | 'quota' | 'transport' | 'session' | 'other';
 
 function serverOf(id: string): string {
   return id.includes('__') ? id.split('__')[0] : '';
@@ -208,6 +209,8 @@ export function ensureRunClient(code: string): string {
 
 /** Sept familles. Chaque famille a sa propre suite, sans réécrire tout le script. */
 export function classifyDiagnostic(error: string): DiagnosticClass {
+  const link = classifyLink(error);
+  if (link.obstacle === 'transport' || link.obstacle === 'session') return link.obstacle;
   if (/401|403|unauthorized|forbidden|api[_ ]?key|authent|permission refus/i.test(error)) return 'auth';
   if (/429|quota|rate limit|too many requests/i.test(error)) return 'quota';
   if (/503|502|504|unavailable|econn|etimedout|timeout|temporairement/i.test(error)) return 'availability';
@@ -248,7 +251,7 @@ export function stripTypeSuppression(code: string): string {
 export function correctAcquisition(code: string, error: string, observed = ''): { code: string | null; diagnostic: DiagnosticClass; strategy: 'stop' | 'once' | 'reinspect' | 'raw' | 'rewrite' | 'minimal' } {
   const diagnostic = classifyDiagnostic(error);
   if (diagnostic === 'auth' || diagnostic === 'quota') return { code: null, diagnostic, strategy: 'stop' };
-  if (diagnostic === 'availability') return { code: null, diagnostic, strategy: 'once' };
+  if (diagnostic === 'availability' || diagnostic === 'transport' || diagnostic === 'session') return { code: null, diagnostic, strategy: 'once' };
   if (diagnostic === 'structure') return { code: null, diagnostic, strategy: 'raw' };
   if (diagnostic === 'property') {
     const missing = missingProperty(error);

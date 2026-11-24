@@ -24,8 +24,10 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
+import { randomUUID } from 'node:crypto';
 import { SecretStore, authHeaders, cleanHeaders, cleanToken, friendlyError } from './secrets.ts';
 import { githubAttempts, githubFallbackAfterError, isGithubSearchFailure } from './github-robust.ts';
+import { Flight, classifyLink, recoverCall, type Breaker, type Phase } from './link-state.ts';
 
 const PORT = Number(process.env.MCP_HUB_PORT ?? 4004);
 const CONFIG_PATH = resolve(process.env.MCP_CONFIG_PATH ?? '../../mcp.config.json');
@@ -58,7 +60,13 @@ type ServerConfig = {
   version?: number;
 };
 type ToolInfo = { name: string; description?: string; inputSchema?: unknown; annotations?: { readOnlyHint?: boolean }; _meta?: { safe?: boolean } };
-type Conn = { config: ServerConfig; client?: Client; status: 'connected' | 'connecting' | 'error' | 'disabled'; error?: string; tools: ToolInfo[]; lastUsed?: number };
+type Conn = {
+  config: ServerConfig; client?: Client; status: 'connected' | 'connecting' | 'error' | 'disabled'; error?: string; tools: ToolInfo[]; lastUsed?: number;
+  phase: Phase; flight: Flight; breaker: Breaker;
+};
+const openConn = (config: ServerConfig, status: Conn['status'] = 'connecting'): Conn => ({
+  config, status, tools: [], phase: 'disconnected', flight: new Flight(), breaker: { failures: 0, openedAt: null },
+});
 
 const conns = new Map<string, Conn>();
 
@@ -116,8 +124,9 @@ const isWrite = (c: ServerConfig, t: ToolInfo) => (c.writeTools ?? []).includes(
 async function connect(conn: Conn) {
   await disconnect(conn);
   const c = conn.config;
-  if (!c.enabled) { conn.status = 'disabled'; conn.tools = []; return; }
+  if (!c.enabled) { conn.status = 'disabled'; conn.phase = 'disconnected'; conn.tools = []; return; }
   conn.status = 'connecting';
+  conn.phase = 'reconnecting';
   try {
     const client = new Client({ name: 'everything-software-mcp-hub', version: '0.1.0' });
     let transport;
@@ -143,13 +152,17 @@ async function connect(conn: Conn) {
     const { tools } = await client.listTools();
     conn.client = client;
     conn.tools = tools as ToolInfo[];
+    conn.phase = 'verifying';
     conn.status = 'connected';
+    conn.phase = 'connected';
     conn.error = undefined;
     console.log(`[mcp-hub] ${c.id} connecté (${tools.length} outils)`);
   } catch (e) {
     conn.status = 'error';
     const s = c.kind === 'app' ? undefined : secrets.get(c.id);
-    conn.error = friendlyError(String((e as Error)?.message ?? e), !!s, [s?.token ?? '', ...Object.values(s?.headers ?? {})]);
+    const secretValues = [s?.token ?? '', ...Object.values(s?.headers ?? {})].filter((value): value is string => Boolean(value));
+    conn.error = friendlyError(String((e as Error)?.message ?? e), !!s, secretValues);
+    conn.phase = classifyLink(conn.error, typeof (e as { code?: unknown }).code === 'number' ? (e as { code: number }).code : undefined).obstacle === 'auth' ? 'failed' : 'disconnected';
     conn.tools = [];
     console.warn(`[mcp-hub] ${c.id} : ${conn.error}`);
   }
@@ -181,6 +194,7 @@ const view = (conn: Conn) => ({
   ...(({ headers: _h, env, ...rest }) => ({ ...rest, ...(env ? { envNames: Object.keys(env) } : {}) }))(conn.config), // eslint-disable-line @typescript-eslint/no-unused-vars
   ...(conn.config.kind === 'app' ? {} : { auth: secrets.view(conn.config.id) }),
   status: conn.status,
+  phase: conn.phase,
   error: conn.error,
   tools: conn.tools.map((t) => ({
     name: t.name, id: `${conn.config.id}__${t.name}`, description: t.description, inputSchema: t.inputSchema,
@@ -214,11 +228,11 @@ app.post<{ Params: { appId: string }; Body: { version: number; name?: string } }
   // LRU : on libère les backends d'app les moins utilisés
   const apps = [...conns.values()].filter((c) => c.config.kind === 'app' && c.config.id !== id).sort((a, b) => (a.lastUsed ?? 0) - (b.lastUsed ?? 0));
   while (apps.length >= APP_SERVERS_MAX) { const old = apps.shift()!; await disconnect(old); conns.delete(old.config.id); }
-  const conn: Conn = existing ?? { config: { id, transport: 'stdio', enabled: true, kind: 'app', appId, version, allowedTools: '*', writeTools: [] }, status: 'connecting', tools: [] };
+  const conn: Conn = existing ?? openConn({ id, transport: 'stdio', enabled: true, kind: 'app', appId, version, allowedTools: '*', writeTools: [] });
   Object.assign(conn.config, { version, name: req.body?.name ? `App · ${String(req.body.name).slice(0, 60)}` : `App ${appId.slice(0, 8)}` });
   conn.lastUsed = Date.now();
   conns.set(id, conn);
-  await connect(conn);
+  await conn.flight.run(`${conn.config.id}:${conn.config.transport}`, () => connect(conn));
   if (conn.status !== 'connected') return reply.code(502).send({ ...view(conn), error: conn.error ?? 'backend injoignable' });
   return view(conn);
 });
@@ -253,9 +267,9 @@ app.post<{ Body: ServerConfig & AuthBody }>('/servers', async (req, reply) => {
   if (c.transport !== 'stdio' && !/^https?:\/\//i.test(String(c.url))) return reply.code(400).send({ error: 'url : http(s) attendu' });
   if (authPatch.token !== undefined || authPatch.headers !== undefined) secrets.update(c.id, authPatch); else secrets.remove(c.id);
   // Par défaut : tous les outils autorisés ("*") — l'utilisateur peut restreindre ensuite dans le panneau MCP.
-  const conn: Conn = { config: { writeTools: [], ...c, allowedTools: c.allowedTools ?? '*', enabled: c.enabled ?? true }, status: 'connecting', tools: [] };
+  const conn: Conn = openConn({ writeTools: [], ...c, allowedTools: c.allowedTools ?? '*', enabled: c.enabled ?? true });
   conns.set(c.id, conn);
-  await connect(conn);
+  await conn.flight.run(`${conn.config.id}:${conn.config.transport}`, () => connect(conn));
   saveConfig();
   return reply.code(201).send(view(conn));
 });
@@ -274,7 +288,7 @@ app.patch<{ Params: { id: string }; Body: Partial<ServerConfig> & AuthBody }>('/
     ...(enabled !== undefined && { enabled }), ...(allowedTools !== undefined && { allowedTools }),
     ...(writeTools !== undefined && { writeTools }), ...(name !== undefined && { name }),
   });
-  if (reconnect) await connect(conn);
+  if (reconnect) await conn.flight.run(`${conn.config.id}:${conn.config.transport}`, () => connect(conn));
   saveConfig();
   return view(conn);
 });
@@ -282,7 +296,7 @@ app.patch<{ Params: { id: string }; Body: Partial<ServerConfig> & AuthBody }>('/
 app.post<{ Params: { id: string } }>('/servers/:id/reconnect', async (req, reply) => {
   const conn = conns.get(req.params.id);
   if (!conn) return reply.code(404).send({ error: 'serveur inconnu' });
-  await connect(conn);
+  await conn.flight.run(`${conn.config.id}:${conn.config.transport}`, () => connect(conn));
   return view(conn);
 });
 
@@ -299,23 +313,53 @@ app.post<{ Body: { tool: string; args?: Record<string, unknown>; confirmed?: boo
   const { tool, args = {}, confirmed = false } = req.body ?? ({} as never);
   const asked = Number(req.body?.timeoutMs);
   const callTimeout = Number.isFinite(asked) ? Math.min(120_000, Math.max(1_000, asked)) : CALL_TIMEOUT_MS;
+  const correlationId = String(req.headers['x-formule-correlation'] ?? randomUUID());
+  reply.header('x-formule-correlation', correlationId);
   const [serverId, ...rest] = String(tool ?? '').split('__');
   const name = rest.join('__');
   const conn = conns.get(serverId);
-  if (!conn || conn.status !== 'connected' || !conn.client) return reply.code(404).send({ error: `serveur MCP indisponible : ${serverId}` });
+  if (!conn || !conn.config.enabled) return reply.code(404).send({ error: `serveur MCP indisponible : ${serverId}`, correlationId, obstacle: 'availability', phase: conn?.phase ?? 'disconnected' });
+  if (conn.status !== 'connected' || !conn.client) {
+    await conn.flight.run(`${conn.config.id}:${conn.config.transport}`, () => connect(conn));
+  }
+  if (conn.status !== 'connected' || !conn.client) {
+    const obstacle = classifyLink(conn.error ?? '').obstacle;
+    return reply.code(503).send({ error: conn.error ?? `serveur MCP indisponible : ${serverId}`, correlationId, obstacle, phase: conn.phase });
+  }
   const t = conn.tools.find((x) => x.name === name);
   if (!t) return reply.code(404).send({ error: `outil inconnu : ${tool}` });
   if (!isAllowed(conn.config, name)) return reply.code(403).send({ error: `outil hors liste blanche : ${tool}` });
   if (isWrite(conn.config, t) && !confirmed) return reply.code(428).send({ error: 'confirmation requise', needsConfirmation: true, tool });
   const started = Date.now();
 
+  const secretValues = [secrets.get(conn.config.id)?.token ?? '', ...Object.values(secrets.get(conn.config.id)?.headers ?? {})].filter((value): value is string => Boolean(value));
   const runOne = async (toolName: string, callArgs: Record<string, unknown>) => {
-    const res = await conn.client!.callTool({ name: toolName, arguments: callArgs }, undefined, { timeout: callTimeout });
-    const content = (res.content as Array<{ type: string; text?: string }>) ?? [];
-    const text = content.filter((c) => c.type === 'text').map((c) => c.text).join('\n');
-    let data: unknown = text;
-    try { data = JSON.parse(text); } catch { /* texte brut */ }
-    return { isError: !!res.isError, data, content };
+    const outcome = await recoverCall({
+      write: isWrite(conn.config, t),
+      correlationId,
+      serverId: conn.config.id,
+      transport: conn.config.transport,
+      linked: true,
+      flight: conn.flight,
+      breaker: conn.breaker,
+      secrets: secretValues,
+      onPhase: (phase) => { conn.phase = phase; },
+      call: async () => {
+        const res = await conn.client!.callTool({ name: toolName, arguments: callArgs }, undefined, { timeout: callTimeout });
+        const content = (res.content as Array<{ type: string; text?: string }>) ?? [];
+        const text = content.filter((c) => c.type === 'text').map((c) => c.text).join('\n');
+        let data: unknown = text;
+        try { data = JSON.parse(text); } catch { /* texte brut */ }
+        return { isError: !!res.isError, data, content };
+      },
+      reconnect: async () => {
+        await connect(conn);
+        return { ok: conn.status === 'connected', tools: conn.tools.map((item) => item.name), error: conn.error };
+      },
+      permitted: (tools) => tools.includes(toolName) && isAllowed(conn.config, toolName),
+    });
+    if (!outcome.ok) throw Object.assign(new Error(outcome.error), { obstacle: outcome.obstacle, phase: outcome.phase, replayed: outcome.replayed });
+    return outcome.value;
   };
 
   try {
@@ -358,9 +402,19 @@ app.post<{ Body: { tool: string; args?: Record<string, unknown>; confirmed?: boo
       data: last.data,
       content: last.content,
       ms: Date.now() - started,
+      correlationId,
+      phase: conn.phase,
     };
   } catch (e) {
-    return reply.code(502).send({ error: (e as Error).message, tool });
+    const obstacle = (e as { obstacle?: string }).obstacle ?? classifyLink((e as Error).message).obstacle;
+    return reply.code(502).send({
+      error: (e as Error).message,
+      tool,
+      correlationId,
+      obstacle,
+      phase: (e as { phase?: string }).phase ?? conn.phase,
+      replayed: (e as { replayed?: boolean }).replayed === true,
+    });
   }
 });
 
@@ -402,7 +456,7 @@ process.on('uncaughtException', (error) => {
 });
 
 const start = async () => {
-  for (const c of loadConfig().filter((x) => x.kind !== 'app')) conns.set(c.id, { config: c, status: 'connecting', tools: [] });
+  for (const c of loadConfig().filter((x) => x.kind !== 'app')) conns.set(c.id, openConn(c));
   await app.listen({ port: PORT, host: BIND_HOST });
   console.log(`[mcp-hub] prêt sur :${PORT} (config : ${CONFIG_PATH})`);
   await Promise.all([...conns.values()].map(connect));

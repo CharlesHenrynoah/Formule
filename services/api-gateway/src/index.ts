@@ -474,7 +474,9 @@ app.post<{ Body: { tool: string; args?: Json; confirmed?: boolean } }>('/api/mcp
   if (!req.body?.tool || !/^[a-zA-Z0-9-]+__[\w.-]+$/.test(req.body.tool)) return reply.code(400).send({ error: 'nom d\'outil invalide' });
   // Lectures MCP externes : args bornés (le Data Engineer / les apps doivent paginer, pas dumper).
   if (JSON.stringify(req.body.args ?? {}).length > 100_000) return reply.code(413).send({ error: 'arguments trop volumineux' });
-  const r = await call(`${MCP}/call`, { method: 'POST', json: { tool: req.body.tool, args: req.body.args ?? {}, confirmed: req.body.confirmed === true } });
+  const correlation = String(req.headers['x-formule-correlation'] ?? randomUUID());
+  const r = await call(`${MCP}/call`, { method: 'POST', headers: { 'x-formule-correlation': correlation }, json: { tool: req.body.tool, args: req.body.args ?? {}, confirmed: req.body.confirmed === true } });
+  reply.header('x-formule-correlation', String(r.body?.correlationId ?? correlation));
   return reply.code(r.status).send(r.body);
 });
 

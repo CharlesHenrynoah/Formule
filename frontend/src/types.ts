@@ -11,7 +11,7 @@ export type EngineConfig = { provider: string; model: string; requested: string;
 export type McpTool = { id: string; name: string; description?: string; write: boolean; allowed: boolean; server: string; inputSchema?: unknown };
 export type McpServer = {
   id: string; name?: string; transport: 'stdio' | 'http' | 'sse'; command?: string; args?: string[]; url?: string;
-  enabled: boolean; status: string; error?: string; allowedTools?: string[] | '*'; writeTools?: string[];
+  enabled: boolean; status: string; phase?: string; error?: string; allowedTools?: string[] | '*'; writeTools?: string[];
   tools: McpTool[];
   /** Métadonnées d'authentification (jamais la valeur du jeton). */
   auth?: McpAuth;

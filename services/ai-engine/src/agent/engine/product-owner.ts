@@ -5,8 +5,9 @@
 import { keepNamedServer, mentionedServers, type SourceTool } from '../../app-agents/ingest.ts';
 import { keepSpan } from './series.ts';
 import { linkChain, type ChainProof } from './chain.ts';
+import { classifyLink } from '../../../../mcp-hub/src/link-state.ts';
 
-export type OwnerRead = { tool: string; args: Record<string, unknown>; ok: boolean; error?: string; rows: Array<Record<string, unknown>> };
+export type OwnerRead = { tool: string; args: Record<string, unknown>; ok: boolean; error?: string; rows: Array<Record<string, unknown>>; diagnostic?: string };
 export type OwnerSample = { tool: string; args: Record<string, unknown>; rows: Array<Record<string, unknown>> };
 
 export type OwnerVerdict = {
@@ -201,6 +202,24 @@ export function reviewSource(
   const okReads = kept.filter((read) => read.ok && read.rows.length);
   const fields = fieldsOf(okReads);
   const samples = samplesOf(okReads);
+
+  const linkDown = kept.filter((read) => {
+    if (read.ok) return false;
+    if (read.diagnostic === 'transport' || read.diagnostic === 'session' || read.diagnostic === 'availability') return true;
+    const kind = classifyLink(read.error ?? '');
+    return kind.obstacle === 'transport' || kind.obstacle === 'session' || kind.obstacle === 'availability';
+  });
+  if (!okReads.length && linkDown.length) {
+    const detail = linkDown.map((read) => read.error).filter(Boolean).join(' ; ');
+    const text = [
+      thinking,
+      '',
+      'Product Owner : la liaison est interrompue. Ce n’est pas une absence de données.',
+      detail,
+      'La reprise reste autorisée.',
+    ].filter(Boolean).join('\n');
+    return { ok: false, text, brief: text, samples: [], thought, missing: ['liaison'], retryable: true };
+  }
 
   if (use.length && !okReads.length) {
     const text = [
