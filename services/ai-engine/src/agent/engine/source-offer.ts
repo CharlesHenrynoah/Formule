@@ -270,7 +270,10 @@ async function runReads(
   admit?: (tool: string, args: Record<string, unknown>) => string | null,
 ): Promise<SourceRead[]> {
   const done: SourceRead[] = [];
+  const dead = new Set<string>();
   for (const read of reads) {
+    const server = serverOf(read.tool);
+    if (server && dead.has(server)) continue;
     const refusal = admit?.(read.tool, read.args) ?? null;
     if (refusal === 'defer') continue;
     if (refusal) {
@@ -282,6 +285,7 @@ async function runReads(
       const failed = failureText(result);
       if (failed) {
         done.push({ ...read, ok: false, error: failed, rows: [], raw: result, diagnostic: correctAcquisition('', failed).diagnostic });
+        if (classifyRestriction(failed) === 'TRANSPORT_ERROR' && server) dead.add(server);
         continue;
       }
       const projected = projectResponse(result);
@@ -296,6 +300,7 @@ async function runReads(
     } catch (error) {
       const message = (error as Error).message;
       done.push({ ...read, ok: false, error: message, rows: [], diagnostic: correctAcquisition('', message).diagnostic });
+      if (classifyRestriction(message) === 'TRANSPORT_ERROR' && server) dead.add(server);
     }
   }
   return done;
@@ -374,8 +379,10 @@ async function coverEntities(
   const { use, skip } = mentionedServers(prompt, catalog);
   const fromReads = [...new Set(done.map((read) => serverOf(read.tool)).filter(Boolean))];
   const preferred = use.length ? use : fromReads.filter((id) => !skip.includes(id) && !/^demo/.test(id));
+  const down = new Set(done.filter((read) => !read.ok && (read.diagnostic === 'transport' || classifyRestriction(read.error ?? '') === 'TRANSPORT_ERROR')).map((read) => serverOf(read.tool)));
   const searches = catalog.filter((tool) => {
     const server = serverOf(tool.id);
+    if (down.has(server)) return false;
     if (skip.includes(server) || /^demo/.test(server) && !use.some((id) => /^demo/.test(id))) return false;
     if (preferred.length && !preferred.includes(server)) return false;
     return profileTool(tool).capability === 'SEARCH';
@@ -397,6 +404,7 @@ async function coverEntities(
     const tool = searches.find((item) => filterArgs(item, prompt, need.text));
     const args = tool ? filterArgs(tool, prompt, need.text) : null;
     if (!tool || !args) {
+      if (preferred.some((id) => down.has(id))) continue;
       gap = gap || `recherche incomplète : ${need.text}`;
       notes.push(selectionNote({ intention: need.text, capacite: 'SEARCH', candidats: searches.map((item) => item.id), exclus: excludedTools(catalog, preferred[0] ?? ''), args: {}, preuves: [], resultat: 'recherche incomplète' }));
       continue;
@@ -506,7 +514,11 @@ export async function collectSource(
       const fromReads = [...new Set(done.map((read) => serverOf(read.tool)).filter(Boolean))];
       const preferred = use.length ? use : fromReads.filter((id) => !skip.includes(id) && !/^demo/.test(id));
       const codeTool = findCodeTool(catalog, preferred, skip);
-      if (codeTool) {
+      const serverDown = (id: string) => done.some((read) => serverOf(read.tool) === id && !read.ok && (read.diagnostic === 'transport' || read.diagnostic === 'availability' || read.diagnostic === 'session' || classifyRestriction(read.error ?? '') === 'TRANSPORT_ERROR'));
+      if (codeTool && serverDown(serverOf(codeTool.id))) {
+        selectionLog += `liaison : transport sur ${serverOf(codeTool.id)}\n`;
+        lastCorrection = 'liaison';
+      } else if (codeTool) {
         const server = serverOf(codeTool.id);
         const documented = (rows: Array<Record<string, unknown>>) => rows.filter((row) => Object.keys(row).some((key) => /^(method|endpoint|summary|description|params|response)$/i.test(key)));
         let docs = sdkHintsFromDocs(done.flatMap((read) => (serverOf(read.tool) === server ? documented(read.rows) : [])));
@@ -686,6 +698,14 @@ export async function collectSource(
             }
             const failure = extra.find((read) => !read.ok && read.error);
             const kind = failure?.error ? classifyRestriction(failure.error) : null;
+            if (failure && (kind === 'TRANSPORT_ERROR' || failure.diagnostic === 'transport' || failure.diagnostic === 'availability' || failure.diagnostic === 'session')) {
+              for (const item of plan) blockedAcq.add(item.id);
+              selectionLog += `liaison : ${kind ?? failure.diagnostic} sur ${acq.label}\n`;
+              lastCorrection = 'liaison';
+              box.lastCode = '';
+              box.strategy = 'stop';
+              continue;
+            }
             if (failure && (failure.diagnostic === 'auth' || kind === 'AUTH_INVALID' || kind === 'PERMISSION_DENIED' || failure.diagnostic === 'quota' || kind === 'QUOTA_EXCEEDED' || kind === 'RATE_LIMIT')) {
               blockedAcq.add(acq.id);
               selectionLog += `restriction : ${kind ?? failure.diagnostic} sur ${acq.label}\n`;
@@ -746,9 +766,10 @@ export async function collectSource(
     const visible = done.filter((read) => !skipShow.includes(serverOf(read.tool)) && !(/^demo/.test(serverOf(read.tool)) && skipShow.some((id) => /^demo/.test(id))));
     const offer = offerFromReads(prompt, visible.length ? visible : done.filter((read) => !/^demo/.test(serverOf(read.tool))), page, intent);
     const sawBusiness = done.some((read) => read.ok && read.rows.some((row) => !isDocumentationRow(row)));
-    if (sawBusiness) gap = '';
+    const linkDown = done.some((read) => !read.ok && (read.diagnostic === 'transport' || read.diagnostic === 'availability' || read.diagnostic === 'session' || classifyRestriction(read.error ?? '') === 'TRANSPORT_ERROR'));
+    if (sawBusiness || linkDown) gap = '';
     const missing = owner.ok ? 'aucune' : (owner.missing.filter((item) => item !== 'lecture métier').join(', ') || gap || 'lecture exploitable');
-    const result = owner.ok && offer.canBuild ? 'exigences tenues' : gap || (offer.samples.length ? 'acquisitions réussies conservées, exigences encore ouvertes' : 'rien ne peut être généré');
+    const result = owner.ok && offer.canBuild ? 'exigences tenues' : linkDown && !sawBusiness ? 'liaison interrompue' : gap || (offer.samples.length ? 'acquisitions réussies conservées, exigences encore ouvertes' : 'rien ne peut être généré');
     const text = [
       selectLine,
       offer.text.replace('Données manquantes : aucune.', `Données manquantes : ${missing}.`).replace('Données manquantes : lecture exploitable.', `Données manquantes : ${missing}.`).replace('Correction : aucune.', `Correction : ${lastCorrection}.`).replace('Résultat : lecture exploitable.', `Résultat : ${result}.`).replace('Résultat : rien ne peut être généré.', `Résultat : ${result}.`),

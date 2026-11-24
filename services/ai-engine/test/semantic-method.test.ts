@@ -360,6 +360,36 @@ test('un constat de découverte ne parle plus à la place d’une lecture déjà
   assert.equal(offer.canBuild, false);
 });
 
+test('un rôle de champ n’est pas une entité', () => {
+  const claims = claimsFromPrompt('Affiche le nom de Orion.');
+  assert.equal(claims.some((claim) => claim.kind === 'entite' && /^nom$/i.test(claim.text)), false);
+  assert.equal(claims.some((claim) => claim.kind === 'entite' && claim.text === 'Orion'), true);
+  assert.equal(claims.some((claim) => claim.kind === 'mesure' && /^nom$/i.test(claim.text)), true);
+});
+
+test('une coupure de transport arrête le serveur et n’est pas une recherche incomplète', async () => {
+  const calls: string[] = [];
+  const offer = await collectSource(
+    'Affiche le prix de Orion.',
+    '',
+    async () => ([
+      { id: 'sonde__search_docs', description: 'docs SDK', serverName: 'Sonde', schema: { required: ['query'], properties: { query: { type: 'string' } } } },
+      { id: 'sonde__execute', description: 'Runs JavaScript code to interact with the API', serverName: 'Sonde', schema: { required: ['code'], properties: { code: { type: 'string' } } } },
+    ]),
+    async (tool) => {
+      calls.push(tool);
+      throw new Error('fetch failed');
+    },
+    async () => '{"reads":[{"tool":"sonde__search_docs","args":{"query":"prix"}},{"tool":"sonde__execute","args":{}}]}',
+    async () => 'async function run(client) { return client.items.get("Orion"); }',
+  );
+  assert.equal(calls.filter((tool) => tool.endsWith('search_docs')).length, 1);
+  assert.equal(calls.filter((tool) => tool.endsWith('execute')).length, 0);
+  assert.match(offer.text, /liaison/);
+  assert.doesNotMatch(offer.text, /recherche incomplète/);
+  assert.doesNotMatch(offer.text, /appel minimal/);
+});
+
 test('une intention compilée est la même pour des domaines différents', () => {
   const prompts = [
     'Affiche le prix de Orion.',

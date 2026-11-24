@@ -43,7 +43,7 @@ const SAME: Array<[RegExp, RegExp]> = [
   [/nombre|count|total|taux|score/, /count|total|rate|score|nombre/],
 ];
 
-const SKIP_PROPER = new Set(['affiche', 'montre', 'avec', 'pour', 'dans', 'sous', 'voici', 'ensuite', 'tableau', 'liste', 'page', 'carte', 'cartes', 'kpi', 'kpis', 'graphique', 'courbe', 'bouton', 'formulaire', 'composant', 'panneau', 'grille', 'workflow', 'workflows', 'commit', 'commits', 'issue', 'issues', 'release', 'releases', 'note', 'notes', 'alerte', 'alertes', 'utilise', 'recupere', 'interface', 'element', 'dashboard', 'titre', 'cree', 'creer', 'haut', 'bas', 'milieu', 'mets', 'ajoute', 'change', 'retire', 'renomme', 'supprime', 'deplace']);
+const SKIP_PROPER = new Set(['affiche', 'montre', 'avec', 'pour', 'dans', 'sous', 'voici', 'ensuite', 'tableau', 'liste', 'page', 'carte', 'cartes', 'kpi', 'kpis', 'graphique', 'courbe', 'bouton', 'formulaire', 'composant', 'panneau', 'grille', 'workflow', 'workflows', 'commit', 'commits', 'issue', 'issues', 'release', 'releases', 'note', 'notes', 'alerte', 'alertes', 'utilise', 'recupere', 'interface', 'element', 'dashboard', 'titre', 'title', 'nom', 'name', 'statut', 'status', 'date', 'prix', 'price', 'volume', 'score', 'nombre', 'total', 'taux', 'cree', 'creer', 'haut', 'bas', 'milieu', 'mets', 'ajoute', 'change', 'retire', 'renomme', 'supprime', 'deplace']);
 const QUANTITY = new Set(['un', 'une', 'deux', 'trois', 'quatre', 'cinq', 'six', 'sept', 'huit', 'neuf', 'dix', 'onze', 'douze', 'treize', 'quatorze', 'quinze', 'seize', 'vingt', 'trente', 'quarante', 'cinquante', 'cent', 'mille', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten']);
 
 const MEASURE = /\b(prix|price|volume|variation|capitalisation|market cap|date|nom|statut|nombre|total|taux|score|plus haut)\b/gi;
@@ -92,7 +92,7 @@ export function claimsFromPrompt(prompt: string): Claim[] {
   for (const match of prompt.matchAll(/\b(valider|valide|déclencher|declencher|publier|exécuter|executer)\b/gi)) add('operation', match[1]);
   for (const match of prompt.matchAll(/[«"]([^»"]{2,80})[»"]/g)) add('meta', match[1]);
   for (const match of prompt.matchAll(/\b([A-Z]{2,6})\b/g)) {
-    if (!/^(MCP|API|EUR|USD|GBP|JPY|CHF|GET|SDK|HTTP|KPI)$/.test(match[1]) && !QUANTITY.has(fold(match[1]))) add('entite', match[1]);
+    if (!/^(MCP|API|EUR|USD|GBP|JPY|CHF|GET|SDK|HTTP|KPI)$/.test(match[1]) && !QUANTITY.has(fold(match[1])) && !SKIP_PROPER.has(fold(match[1]))) add('entite', match[1]);
   }
   const named = prompt.match(/donn[ée]es de\s+([^,(.]{2,40})/i);
   if (named) add('entite', named[1]);
