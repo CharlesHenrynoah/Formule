@@ -394,6 +394,13 @@ app.post<{ Body: { server: string; uri: string } }>('/resources/read', async (re
   }
 });
 
+process.on('unhandledRejection', (error) => {
+  console.error('[mcp-hub] rejet non géré, le hub reste en écoute', error);
+});
+process.on('uncaughtException', (error) => {
+  console.error('[mcp-hub] exception non gérée, le hub reste en écoute', error);
+});
+
 const start = async () => {
   for (const c of loadConfig().filter((x) => x.kind !== 'app')) conns.set(c.id, { config: c, status: 'connecting', tools: [] });
   await app.listen({ port: PORT, host: BIND_HOST });

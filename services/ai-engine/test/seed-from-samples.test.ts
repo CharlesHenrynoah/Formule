@@ -83,3 +83,38 @@ test('les issues arrivent dans data_list même si le backend ne nomme pas la col
   assert.equal(seed.issues[0].id, '4');
   assert.equal(seed.issues[0].state, 'open');
 });
+
+test('les lignes d\'un outil quelconque remplissent la collection qui porte son nom', () => {
+  const seed = seedFromSamples(`export const tools = { a: { run: (_a, db) => db.list('remote__search_docs') } };`, [
+    { tool: 'remote__search_docs', result: [{ method: 'client.markets.get', endpoint: 'GET /markets', summary: 'Marchés' }] },
+  ]);
+  assert.equal(seed.remote__search_docs[0].method, 'client.markets.get');
+  assert.equal(seed.remote__search_docs[0].endpoint, 'GET /markets');
+});
+
+test('un texte renvoyé par n\'importe quel outil devient les lignes de la collection lue', () => {
+  const seed = seedFromSamples(`export const tools = { a: { run: (_a, db) => db.list('pages') } };`, [
+    { tool: 'wiki__read', result: 'Available pages\n- Routing\n- Data fetching' },
+  ]);
+  assert.equal(seed.pages.length, 3);
+  assert.equal(seed.pages[1].label, 'Routing');
+});
+
+test('une collection canonique ne reçoit pas des lignes qui n\'en sont pas', () => {
+  const seed = seedFromSamples(`export const tools = { a: { run: (_a, db) => db.list('profil') } };`, [
+    { tool: 'remote__read', result: [{ price: 1, volume: 2 }] },
+  ]);
+  assert.equal(seed.profil, undefined);
+  assert.equal(seed.read[0].price, 1);
+});
+
+test('les lignes d\'un autre serveur ne remplissent pas la collection', () => {
+  const src = `export const tools = { a: { run: (_a, db) => db.list('coingecko__search_docs') } };`;
+  const seed = seedFromSamples(src, [
+    { tool: 'demo__get_weather', result: [{ jour: 1, min_c: -1, max_c: 4, condition: 'Venteux' }] },
+    { tool: 'coingecko__search_docs', result: [{ method: 'client.coins.markets.get', endpoint: 'GET /coins/markets', summary: 'Marchés' }] },
+  ]);
+  assert.equal(seed.coingecko__search_docs.length, 1);
+  assert.equal(seed.coingecko__search_docs[0].method, 'client.coins.markets.get');
+  assert.equal(seed.coingecko__search_docs[0].condition, undefined);
+});

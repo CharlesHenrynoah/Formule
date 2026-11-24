@@ -148,8 +148,8 @@ export class Workspace {
     const ws = new Workspace(id, dir);
     // Composants déjà présents dans le template (ex. button, chart pré-installés) : connus du Développeur.
     try { for (const f of readdirSync(join(dir, 'src/components/ui'))) if (f.endsWith('.tsx')) ws.preinstalled.add(f.slice(0, -4)); } catch { /* ignore */ }
-    // Pas de nettoyage ici : tsx watch surveille déjà des fichiers de data/workspaces.
-    // Les effacer redémarre le moteur au milieu de la construction (liaison coupée).
+    // data/ est exclu du tsx watch : le nettoyage ne coupe plus la liaison.
+    // On le laisse pour un autre moment, hors du chemin de construction.
     if (seed?.components?.length) await ws.shadcnAdd(seed.components);
     for (const [p, c] of Object.entries(seed?.files ?? {})) await ws.write(p, c);
     return ws;

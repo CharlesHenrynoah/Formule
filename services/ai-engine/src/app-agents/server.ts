@@ -18,7 +18,7 @@ import { readFileSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { buildMemory, loadMemory, memoryMarkdown, retroMemory, saveMemory } from '../agent/app-memory.ts';
-import { createProvider, INCEPTION_BASE_URL, INCEPTION_DEFAULT_MODEL } from '../providers/index.ts';
+import { createProvider, DEEPSEEK_BASE_URL, DEEPSEEK_DEFAULT_MODEL, INCEPTION_BASE_URL, INCEPTION_DEFAULT_MODEL } from '../providers/index.ts';
 import { APPS_DIR, callHub, ensureApp, externalTools, forgetFact, log, memoryContext, readLog, readMemory, remember, stopApp, type HubTool } from './store.ts';
 import { runLlmAgent, runScriptedAgent, type AgentCfg, type AskEvent } from './runner.ts';
 import { ACTION_COMPONENTS, SCENE_CATALOG, ASK_TIMEOUT_MS, MAX_STEPS, callVoice, voiceSession, voiceTools, discover, foremanTools, hubJson, retrievalTools, runAppCli, sourceLabel, allowedServers, type Task } from './foreman.ts';
@@ -38,6 +38,7 @@ const choice = createProvider();
 function agentCfg(): AgentCfg | null {
   const env = process.env;
   const p = choice.provider.name;
+  if (p === 'deepseek') return { baseUrl: env.LLM_BASE_URL || DEEPSEEK_BASE_URL, apiKey: (env.DEEPSEEK_API_KEY || env.LLM_API_KEY)!, model: env.LLM_MODEL?.trim() || DEEPSEEK_DEFAULT_MODEL };
   if (p === 'inception') return { baseUrl: env.LLM_BASE_URL || INCEPTION_BASE_URL, apiKey: (env.INCEPTION_API_KEY || env.LLM_API_KEY)!, model: env.LLM_MODEL?.trim() || INCEPTION_DEFAULT_MODEL, reasoningEffort: env.LLM_REASONING_EFFORT || 'instant' };
   if (p === 'openai') return { baseUrl: env.LLM_BASE_URL || 'https://api.openai.com/v1', apiKey: (env.LLM_API_KEY || env.OPENAI_API_KEY)!, model: env.LLM_MODEL?.trim() || 'gpt-4o-mini' };
   return null;

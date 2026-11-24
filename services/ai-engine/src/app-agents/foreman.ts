@@ -39,7 +39,7 @@ export function retrievalTools(): HubTool[] {
     mk('retrieval', 'mcp_list_tools', 'Découvre les outils MCP disponibles (backend de l’app + serveurs connectés autorisés) avec leur schéma et lecture/écriture.', obj({})),
     mk('retrieval', 'mcp_list_resources', 'Découvre les ressources MCP lisibles (documents, catalogues, objectifs…) des serveurs autorisés.', obj({})),
     mk('retrieval', 'mcp_read_resource', 'Lit une ressource MCP (server + uri issus de mcp_list_resources).', obj({ server: { type: 'string' }, uri: { type: 'string' } }, ['server', 'uri'])),
-    mk('retrieval', 'mcp_call', 'Appelle un outil MCP (id « serveur__outil »). Args MINIMAUX. GitHub : préfère list_issues/list_pull_requests {owner,repo,state,perPage} — pas search avec repo:… is:issue (422 sémantique). Lecture libre ; écriture = confirmation.', obj({ tool: { type: 'string' }, args: { type: 'object' } }, ['tool'])),
+    mk('retrieval', 'mcp_call', 'Appelle un outil du moteur branché (id « serveur__outil »). Le moteur est interchangeable : tu utilises celui de la liste, pas une marque par défaut. Args minimaux, pagination courte, list/get plutôt qu’une recherche plein texte. Lecture libre ; écriture = confirmation.', obj({ tool: { type: 'string' }, args: { type: 'object' } }, ['tool'])),
   ];
 }
 

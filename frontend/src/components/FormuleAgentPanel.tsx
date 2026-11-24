@@ -186,8 +186,8 @@ export function FormuleAgentPanel({ msgs, busy, running, appTitle, versionPicker
           <div className="rounded-lg border bg-muted/30 p-3 text-xs" data-testid="fa-source">
             <div className="whitespace-pre-wrap text-foreground">{offer.text}</div>
             <div className="mt-2 flex gap-2">
-              <Button size="sm" className="flex-1" disabled={!offer.canBuild || busy || running} onClick={() => onOffer?.(true)} data-testid="fa-source-yes">Valider</Button>
-              <Button size="sm" variant="outline" className="flex-1" disabled={busy || running} onClick={() => onOffer?.(false)} data-testid="fa-source-no">Rejeter</Button>
+              <Button size="sm" className="flex-1" disabled={!offer.canBuild} title={offer.canBuild ? 'Construire avec ces lectures' : 'Ces lectures ne portent pas encore les mesures demandées'} onClick={() => onOffer?.(true)} data-testid="fa-source-yes">Valider</Button>
+              <Button size="sm" variant="outline" className="flex-1" onClick={() => onOffer?.(false)} data-testid="fa-source-no">Rejeter</Button>
             </div>
           </div>
         )}

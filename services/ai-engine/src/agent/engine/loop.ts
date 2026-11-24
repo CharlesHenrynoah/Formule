@@ -98,9 +98,14 @@ export async function runAgentLoop(options: {
   spawnAgent: SpawnAgent;
   signal?: AbortSignal;
   maxStepCount: number;
+  /** Taille de la réponse. Une page entière ne tient pas dans 6000 jetons. */
+  maxTokens?: number;
   onText?: (text: string) => void;
+  onTrace?: (line: { component: string; step: string; level?: 'info' | 'ok' | 'error'; text: string }) => void;
 }): Promise<LoopResult> {
   const signal = options.signal ?? new AbortController().signal;
+  const who = ({ main: 'Développeur', router: 'Routeur', owner: 'Product Owner', liaison: 'Liaison' } as Record<string, string>)[options.agent.name] ?? options.agent.name;
+  const trace = (step: string, text: string, level: 'info' | 'ok' | 'error' = 'info') => options.onTrace?.({ component: who, step, level, text });
   const messages = [...options.opening];
   let steps = 0;
   let stopped: LoopResult['stopped'] = 'finish';
@@ -117,6 +122,7 @@ export async function runAgentLoop(options: {
       break;
     }
     steps += 1;
+    trace(`tour ${steps}`, 'appel du modèle');
 
     let reply: { content: string; toolCalls: { id: string; name: string; arguments: string }[] } | undefined;
     let attempt = 0;
@@ -125,11 +131,12 @@ export async function runAgentLoop(options: {
         reply = await options.llm.chatWithTools(toChat(messages), toolDefs(options.agent), {
           hint: { task: 'tools', prompt: '' },
           signal,
-          maxTokens: 6000,
+          maxTokens: options.maxTokens ?? 6000,
         });
       } catch (error) {
         if (signal.aborted) break;
         attempt += 1;
+        trace(`tour ${steps}`, `rejeu ${attempt} · ${(error as Error).message}`, 'error');
         if (attempt >= MAX_RETRY || !dropped(error)) throw error;
         await sleep(400 * 2 ** (attempt - 1), signal);
       }
@@ -137,6 +144,7 @@ export async function runAgentLoop(options: {
     if (!reply || signal.aborted) { stopped = 'abort'; break; }
 
     const text = String(reply.content ?? '').trim();
+    trace(`tour ${steps}`, `${(reply.toolCalls ?? []).length} outil(s) · ${text.length} caractères`, 'ok');
     if (text) options.onText?.(text);
     const parts: SessionMessage['parts'] = [];
     if (text) parts.push({ type: 'text', text });
@@ -162,6 +170,7 @@ export async function runAgentLoop(options: {
       if (!tool || !allowed) {
         part.state = 'output-error';
         part.errorText = `Outil inconnu pour cet agent : ${part.name}`;
+        trace(part.name, 'outil refusé pour cet agent', 'error');
         continue;
       }
       try {
@@ -187,8 +196,9 @@ export async function runAgentLoop(options: {
     }
 
     if (stopped === 'abort') break;
-    if (!options.agent.shouldContinue({ messages })) break;
+    if (!options.agent.shouldContinue({ messages })) { trace(`tour ${steps}`, 'fin de boucle', 'ok'); break; }
   }
+  trace('arrêt', `${stopped} · ${steps} tours`, stopped === 'abort' ? 'error' : 'ok');
 
   if (stopped !== 'abort') await options.agent.onFinish();
   return { messages, steps, stopped };

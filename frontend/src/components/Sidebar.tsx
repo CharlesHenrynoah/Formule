@@ -16,11 +16,12 @@ type Props = {
   onOpen: (id: string) => void;
   onNew: () => void;
   onDelete: (id: string) => void;
+  onJournal: () => void;
 };
 
 const fmt = (iso: string) => new Date(iso).toLocaleString('fr-FR', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
 
-export function Sidebar({ projects, currentId, onOpen, onNew, onDelete }: Props) {
+export function Sidebar({ projects, currentId, onOpen, onNew, onDelete, onJournal }: Props) {
   return (
     <aside className="flex w-64 shrink-0 flex-col border-r bg-card/40">
       <div className="p-4">
@@ -30,6 +31,11 @@ export function Sidebar({ projects, currentId, onOpen, onNew, onDelete }: Props)
         <Button onClick={onNew} className="f1-para f1-metal f1-keep-shadow mx-1 mt-4 h-8 w-[calc(100%-8px)] gap-1.5 px-3 text-[13px] font-medium" data-testid="new-interface"><Plus /><span>New Interface</span></Button>
       </div>
       <Separator />
+      <div className="px-4 pt-3">
+        <Button variant="ghost" asChild className="h-8 w-full justify-start px-3 text-[13px]">
+          <a href="/journal" data-testid="open-journal" onClick={(e) => { if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return; e.preventDefault(); onJournal(); }}>Journal</a>
+        </Button>
+      </div>
       <div className="flex items-center gap-1.5 px-4 pt-3 pb-1 text-[11px] uppercase tracking-wider text-muted-foreground">
         <History className="size-3" /> Historique
       </div>

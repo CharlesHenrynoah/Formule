@@ -11,7 +11,9 @@ import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { timingSafeEqual, createHash, createHmac } from 'node:crypto';
+import { timingSafeEqual, createHash, createHmac, randomUUID } from 'node:crypto';
+import { asLog, localLog, type GenLog } from './journal.ts';
+import { RELAY_BUDGET_MS, RELAY_TRIES, linkCut, relayAgain } from './link.ts';
 import { connect as netConnect } from 'node:net';
 
 const PORT = Number(process.env.GATEWAY_PORT ?? 4000);
@@ -62,50 +64,39 @@ async function engineDispatcher() {
 
 const LIAISON = 'La liaison a été coupée pendant la construction. Relance la génération.';
 
-/** undici met toujours « fetch failed » dans message. La cause réelle (ECONNREFUSED, reset) est dans cause. */
-function causeText(e: unknown) {
-  const parts: string[] = [];
-  let cur: unknown = e;
-  for (let i = 0; i < 6 && cur && typeof cur === 'object'; i++) {
-    const o = cur as { message?: unknown; code?: unknown; cause?: unknown };
-    if (o.message) parts.push(String(o.message));
-    if (o.code) parts.push(String(o.code));
-    cur = o.cause;
-  }
-  if (!parts.length) parts.push(String(e ?? ''));
-  return parts.join(' ').toLowerCase();
-}
-
-function linkCut(e: unknown) {
-  return /terminated|econnrefused|econnreset|etimedout|und_err_|socket hang up|other side closed|fetch failed|failed to fetch|headers timeout|body timeout|flux interrompu/.test(causeText(e));
-}
-
-/** Le redémarrage du moteur (tsx watch) tue l'ancien processus jusqu'à 5 s avant d'écouter à nouveau. */
-async function waitListening(url: string, signal: AbortSignal) {
-  const deadline = Date.now() + 12_000;
+/** Le moteur peut mettre du temps à réécouter après un redémarrage. Un seul budget pour toute la reprise. */
+async function waitListening(url: string, signal: AbortSignal, deadline: number) {
   while (Date.now() < deadline) {
     if (signal.aborted) return false;
     try {
       const r = await fetch(url, { signal: AbortSignal.timeout(800) });
       if (r.ok) return true;
     } catch { /* pas encore là */ }
-    await new Promise((r) => setTimeout(r, 400));
+    const pause = Math.min(400, deadline - Date.now());
+    if (pause <= 0) break;
+    await new Promise((r) => setTimeout(r, pause));
   }
   return false;
 }
 
-/** Lit le flux SSE d'un service et relaie chaque événement ; renvoie l'événement `result`. Une coupure est rejouée une fois, après le retour du moteur. */
+/** Lit le flux SSE d'un service et relaie chaque événement ; renvoie l'événement `result`. Une coupure réseau est rejouée jusqu'au retour du moteur. */
 async function relaySse(url: string, payload: unknown, onEvent: (e: Json) => void, signal: AbortSignal): Promise<Json> {
+  const deadline = Date.now() + RELAY_BUDGET_MS;
   let last: unknown;
-  for (let attempt = 0; attempt < 2; attempt++) {
+  let told = false;
+  for (let attempt = 0; attempt < RELAY_TRIES; attempt++) {
     if (signal.aborted) break;
     try {
       return await readSse(url, payload, onEvent, signal);
     } catch (e) {
       last = e;
-      if (signal.aborted || attempt === 1 || (e as { delivered?: boolean }).delivered || !linkCut(e)) break;
-      onEvent({ type: 'phase', phase: 'plan', label: 'Reprise de la liaison' });
-      const back = await waitListening(`${AI}/health`, signal);
+      if (signal.aborted || !relayAgain(e, attempt)) break;
+      if (!told) {
+        told = true;
+        onEvent({ type: 'log', ...localLog('Passerelle', 'reprise', 'Reprise de la liaison') });
+        onEvent({ type: 'phase', phase: 'plan', label: 'Reprise de la liaison' });
+      }
+      const back = await waitListening(`${AI}/health`, signal, deadline);
       if (!back) break;
     }
   }
@@ -278,8 +269,32 @@ function openSse(reply: FastifyReply) {
   };
 }
 
+function openJournal(send: (e: Json) => void, prompt: string, projectId?: string | null) {
+  const lines: GenLog[] = [];
+  const startedAt = new Date().toISOString();
+  const id = randomUUID();
+  let status = 'ok';
+  let pid = projectId ?? null;
+  const relay = (e: Json) => {
+    const line = asLog(e);
+    if (line && lines.length < 1600) lines.push(line);
+    send(e);
+  };
+  const note = (component: string, step: string, text: string, level: GenLog['level'] = 'info') => {
+    const line = localLog(component, step, text, level);
+    if (lines.length < 1600) lines.push(line);
+    send({ type: 'log', ...line });
+  };
+  const flush = async (next?: { status?: string; projectId?: string | null }) => {
+    if (next?.status) status = next.status;
+    if (next && 'projectId' in next) pid = next.projectId ?? null;
+    await call(`${STORAGE}/generations`, { method: 'POST', json: { id, projectId: pid, prompt: prompt.slice(0, 200), status, lines, startedAt, endedAt: new Date().toISOString() } }).catch(() => null);
+  };
+  return { relay, note, flush, id };
+}
+
 type Dataset = { name: string; rows: Json[] };
-type GenBody = { fullRebuild?: boolean; prompt: string; projectId?: string; diffusing?: boolean; useTools?: boolean; mode?: 'agent' | 'direct'; phase?: 'source' | 'build'; sourceBrief?: string; datasets?: Dataset[] };
+type GenBody = { fullRebuild?: boolean; prompt: string; projectId?: string; diffusing?: boolean; useTools?: boolean; mode?: 'agent' | 'direct'; phase?: 'source' | 'build'; sourceBrief?: string; sourceSamples?: unknown; datasets?: Dataset[] };
 /** Données personnelles importées (CSV/JSON parsés dans le studio) : bornées, noms de collection sûrs. */
 function cleanDatasets(ds: unknown): Dataset[] {
   if (!Array.isArray(ds)) return [];
@@ -296,6 +311,7 @@ app.post<{ Body: GenBody }>('/api/generate', async (req, reply) => {
   if (prompt.length > 4000) return reply.code(413).send({ error: 'prompt trop long (4000 caractères max)' });
   if (!allowGeneration(clientIp(req))) return reply.code(429).send({ error: `limite atteinte : ${GEN_PER_HOUR} générations par heure` });
   const s = openSse(reply);
+  const journal = openJournal(s.send, prompt, projectId);
   const t0 = Date.now();
   try {
     let previous: Json | null = null;
@@ -304,6 +320,7 @@ app.post<{ Body: GenBody }>('/api/generate', async (req, reply) => {
       if (r.status !== 200) throw new Error('projet introuvable pour itération');
       previous = r.body;
     }
+    journal.note('Passerelle', 'départ', previous ? 'itération' : 'création');
     s.send({ type: 'start', mode: previous ? 'iterate' : 'generate', projectId: projectId ?? null });
 
     const trace: Json[] = [];
@@ -311,26 +328,38 @@ app.post<{ Body: GenBody }>('/api/generate', async (req, reply) => {
       prompt, diffusing, useTools, mode, previousCode: previous?.code, previousPlan: previous?.plan,
       previousFiles: previous?.files ?? undefined, previousComponents: previous?.agent?.components, previousBrief: previous?.agent?.brief,
       previousContract: previous?.app?.contract, datasets: datasets.length ? datasets : undefined, projectId: projectId ?? undefined, previousVersion: previous?.number, fullRebuild: req.body?.fullRebuild === true,
-      phase: req.body?.phase, sourceBrief: req.body?.sourceBrief,
-    }, (e) => { if (e.type === 'agent' && trace.length < 500) trace.push(e); s.send(e); }, s.signal);
-    if (gen.sourced) { s.send({ type: 'source_ready' }); s.end(); return; }
+      phase: req.body?.phase, sourceBrief: req.body?.sourceBrief, sourceSamples: req.body?.sourceSamples,
+    }, (e) => { if (e.type === 'agent' && trace.length < 500) trace.push(e); journal.relay(e); }, s.signal);
+    if (gen.sourced) {
+      journal.note('Sélecteur', 'offre', 'lectures proposées', 'ok');
+      s.send({ type: 'source_ready' });
+      await journal.flush({ status: 'sources' });
+      s.end();
+      return;
+    }
     const isAgent = gen.mode === 'agent';
     let code: string = gen.code;
 
+    journal.note('Validateur', 'essai', 'Validation du code');
     s.send({ type: 'phase', phase: 'validate', label: 'Validation du code' });
     let validation = (await call(`${VALIDATOR}/validate`, { method: 'POST', json: { code } })).body as Validation;
+    journal.note('Validateur', 'essai 1', validation.ok ? 'code accepté' : (validation.errors?.[0]?.message ?? 'rejeté'), validation.ok ? 'ok' : 'error');
     s.send({ type: 'validation', attempt: 1, ...validation });
     let fixed = false;
     // En mode agent, le Développeur a déjà livré un build vert relu par le PO : pas de réécriture du bundle.
     if (!validation.ok && !isAgent) {
-      const f = await relaySse(`${AI}/fix`, { prompt, code, errors: validation.errors, diffusing: false }, s.send, s.signal);
+      journal.note('Validateur', 'correction', 'Reprise du code');
+      const f = await relaySse(`${AI}/fix`, { prompt, code, errors: validation.errors, diffusing: false }, journal.relay, s.signal);
       code = f.code;
       fixed = true;
+      journal.note('Validateur', 'essai', 'Nouvelle validation');
       s.send({ type: 'phase', phase: 'validate', label: 'Nouvelle validation' });
       validation = (await call(`${VALIDATOR}/validate`, { method: 'POST', json: { code } })).body as Validation;
+      journal.note('Validateur', 'essai 2', validation.ok ? 'code accepté' : (validation.errors?.[0]?.message ?? 'rejeté'), validation.ok ? 'ok' : 'error');
       s.send({ type: 'validation', attempt: 2, ...validation });
     }
 
+    journal.note('Stockage', 'écriture', 'Enregistrement');
     s.send({ type: 'phase', phase: 'save', label: 'Enregistrement' });
     let pid = projectId;
     let title: string = previous ? '' : ((/^#\s+(.+)$/m.exec(gen.plan ?? '')?.[1]) ?? prompt).replace(/^\s*(mini[- ]?spec|sp[ée]cification|spec)\s*[—:–-]\s*/i, '').replace(/[*_`]/g, '').trim().slice(0, 80);
@@ -352,30 +381,47 @@ app.post<{ Body: GenBody }>('/api/generate', async (req, reply) => {
         agent: isAgent ? { framework: gen.framework, brief: gen.brief, components: gen.components, iterations: gen.iterations, reviews: gen.reviews, workspace: gen.workspace, ms: Date.now() - t0, trace } : undefined,
       },
     });
+    journal.note('Stockage', 'version', `v${v.body.number}`, 'ok');
     s.send({ type: 'saved', projectId: pid, versionId: v.body.id, number: v.body.number, title });
     if (isAgent && gen.files) {
       // Mémoire persistante de la crew : la prochaine évolution repart de ce qui a été construit (pas de ré-exploration).
       const mem = gen.memory ?? {};
       await call(`${AGENTS}/apps/${pid}/crew-memory`, { method: 'POST', json: { version: v.body.number, title: gen.app?.title, prompt, kind: previous ? 'iterate' : 'generate', mode: mem.mode, features: mem.features, spec: gen.plan ?? '', brief: gen.brief ?? '', contract: gen.app?.contract ?? null, files: gen.files, prevFiles: previous?.files ?? undefined } })
-        .then((r) => { if (r.status === 200) s.send({ type: 'agent', kind: 'memory', role: 'po', mode: mem.mode ?? 'complet', version: v.body.number, text: `Mémoire de l'app mise à jour (v${v.body.number}) : ${r.body.files} fichier(s), ${r.body.criteria} critère(s) livrés, schéma ${r.body.schema}.` }); })
+        .then((r) => { if (r.status === 200) { journal.note('Mémoire', 'mise à jour', `v${v.body.number} · ${r.body.files} fichiers`, 'ok'); s.send({ type: 'agent', kind: 'memory', role: 'po', mode: mem.mode ?? 'complet', version: v.body.number, text: `Mémoire de l'app mise à jour (v${v.body.number}) : ${r.body.files} fichier(s), ${r.body.criteria} critère(s) livrés, schéma ${r.body.schema}.` }); } })
         .catch(() => {});
     }
     if (isAgent && gen.app) {
       // Lancement du backend MCP de l'app (enregistré dans mcp-hub) : l'aperçu peut l'appeler immédiatement.
       try {
         const e = await call(`${AGENTS}/apps/${pid}/ensure`, { method: 'POST', json: { version: v.body.number } });
-        s.send(e.status === 200 ? { type: 'app_ready', tools: e.body.tools, agent: e.body.agent?.name, connId: e.body.connId } : { type: 'app_warning', message: `backend MCP : ${e.body?.error ?? e.status}` });
-      } catch (err) { s.send({ type: 'app_warning', message: `app-agents injoignable : ${(err as Error).message}` }); }
+        const ready = e.status === 200;
+        journal.note('Backend', ready ? 'prêt' : 'alerte', ready ? `${e.body.tools?.length ?? 0} outils` : `backend MCP : ${e.body?.error ?? e.status}`, ready ? 'ok' : 'error');
+        s.send(ready ? { type: 'app_ready', tools: e.body.tools, agent: e.body.agent?.name, connId: e.body.connId } : { type: 'app_warning', message: `backend MCP : ${e.body?.error ?? e.status}` });
+      } catch (err) {
+        journal.note('Backend', 'alerte', `app-agents injoignable : ${(err as Error).message}`, 'error');
+        s.send({ type: 'app_warning', message: `app-agents injoignable : ${(err as Error).message}` });
+      }
     }
+    journal.note('Passerelle', 'fin', `${Date.now() - t0} ms`, 'ok');
     s.send({ type: 'done', code, plan: gen.plan, validation, fixed, ms: Date.now() - t0, toolResults: gen.toolResults ?? [], mode: isAgent ? 'agent' : 'direct', files: isAgent ? gen.files : undefined, brief: gen.brief, app: isAgent ? gen.app ?? null : null });
+    await journal.flush({ status: validation.ok ? 'ok' : 'erreur', projectId: pid });
   } catch (e) {
     if (s.signal.aborted) { /* l'utilisateur a annulé */ }
-    else s.send({ type: 'error', message: linkCut(e) ? LIAISON : ((e as Error).message || LIAISON) });
+    else {
+      const message = linkCut(e) ? LIAISON : ((e as Error).message || LIAISON);
+      journal.note('Processus', 'erreur', message, 'error');
+      s.send({ type: 'error', message });
+    }
+    await journal.flush({ status: s.signal.aborted ? 'annulé' : 'erreur' });
   }
   s.end();
 });
 
 // ---- Projets (storage) ----
+app.get('/api/logs', async (_req, reply) => { const r = await call(`${STORAGE}/generations`); return reply.code(r.status).send(r.body); });
+app.get<{ Params: { id: string } }>('/api/logs/:id', async (req, reply) => {
+  const r = await call(`${STORAGE}/generations/${req.params.id}`); return reply.code(r.status).send(r.body);
+});
 app.get('/api/projects', async (_req, reply) => { const r = await call(`${STORAGE}/projects`); return reply.code(r.status).send(r.body); });
 app.get<{ Params: { id: string } }>('/api/projects/:id', async (req, reply) => {
   const r = await call(`${STORAGE}/projects/${req.params.id}`); return reply.code(r.status).send(r.body);
@@ -482,10 +528,12 @@ app.post<{ Body: { prompt?: string; projectId?: string; dashboardId?: string; sp
   if (prompt.length > 4000) return reply.code(413).send({ error: 'prompt trop long (4000 caractères max)' });
   if (!allowGeneration(clientIp(req))) return reply.code(429).send({ error: `limite atteinte : ${GEN_PER_HOUR} générations par heure` });
   const s = openSse(reply);
+  const journal = openJournal(s.send, prompt, req.body?.projectId);
   try {
+    journal.note('Tableau', 'départ', 'Construction du tableau');
     const result = await relaySse(`${AI}/dashboards/build`, {
       prompt, dashboardId: req.body?.dashboardId, spec: req.body?.spec,
-    }, s.send, s.signal);
+    }, journal.relay, s.signal);
     let pid = req.body?.projectId;
     const spec = result.spec as Json;
     const id = String(result.id ?? '');
@@ -496,10 +544,15 @@ app.post<{ Body: { prompt?: string; projectId?: string; dashboardId?: string; sp
     }
     const saved = await call(`${STORAGE}/projects/${pid}/dashboards/${id}`, { method: 'PUT', json: { spec } });
     if (saved.status >= 400) throw new Error(saved.body?.error ?? 'enregistrement du tableau impossible');
+    journal.note('Stockage', 'tableau', String(spec?.title ?? 'enregistré'), 'ok');
     s.send({ type: 'saved', projectId: pid, dashboardId: id, title: spec?.title });
+    journal.note('Tableau', 'fin', 'tableau prêt', 'ok');
     s.send({ type: 'done', projectId: pid, dashboardId: id, spec, reply: result.reply, mode: result.mode });
+    await journal.flush({ status: 'ok', projectId: pid });
   } catch (e) {
+    journal.note('Processus', 'erreur', (e as Error).message, 'error');
     s.send({ type: 'error', message: (e as Error).message });
+    await journal.flush({ status: 'erreur' });
   }
   s.end();
 });

@@ -4,11 +4,11 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "tsx watch --exclude \"**/data/workspaces/**\" --exclude \"**/data/agent-template/**\" src/index.ts",
+    "dev": "tsx watch --exclude \"**/data/**\" --exclude \"**/*.test.ts\" src/index.ts",
     "start": "tsx src/index.ts",
     "test": "node --import tsx --test test/*.test.ts",
     "typecheck": "tsc --noEmit -p .",
-    "dev:app-agents": "tsx watch src/app-agents/server.ts",
+    "dev:app-agents": "tsx watch --exclude \"**/data/**\" --exclude \"**/*.test.ts\" src/app-agents/server.ts",
     "start:app-agents": "tsx src/app-agents/server.ts"
   },
   "dependencies": {

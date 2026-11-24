@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { offerFromReads } from '../src/agent/engine/source-offer.ts';
+import { collectSource, offerFromReads } from '../src/agent/engine/source-offer.ts';
 
 test('le sourcing montre les champs et ce qui peut être généré', () => {
   const offer = offerFromReads('Ajoute une carte « Dernier commit ». Elle affiche le message du commit le plus récent, et la date en dessous.', [
@@ -12,6 +12,8 @@ test('le sourcing montre les champs et ce qui peut être généré', () => {
   assert.match(offer.text, /date \(date\)/);
   assert.match(offer.text, /Ce qui peut être généré/);
   assert.match(offer.brief, /Sourcing validé/);
+  assert.equal(offer.samples[0]?.tool, 'github__list_commits');
+  assert.equal(offer.samples[0]?.rows[0]?.message, 'Fix');
 });
 
 test('un élément déjà affiché ne part pas en développement', () => {
@@ -45,4 +47,82 @@ test('une lecture vide ne lance pas le développement', () => {
   assert.equal(offer.canBuild, false);
   assert.match(offer.text, /404/);
   assert.match(offer.text, /Rien ne peut être généré/);
+});
+
+test('le sourcing appelle d’abord l’agent Sélecteur', async () => {
+  let selectCalls = 0;
+  const offer = await collectSource(
+    'Affiche le top 10 crypto et le prix BTC',
+    '',
+    async () => ([
+      { id: 'demo__get_weather', description: 'météo démo', serverName: 'Démo locale', schema: { required: [], properties: {} } },
+      {
+        id: 'coingecko__execute', description: 'SDK CoinGecko', serverName: 'CoinGecko',
+        schema: { required: ['code'], properties: { code: { type: 'string' } } },
+      },
+    ]),
+    async (tool) => {
+      if (tool === 'coingecko__execute') return [{ name: 'Bitcoin', price: 90000, volume: 1e9 }];
+      return [{ jour: 1, min_c: 0 }];
+    },
+    async (mission) => {
+      selectCalls += 1;
+      assert.match(mission, /Sélecteur|intention|Intention/i);
+      assert.match(mission, /CoinGecko|coingecko/i);
+      return '{"reads":[{"tool":"coingecko__execute","args":{"code":"return []"}}],"why":"crypto"}';
+    },
+  );
+  assert.equal(selectCalls, 1);
+  assert.equal(offer.canBuild, true);
+  assert.match(offer.text, /Sélecteur \(agent\)/);
+  assert.equal(offer.samples[0]?.tool, 'coingecko__execute');
+  assert.equal(offer.samples[0]?.rows[0]?.price, 90000);
+});
+
+test('execute générique : docs → run(client) + retry, sans méta-outils MCP', async () => {
+  const missions: string[] = [];
+  let calls = 0;
+  const offer = await collectSource(
+    'Affiche le top 10 et le prix BTC avec une courbe',
+    '',
+    async () => ([
+      {
+        id: 'markets__search_docs', description: 'docs SDK', serverName: 'Markets',
+        schema: { required: ['query'], properties: { query: { type: 'string' } } },
+      },
+      {
+        id: 'markets__execute', description: 'run SDK', serverName: 'Markets',
+        schema: { required: ['code'], properties: { code: { type: 'string' } } },
+      },
+    ]),
+    async (tool, args) => {
+      if (tool === 'markets__search_docs') {
+        return [{ method: 'client.coins.markets.get', endpoint: 'GET /coins/markets', summary: 'markets' }];
+      }
+      if (tool === 'markets__execute') {
+        calls += 1;
+        const code = String(args.code ?? '');
+        assert.match(code, /async function run\(client\)/);
+        if (calls === 1) throw new Error('Property \'search_docs\' does not exist on type');
+        return [{ name: 'Bitcoin', price: 91000, volume: 2e9 }];
+      }
+      return [];
+    },
+    async () => '{"reads":[{"tool":"markets__search_docs","args":{"query":"markets"}}],"why":"docs"}',
+    async (mission) => {
+      missions.push(mission);
+      assert.match(mission, /async function run\(client\)/);
+      assert.match(mission, /INTERDIT/);
+      assert.match(mission, /client\.coins\.markets\.get/);
+      if (missions.length === 1) {
+        return 'const x = await client.search_docs.get();\nreturn x;';
+      }
+      assert.match(mission, /Échec précédent|search_docs/);
+      return 'async function run(client) {\n  const rows = await client.coins.markets.get({ vs_currency: "usd" });\n  return rows;\n}';
+    },
+  );
+  assert.equal(missions.length, 2);
+  assert.equal(calls, 2);
+  assert.equal(offer.canBuild, true);
+  assert.equal(offer.samples[0]?.rows[0]?.price, 91000);
 });

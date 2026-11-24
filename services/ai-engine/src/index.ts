@@ -8,6 +8,14 @@ import type { EngineEvent } from './types.ts';
 import { agentBackend, runAgent } from './agent/index.ts';
 import { buildDashboard } from './dashboards/build.ts';
 import { INTERPRETER_TIMEOUT_MS, shapeRows, type DashboardSpec } from './dashboards/spec.ts';
+import { senseLines } from './agent/sensor.ts';
+
+process.on('unhandledRejection', (error) => {
+  console.error('[ai-engine] rejet non géré, le moteur reste en écoute', error);
+});
+process.on('uncaughtException', (error) => {
+  console.error('[ai-engine] exception non gérée, le moteur reste en écoute', error);
+});
 
 const PORT = Number(process.env.AI_ENGINE_PORT ?? 4001);
 const choice = createProvider();
@@ -28,7 +36,13 @@ function sse(reply: FastifyReply) {
   reply.raw.on('error', stop);
   return {
     signal: ac.signal,
-    emit: (e: EngineEvent | { type: string; [k: string]: unknown }) => { if (!reply.raw.writableEnded) reply.raw.write(`data: ${JSON.stringify(e)}\n\n`); },
+    emit: (e: EngineEvent | { type: string; [k: string]: unknown }) => {
+      if (reply.raw.writableEnded) return;
+      const write = (event: unknown) => reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
+      write(e);
+      if (e.type === 'log') return;
+      for (const line of senseLines(e)) write({ type: 'log', ...line });
+    },
     end: () => { clearInterval(ping); reply.raw.end(); },
   };
 }
@@ -39,7 +53,7 @@ app.get('/health', async () => ({
   agent: { available: backend.kind !== 'unavailable', kind: backend.kind, framework: backend.kind === 'llm' ? 'moteur agentique' : backend.kind === 'scripted' ? 'scripté (démo)' : null, roles: ['principal', 'routeur'], defaultMode: DEFAULT_MODE },
 }));
 
-type AgentBody = GenerateInput & { mode?: 'agent' | 'direct'; phase?: 'source' | 'build'; sourceBrief?: string; previousFiles?: Record<string, string>; previousComponents?: string[]; previousBrief?: string; previousContract?: any; projectId?: string; previousVersion?: number; fullRebuild?: boolean; datasets?: Array<{ name: string; rows: Array<Record<string, unknown>> }> };
+type AgentBody = GenerateInput & { mode?: 'agent' | 'direct'; phase?: 'source' | 'build'; sourceBrief?: string; sourceSamples?: Array<{ tool: string; args?: Record<string, unknown>; rows: Array<Record<string, unknown>> }>; previousFiles?: Record<string, string>; previousComponents?: string[]; previousBrief?: string; previousContract?: any; projectId?: string; previousVersion?: number; fullRebuild?: boolean; datasets?: Array<{ name: string; rows: Array<Record<string, unknown>> }> };
 app.post<{ Body: AgentBody }>('/generate', async (req, reply) => {
   if (!req.body?.prompt) return reply.code(400).send({ error: 'prompt requis' });
   const s = sse(reply);
@@ -50,7 +64,7 @@ app.post<{ Body: AgentBody }>('/generate', async (req, reply) => {
     s.emit({ type: 'meta', provider: choice.provider.name, model: choice.provider.model, diffusing: false, fallback: choice.fallback, tools: 0, mode: 'agent', framework: backend.kind === 'llm' ? 'moteur agentique' : 'scripté (démo)' });
     try {
       const r = await runAgent({
-        prompt: req.body.prompt, useTools: req.body.useTools, datasets: req.body.datasets, appId: req.body.projectId, previousVersion: req.body.previousVersion, fullRebuild: req.body.fullRebuild, phase: req.body.phase, sourceBrief: req.body.sourceBrief,
+        prompt: req.body.prompt, useTools: req.body.useTools, datasets: req.body.datasets, appId: req.body.projectId, previousVersion: req.body.previousVersion, fullRebuild: req.body.fullRebuild, phase: req.body.phase, sourceBrief: req.body.sourceBrief, sourceSamples: req.body.sourceSamples,
         previous: req.body.previousFiles ? { files: req.body.previousFiles, components: req.body.previousComponents, spec: req.body.previousPlan, brief: req.body.previousBrief, contract: req.body.previousContract ?? null } : undefined,
       }, backend, { mcp, emit: s.emit as (e: Record<string, unknown>) => void, signal: s.signal });
       if (r.code) s.emit({ type: 'code_done', code: r.code });

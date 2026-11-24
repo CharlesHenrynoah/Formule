@@ -128,3 +128,32 @@ test('l\'écran qui lit data_list nomme la collection même si le backend ne l\'
   assert.equal(reads.length, 1);
   assert.equal(reads[0].tool, 'demo__list_alerts');
 });
+
+test('un argument requis quelconque n\'écarte pas l\'outil', () => {
+  const tool: SourceTool = {
+    id: 'remote__search_docs', name: 'search_docs', write: false,
+    inputSchema: { required: ['query', 'language'], properties: { query: { type: 'string' }, language: { type: 'string', enum: ['en', 'fr'] } } },
+  };
+  const reads = readsForCollections(['remote__search_docs'], 'Découverte de l\'API', [tool]);
+  assert.equal(reads[0]?.tool, 'remote__search_docs');
+  assert.equal(reads[0]?.args.language, 'en');
+  assert.match(String(reads[0]?.args.query), /Découverte/);
+});
+
+test('un nom trop long et une URL absente écartent l\'outil au lieu de l\'appeler', () => {
+  const verify: SourceTool = {
+    id: 'n8n__verify_agent_mcp_server', name: 'verify_agent_mcp_server', serverName: 'n8n', write: false,
+    inputSchema: {
+      required: ['name', 'url'],
+      properties: {
+        name: { type: 'string', minLength: 1, maxLength: 64, pattern: '^[a-zA-Z0-9_-]+$' },
+        url: { anyOf: [{ type: 'string', format: 'uri' }] },
+      },
+    },
+  };
+  const list: SourceTool = { id: 'n8n__search_workflows', name: 'search_workflows', serverName: 'n8n', write: false, inputSchema: { properties: {} } };
+  const demand = 'Crée une interface n8n qui liste les workflows de l\'instance.';
+  assert.equal(readsForCollections(['n8n__verify_agent_mcp_server'], demand, [verify]).length, 0);
+  const reads = readsForUnmatched(demand, [verify, list]);
+  assert.equal(reads[0]?.tool, 'n8n__search_workflows');
+});

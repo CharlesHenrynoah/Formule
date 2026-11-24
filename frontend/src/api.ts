@@ -31,6 +31,8 @@ export const api = {
   appMemory: (id: string) => fetch(`/api/apps/${id}/memory`).then((r) => j<any>(r)),
   appMemoryEdit: (id: string, body: { fact?: string; forget?: number }) => fetch(`/api/apps/${id}/memory`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then((r) => j<any>(r)),
   dashboards: (id: string) => fetch(`/api/projects/${id}/dashboards`).then((r) => j<any[]>(r)),
+  logs: () => fetch('/api/logs').then((r) => j<any[]>(r)),
+  log: (id: string) => fetch(`/api/logs/${id}`).then((r) => j<any>(r)),
   interpret: (body: { tool: string; args: Record<string, unknown>; x: string; y: string }) =>
     fetch('/api/interpreter', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then((r) => j<{ rows: Array<Record<string, string | number>>; ms: number | null }>(r)),
 };

@@ -77,6 +77,8 @@ export class Toolbox {
         if (!isSizeError(msg) && !/invalid|required|missing|schema|argument|Validation Failed|cannot be searched|rate limit/i.test(msg)) throw e;
         const fallbacks = [slimArgs(used, 2_000).args, prepareCallArgs({}, t.inputSchema).args, {}];
         let last: Error = e as Error;
+        const who = role === 'data' ? 'Liaison' : role === 'po' ? 'Product Owner' : 'Développeur';
+        (this.emit as (event: unknown) => void)({ type: 'log', at: new Date().toISOString(), component: who, step: 'repli', level: 'error', text: msg.slice(0, 160) });
         for (const fb of fallbacks) {
           try { used = fb; r = await call(fb); break; }
           catch (e2) {

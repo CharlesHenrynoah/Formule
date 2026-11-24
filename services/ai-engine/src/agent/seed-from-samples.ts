@@ -123,7 +123,21 @@ export function affinity(collection: string, tool: string, key: string): number 
   return 0;
 }
 
+function titled(text: string, index: number): Record<string, unknown> {
+  const titre = text.trim().slice(0, 180);
+  return { id: String(index + 1), titre, title: titre, label: titre };
+}
+
+/** Un texte, ou une liste de textes, devient des lignes. Beaucoup de MCP ne renvoient pas un tableau d'objets. */
+function textRows(data: string): Array<Record<string, unknown>> {
+  const lines = data.split('\n').map((line) => line.replace(/^\s*[-*]\s*/, '').replace(/^\d+(?:\.\d+)*\s+/, '').trim()).filter((line) => line.length > 2 && line.length < 180 && !line.endsWith(':'));
+  const picked = lines.length > 1 ? lines.slice(0, 40) : [data.trim().slice(0, 280)];
+  return picked.filter(Boolean).map(titled);
+}
+
 function sampleGroups(data: unknown): Array<{ key: string; rows: Array<Record<string, unknown>> }> {
+  if (typeof data === 'string' && data.trim()) return [{ key: '', rows: textRows(data) }];
+  if (Array.isArray(data) && data.length && data.every((item) => typeof item === 'string')) return [{ key: '', rows: data.slice(0, 40).map((item, index) => titled(String(item), index)) }];
   const groups = groupsOf(data);
   if (groups.length) return groups;
   const row = asRow(data);
@@ -145,7 +159,30 @@ function stampScope(row: Record<string, unknown>, args: unknown) {
   if (typeof row.owner === 'string' && typeof row.repo === 'string' && !row.repo.includes('/') && row.repository == null) row.repository = `${row.owner}/${row.repo}`;
 }
 
-const CANONICAL = ['issues', 'pullRequests', 'commits', 'depots', 'profil'];
+export const CANONICAL = ['issues', 'pullRequests', 'commits', 'depots', 'profil'];
+
+/** Collection qui peut recevoir ces lignes. Une famille canonique ne sert pas de bac par défaut. */
+export function collectionForRead(toolsSource: string, samples: Array<{ tool?: string; rows?: Array<Record<string, unknown>> }>): string {
+  const backend = collectionsInBackend(toolsSource);
+  const richest = [...samples].sort((left, right) => (right.rows?.length ?? 0) - (left.rows?.length ?? 0))[0];
+  const tool = richest?.tool ?? '';
+  const ranked = backend.map((collection) => ({ collection, score: affinity(collection, tool, '') }));
+  const best = ranked.reduce((max, item) => Math.max(max, item.score), 0);
+  if (best > 0) return ranked.find((item) => item.score === best)!.collection;
+  const neutral = backend.find((collection) => !CANONICAL.includes(collection));
+  if (neutral) return neutral;
+  const stem = tool.includes('__') ? tool.split('__').slice(1).join('__') : tool;
+  const name = stem.replace(/[^A-Za-z0-9_]/g, '').slice(0, 40);
+  return name || backend[0] || 'lignes';
+}
+
+/** Une collection `serveur__table` ne reçoit pas les lignes d'un autre serveur. */
+function sameServer(tool: string, collection: string): boolean {
+  const locked = collection.includes('__') ? collection.split('__')[0] : '';
+  if (!locked) return true;
+  const server = tool.includes('__') ? tool.split('__')[0] : '';
+  return server === locked;
+}
 
 /** Colections → lignes. state passe en minuscules pour que `=== "open"` voie les "OPEN" de GitHub.
  *  data_list lit ces noms même si tools.ts ne les a pas écrits : la porte de lecture reste stable. */
@@ -159,8 +196,13 @@ export function seedFromSamples(toolsSource: string, samples: McpSample[], extra
       const ranked = collections.map((collection) => ({ collection, score: affinity(collection, sample.tool, group.key) }));
       const best = ranked.reduce((max, item) => Math.max(max, item.score), 0);
       let targets = ranked.filter((item) => item.score === best && best > 0).map((item) => item.collection);
-      if (!targets.length && fromBackend.length === 1) targets = [fromBackend[0]];
-      if (!targets.length || (best === 0 && fromBackend.length !== 1)) continue;
+      const only = fromBackend.length === 1 ? fromBackend[0] : '';
+      if (!targets.length && only && sameServer(sample.tool, only) && !CANONICAL.includes(only)) targets = [only];
+      if (!targets.length && best === 0) {
+        const home = collectionForRead('', [{ tool: sample.tool }]);
+        if (home && home !== 'lignes') targets = [home];
+      }
+      if (!targets.length || (best === 0 && !targets.length)) continue;
       for (const target of targets) {
         const rows = seed[target] ?? [];
         const ids = seen.get(target) ?? new Set<string>();

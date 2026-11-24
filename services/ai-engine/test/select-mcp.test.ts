@@ -22,4 +22,36 @@ test('la mission du sélecteur nomme chaque serveur', () => {
   assert.match(mission, /DeepWiki/);
   assert.match(mission, /GitHub/);
   assert.match(mission, /deepwiki__read_wiki_structure/);
+  assert.match(mission, /intention|Intention/i);
+});
+
+test('la mission du sélecteur guide vers des mesures crypto, pas la démo', () => {
+  const demo: SourceTool = {
+    id: 'demo__get_weather', name: 'get_weather', serverName: 'Démo locale', write: false,
+    inputSchema: { required: [], properties: {} },
+  };
+  const gecko: SourceTool = {
+    id: 'coingecko__execute', name: 'execute', serverName: 'CoinGecko', write: false, description: 'Run CoinGecko SDK code',
+    inputSchema: { required: ['code'], properties: { code: { type: 'string' } } },
+  };
+  const mission = selectorPrompt('affiche le top 10 crypto et le prix BTC', [demo, gecko]);
+  assert.match(mission, /moteur interchangeable|véhicule/i);
+  assert.match(mission, /démo|demo/i);
+  assert.match(mission, /execute/);
+  assert.match(mission, /CoinGecko/);
+});
+
+test('le sélecteur écarte un nom et une URL qui violent le schéma', () => {
+  const verify: SourceTool = {
+    id: 'n8n__verify_agent_mcp_server', name: 'verify_agent_mcp_server', serverName: 'n8n', write: false,
+    inputSchema: {
+      required: ['name', 'url'],
+      properties: {
+        name: { type: 'string', maxLength: 64, pattern: '^[a-zA-Z0-9_-]+$' },
+        url: { anyOf: [{ type: 'string', format: 'uri' }] },
+      },
+    },
+  };
+  const answer = '{"reads":[{"tool":"n8n__verify_agent_mcp_server","args":{"name":"Crée une interface n8n qui liste les workflows","url":"pas une url"}}]}';
+  assert.equal(readsFromSelector(answer, [verify], 'interface n8n').length, 0);
 });

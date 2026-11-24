@@ -132,7 +132,7 @@ function compileOne(op: Op): { block: string; name: string } | { problem: string
   const kindRaw = String(op.kind ?? '').trim().toLowerCase();
   if (kindRaw === 'action') return { problem: `${name} : une action confirme l'utilisateur, elle dépasse le compilateur`, typescript: true };
   const filterSource = op.filter && typeof op.filter === 'object' && !Array.isArray(op.filter) ? { ...(op.filter as Record<string, unknown>) } : undefined;
-  const fallbackId = operation === 'get' && typeof filterSource?.id === 'string' ? filterSource.id : (operation === 'get' && collection === 'profil' ? 'login' : '');
+  const fallbackId = operation === 'get' && typeof filterSource?.id === 'string' ? filterSource.id : '';
   if (operation === 'get' && filterSource) delete filterSource.id;
   const filter = flatFilter(operation === 'get' ? filterSource : op.filter);
   if (filter.problem) return { problem: `${name} : ${filter.problem}`, typescript: true };
@@ -170,7 +170,7 @@ function compileOne(op: Op): { block: string; name: string } | { problem: string
 
   if (operation === 'groupby') {
     if (!field) return { problem: `${name} : groupBy exige field`, typescript: false };
-    const body = `var rows = ${rows};\n      var buckets = {};\n      for (var i = 0; i < rows.length; i++) {\n        var key = String(__pick(rows[i], ${JSON.stringify(field)}) ?? '—');\n        buckets[key] = (buckets[key] || 0) + 1;\n      }\n      var items = Object.keys(buckets).map(function (key) { return { key: key, total: buckets[key], totalCount: buckets[key] }; });\n      return { items: items, totalCount: items.length, total: rows.length };`;
+    const body = `var rows = ${rows};\n      var buckets = {};\n      for (var i = 0; i < rows.length; i++) {\n        var key = String(__pick(rows[i], ${JSON.stringify(field)}) ?? '—');\n        buckets[key] = (buckets[key] || 0) + 1;\n      }\n      var items = Object.keys(buckets).map(function (key) { var row = { key: key, label: key, count: buckets[key], total: buckets[key], totalCount: buckets[key] }; row[${JSON.stringify(field)}] = key; return row; });\n      return { items: items, totalCount: items.length, total: rows.length };`;
     return { name, block: toolBlock(name, description, 'read', false, true, inputOf([filter.input]), body) };
   }
 

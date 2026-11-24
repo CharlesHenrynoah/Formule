@@ -88,7 +88,7 @@ test('fix : supprime l\'erreur volontaire du mode [bug]', async () => {
   assert.doesNotMatch(good.code, /var resultat = ;/);
 });
 
-test('createProvider : Inception (Mercury 3) par défaut, repli mock sans clé', () => {
+test('createProvider : Inception par défaut, repli mock sans clé', () => {
   const none = createProvider({});
   assert.equal(none.requested, 'inception');
   assert.equal(none.provider.name, 'mock');
@@ -96,7 +96,10 @@ test('createProvider : Inception (Mercury 3) par défaut, repli mock sans clé',
   const inc = createProvider({ INCEPTION_API_KEY: 'test' });
   assert.equal(inc.provider.name, 'inception');
   assert.equal(inc.provider.model, 'mercury-3');
-  assert.equal(inc.provider.supportsDiffusion, true);
+  const ds = createProvider({ LLM_PROVIDER: 'deepseek', DEEPSEEK_API_KEY: 'test' });
+  assert.equal(ds.provider.name, 'deepseek');
+  assert.equal(ds.provider.model, 'deepseek-flash');
+  assert.equal(ds.provider.supportsDiffusion, false);
   assert.equal(createProvider({ LLM_PROVIDER: 'mock' }).fallback, undefined);
 });
 

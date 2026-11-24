@@ -22,10 +22,10 @@ export const McpCall: AgentTool = setupTool({
   readOnly: true,
   timeoutMs: 60_000,
   agents: ['router'],
-  description: () => 'Échantillonne un outil MCP en lecture. Au plus 3 appels. Jamais state all. GitHub : state open, perPage 20, sort created, direction desc.',
+  description: () => 'Échantillonne un outil du moteur choisi, en lecture. Au plus 3 appels. Args du schéma, pagination courte, jamais « all » si le schéma ne le liste pas.',
   parameters: {
     properties: {
-      tool: { type: 'string', description: 'Identifiant, ex. github__list_issues' },
+      tool: { type: 'string', description: 'Identifiant serveur__outil du moteur choisi' },
       args: { type: 'object', description: 'Arguments courts.' },
     },
     required: ['tool'],

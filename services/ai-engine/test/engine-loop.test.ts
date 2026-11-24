@@ -77,6 +77,11 @@ test('le tableau suit la composition shadcn-admin, sans sidebar', () => {
   assert.match(text, /h-\[260px\]/);
   assert.match(text, /var\(--chart-1\)/);
   assert.match(text, /Pas de Chart\.js/);
+  assert.match(text, /Première construction/);
+  const sourced = agent.getMessages({ prompt: 'documentation', files: [], incremental: false, datasets: '', liaison: 'outil deepwiki__read_wiki_structure, champ titre' }).map((message) => message.parts.map((part) => part.type === 'text' ? part.text : '').join('\n')).join('\n');
+  assert.match(sourced, /Tu n'appelles pas task/);
+  assert.match(sourced, /write_file src\/App\.tsx/);
+  assert.match(sourced, /deepwiki__read_wiki_structure/);
 });
 
 test('une page longue se relit par plage de lignes', async () => {

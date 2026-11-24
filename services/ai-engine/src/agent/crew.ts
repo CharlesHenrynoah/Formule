@@ -36,6 +36,8 @@ export type CrewInput = {
   /** source : lire et proposer, sans écrire. build : développer après validation, avec le brief déjà lu. */
   phase?: 'source' | 'build';
   sourceBrief?: string;
+  /** Lignes déjà lues au sourcing. Elles deviennent la base de l'app, pour n'importe quel MCP. */
+  sourceSamples?: Array<{ tool: string; args?: Record<string, unknown>; rows: Array<Record<string, unknown>> }>;
 };
 
 /** Lignes ajoutées/modifiées d'un fichier (diff ligne à ligne grossier, pour la revue incrémentale). */

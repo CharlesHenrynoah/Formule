@@ -12,6 +12,7 @@ import { PANEL_KEY, clampWidth, dragResult, isToggleShortcut, parsePanel, type P
 import { AGENT_NAME, crewSteps, isFullAppRequest, neutral } from './lib/neutral';
 import { isDashboardTurn, keepsOpenDashboard, type BoardView, type SavedDashboard } from './lib/dashboard';
 import { LiveDashboard } from './components/LiveDashboard';
+import { LogsPage, type GenLog } from './components/LogsPage';
 import logoUrl from './assets/logo.svg';
 import { fixOrder, toRuntimeError, type RuntimeError } from './lib/runtimeError';
 import { chatEmptyReason, hasNewActivity, normalizeChat, upsertPipeline, type ChatMsg } from './lib/appChat';
@@ -56,6 +57,9 @@ export default function App() {
   const [chatMode, setChatMode] = useState<ChatMode>('agent');
   const chatModeRef = useRef<ChatMode>('agent'); chatModeRef.current = chatMode;
   const [agentEvents, setAgentEvents] = useState<AgentEvent[]>([]);
+  const [path, setPath] = useState(() => window.location.pathname);
+  const [liveLogs, setLiveLogs] = useState<GenLog[]>([]);
+  const [livePrompt, setLivePrompt] = useState('');
   const sideTab: SideTab = 'chat'; // panneau unique « Formule Agent » (toujours visible)
   // Onglet « Chat app » : fil du contremaître de l'app ouverte (la logique reste dans l'AppShell de l'app)
   const [chatMsgs, setChatMsgs] = useState<ChatMsg[]>([]);
@@ -75,6 +79,7 @@ export default function App() {
   const [offer, setOffer] = useState<{ text: string; canBuild: boolean; prompt: string } | null>(null);
   const [sourcing, setSourcing] = useState(false);
   const briefRef = useRef('');
+  const samplesRef = useRef<Array<{ tool: string; args: Record<string, unknown>; rows: Array<Record<string, unknown>> }>>([]);
   const [phases, setPhases] = useState<PhaseState[]>([]);
   const [plan, setPlan] = useState('');
   const [planStreaming, setPlanStreaming] = useState(false);
@@ -517,7 +522,7 @@ export default function App() {
     setRunning(true); setSourcing(phase === 'source'); setError(null); setValidation(null); setPhases([]); setAppError(null);
     setToolEvents((list) => list.filter((t) => t.source === 'exécution' && iterate));
     codeBuf.current = ''; planBuf.current = ''; setStreamCode(''); setPlan(''); setDiffStep(0); setElapsed(undefined);
-    setPlanStreaming(true); setAgentEvents([]);
+    setPlanStreaming(true); setAgentEvents([]); setLiveLogs([]); setLivePrompt(text);
     if (!iterate && phase !== 'source') { setPreviewCode(''); setBoard(null); setBoards([]); lastPreview.current = 0; }
     else if (phase !== 'source') setBoard(null);
     let savedProject: string | null = iterate ? project?.id ?? null : null;
@@ -527,11 +532,12 @@ export default function App() {
     // L'aperçu actuel reste jusqu'à la fin : le nouvel écran ne s'ouvre qu'une fois les lectures MCP versées.
     const deferView = iterate && phase !== 'source';
     try {
-      await streamGenerate({ prompt: text, projectId: iterate ? project?.id : undefined, diffusing: agentMode ? false : diffusing, useTools: true, mode: agentMode ? 'agent' : 'direct', phase: sourcing ? 'source' : 'build', sourceBrief: phase === 'build' ? briefRef.current : undefined, datasets: !iterate && datasets.length ? datasets.map(({ name, rows }) => ({ name, rows })) : undefined }, (e) => {
+      await streamGenerate({ prompt: text, projectId: iterate ? project?.id : undefined, diffusing: agentMode ? false : diffusing, useTools: true, mode: agentMode ? 'agent' : 'direct', phase: sourcing ? 'source' : 'build', sourceBrief: phase === 'build' ? briefRef.current : undefined, sourceSamples: phase === 'build' ? samplesRef.current : undefined, datasets: !iterate && datasets.length ? datasets.map(({ name, rows }) => ({ name, rows })) : undefined }, (e) => {
         switch (e.type) {
           case 'phase': { const l = neutral(e.label); if (steps.at(-1)?.label !== l) { steps.forEach((x) => { if (x.ok === undefined) x.ok = true; }); steps.push({ label: l }); emitPipe('running'); } } setPhase(e.phase, e.label); if (e.phase === 'code' || e.phase === 'fix') { codeBuf.current = ''; setPlanStreaming(false); } break;
           case 'agent': setAgentEvents((l) => [...l, e]); break;
-          case 'source': hold = true; briefRef.current = String(e.brief ?? ''); setOffer({ text: String(e.text ?? ''), canBuild: e.canBuild !== false, prompt: text }); steps.push({ label: 'sourcing', ok: true, detail: String(e.text ?? '').slice(0, 180) }); emitPipe('source'); break;
+          case 'log': if (e.component && e.step) setLiveLogs((l) => [...l, { at: String(e.at ?? new Date().toISOString()), component: String(e.component), step: String(e.step), level: e.level === 'ok' || e.level === 'error' ? e.level : 'info', text: String(e.text ?? '') }]); break;
+          case 'source': hold = true; briefRef.current = String(e.brief ?? ''); samplesRef.current = Array.isArray(e.samples) ? e.samples : []; setOffer({ text: String(e.text ?? ''), canBuild: e.canBuild !== false, prompt: text }); steps.push({ label: 'sourcing', ok: true, detail: String(e.text ?? '').slice(0, 180) }); emitPipe('source'); break;
           case 'plan_delta': planBuf.current += e.text; scheduleFlush(); break;
           case 'plan_done': planBuf.current = e.plan; setPlan(e.plan); setPlanStreaming(false); break;
           case 'tool_call': setToolEvents((l) => [...l, { id: e.id, name: e.name, args: e.args, source: 'génération', status: 'en cours' }]); break;
@@ -633,11 +639,36 @@ export default function App() {
   const isMock = config?.provider === 'mock';
   const codeShown = running ? streamCode : draft;
   const hasApp = !!previewCode;
+  const go = (href: string) => {
+    if (window.location.pathname !== href) window.history.pushState({}, '', href);
+    setPath(href);
+  };
+  useEffect(() => {
+    const onPop = () => setPath(window.location.pathname);
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+  }, []);
+
+  if (path === '/journal') {
+    return (
+      <TooltipProvider>
+        <div className="flex h-full flex-col bg-background" data-testid="journal-page">
+          <header className="flex h-12 shrink-0 items-center gap-3 border-b px-4">
+            <a href="/" onClick={(e) => { e.preventDefault(); go('/'); }} className="text-sm text-muted-foreground hover:text-foreground">Studio</a>
+            <span className="text-sm">Journal</span>
+          </header>
+          <LogsPage live={running ? { prompt: livePrompt, lines: liveLogs } : null} stamp={`${running}:${liveLogs.length}`} />
+        </div>
+        <Toaster />
+      </TooltipProvider>
+    );
+  }
 
   return (
     <TooltipProvider>
     <div className="flex h-full">
       <Sidebar projects={projects} currentId={project?.id ?? null} onOpen={(id) => openProject(id)} onNew={newApp}
+        onJournal={() => go('/journal')}
         onDelete={async (id) => { await api.deleteProject(id); if (project?.id === id) newApp(); refreshProjects(); toast('App supprimée'); }} />
 
       <main className={`flex min-w-0 flex-1 gap-2 py-4 pl-4 ${fa.open ? 'pr-4' : 'pr-1'}`}>

@@ -1,6 +1,6 @@
 /** Point d'entrée de l'agent : équipe réelle (Agents SDK + LLM compatible OpenAI) ou équipe scriptée (démo). */
 import type { McpClient } from '../mcp.ts';
-import { INCEPTION_BASE_URL, INCEPTION_DEFAULT_MODEL } from '../providers/index.ts';
+import { DEEPSEEK_BASE_URL, DEEPSEEK_DEFAULT_MODEL, INCEPTION_BASE_URL, INCEPTION_DEFAULT_MODEL } from '../providers/index.ts';
 import { type CrewConfig, type CrewInput } from './crew.ts';
 import { runEngine } from './engine/run.ts';
 import { runScriptedCrew } from './scripted.ts';
@@ -12,6 +12,9 @@ export function agentBackend(env: NodeJS.ProcessEnv = process.env, providerName:
   if (!Workspace.templateReady()) return { kind: 'unavailable', reason: 'template agent absent (bash scripts/setup-agent-template.sh)' };
   const maxRework = Number(env.AGENT_MAX_REWORK ?? 2);
   if (providerName === 'mock') return { kind: 'scripted', provider: 'mock' };
+  if (providerName === 'deepseek') {
+    return { kind: 'llm', provider: 'deepseek', cfg: { baseUrl: env.LLM_BASE_URL || DEEPSEEK_BASE_URL, apiKey: (env.DEEPSEEK_API_KEY || env.LLM_API_KEY)!, model: env.LLM_MODEL?.trim() || DEEPSEEK_DEFAULT_MODEL, maxRework } };
+  }
   if (providerName === 'inception') {
     return { kind: 'llm', provider: 'inception', cfg: { baseUrl: env.LLM_BASE_URL || INCEPTION_BASE_URL, apiKey: (env.INCEPTION_API_KEY || env.LLM_API_KEY)!, model: env.LLM_MODEL?.trim() || INCEPTION_DEFAULT_MODEL, reasoningEffort: env.LLM_REASONING_EFFORT || 'instant', maxRework } };
   }

@@ -48,6 +48,16 @@ db.exec(`
     updated_at TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_dashboards_project ON dashboards(project_id, position);
+  CREATE TABLE IF NOT EXISTS generations (
+    id TEXT PRIMARY KEY,
+    project_id TEXT,
+    prompt TEXT NOT NULL,
+    status TEXT NOT NULL,
+    lines TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    ended_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_generations_started ON generations(started_at);
 `);
 
 // Migrations légères : fichiers source de l'agent, trace agent, app (contrat + sous-agent + backend MCP) en JSON
@@ -90,6 +100,7 @@ app.get<{ Params: { id: string } }>('/projects/:id', async (req, reply) => {
 });
 
 app.delete<{ Params: { id: string } }>('/projects/:id', async (req) => {
+  db.prepare('DELETE FROM generations WHERE project_id = ?').run(req.params.id);
   db.prepare('DELETE FROM dashboards WHERE project_id = ?').run(req.params.id);
   db.prepare('DELETE FROM versions WHERE project_id = ?').run(req.params.id);
   db.prepare('DELETE FROM projects WHERE id = ?').run(req.params.id);
@@ -150,6 +161,35 @@ app.put<{ Params: { id: string; dashId: string }; Body: { title?: string; descri
   db.prepare('UPDATE projects SET updated_at = ? WHERE id = ?').run(t, req.params.id);
   const row = db.prepare('SELECT * FROM dashboards WHERE id = ?').get(req.params.dashId) as DashRow;
   return parseDash(row);
+});
+
+type GenBody = { id?: string; projectId?: string | null; prompt?: string; status?: string; lines?: unknown[]; startedAt?: string; endedAt?: string };
+app.post<{ Body: GenBody }>('/generations', async (req, reply) => {
+  const b = req.body ?? {};
+  if (!b.prompt || !Array.isArray(b.lines)) return reply.code(400).send({ error: 'prompt et lines requis' });
+  const id = b.id && /^[a-zA-Z0-9-]{8,64}$/.test(b.id) ? b.id : randomUUID();
+  const t = now();
+  const lines = b.lines.slice(0, 1600);
+  db.prepare(`INSERT INTO generations (id, project_id, prompt, status, lines, started_at, ended_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?)
+              ON CONFLICT(id) DO UPDATE SET project_id = excluded.project_id, status = excluded.status, lines = excluded.lines, ended_at = excluded.ended_at`)
+    .run(id, b.projectId || null, String(b.prompt).slice(0, 200), String(b.status ?? 'ok').slice(0, 20), JSON.stringify(lines), b.startedAt ?? t, b.endedAt ?? t);
+  return reply.code(201).send({ id, count: lines.length });
+});
+
+app.get('/generations', async () => {
+  const rows = db.prepare('SELECT id, project_id, prompt, status, started_at, ended_at, lines FROM generations ORDER BY started_at DESC LIMIT 40').all() as Array<{ lines: string } & Record<string, unknown>>;
+  return rows.map((row) => {
+    const lines = j(row.lines) as Array<{ component?: string }> | null;
+    const components = [...new Set((lines ?? []).map((line) => line.component).filter(Boolean))];
+    return { id: row.id, project_id: row.project_id, prompt: row.prompt, status: row.status, started_at: row.started_at, ended_at: row.ended_at, count: lines?.length ?? 0, components };
+  });
+});
+
+app.get<{ Params: { id: string } }>('/generations/:id', async (req, reply) => {
+  const row = db.prepare('SELECT * FROM generations WHERE id = ?').get(req.params.id) as ({ lines: string } & Record<string, unknown>) | undefined;
+  if (!row) return reply.code(404).send({ error: 'journal introuvable' });
+  return { ...row, lines: j(row.lines) ?? [] };
 });
 
 app.listen({ port: PORT, host: BIND_HOST }).then(() => console.log(`[storage] prêt sur :${PORT} (db: ${DB_PATH})`));

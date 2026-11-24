@@ -152,6 +152,24 @@
       "auth": {
         "secret": true
       }
+    },
+    {
+      "writeTools": [],
+      "id": "deepwiki",
+      "name": "DeepWiki",
+      "transport": "http",
+      "enabled": true,
+      "allowedTools": "*",
+      "url": "https://mcp.deepwiki.com/mcp"
+    },
+    {
+      "writeTools": [],
+      "id": "coingecko",
+      "name": "CoinGecko",
+      "transport": "http",
+      "enabled": true,
+      "allowedTools": "*",
+      "url": "https://mcp.api.coingecko.com/mcp"
     }
   ]
 }

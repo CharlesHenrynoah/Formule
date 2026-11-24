@@ -1,10 +1,24 @@
 /**
- * Le sélecteur est un agent. Il choisit le serveur MCP dont le nom ressemble à la demande,
+ * Le sélecteur est un agent. Il choisit le serveur MCP adapté à l'intention,
  * puis on exécute nous-mêmes les lectures qu'il a nommées.
  */
-import { argsForTool, repoInText, type SourceTool } from '../../app-agents/ingest.ts';
+import { argsForTool, repoInText, valueFits, type SourceTool } from '../../app-agents/ingest.ts';
 
 export type SelectedRead = { tool: string; args: Record<string, unknown> };
+
+function intentHint(demand: string): string {
+  const text = demand.toLowerCase().normalize('NFD').replace(/\p{M}/gu, '');
+  const hints = [
+    'Chaque serveur est un moteur interchangeable. L’app est le véhicule : elle se monte sur un moteur, elle n’est pas écrite pour une marque.',
+    'Choisis le moteur dont le nom, la description ou les outils couvrent la demande. S’il en nomme un, c’est celui-là.',
+  ];
+  if (/doc|documentation|wiki|swagger|openapi/.test(text) && !/prix|price|volume|execute/.test(text)) {
+    hints.push('La demande veut de la documentation : un outil read / search_docs peut suffire.');
+  } else if (/prix|price|volume|courbe|kpi|dashboard|tableau|liste|top\s*\d+/.test(text)) {
+    hints.push('La demande veut des mesures ou une liste : un outil qui renvoie des données (list, get, markets, execute). Une doc seule ne suffit pas.');
+  }
+  return hints.join('\n');
+}
 
 export function selectorPrompt(demand: string, tools: SourceTool[]): string {
   const groups = new Map<string, SourceTool[]>();
@@ -14,25 +28,34 @@ export function selectorPrompt(demand: string, tools: SourceTool[]): string {
     const key = `${tool.serverName || id} · ${id}`;
     groups.set(key, [...(groups.get(key) ?? []), tool]);
   }
-  const lines = [...groups.entries()].slice(0, 16).map(([label, list]) => {
-    const tools = list.slice(0, 8).map((tool) => {
+  const lines = [...groups.entries()].slice(0, 20).map(([label, list]) => {
+    const toolsLine = list.slice(0, 10).map((tool) => {
       const required = (tool.inputSchema?.required ?? []).join(', ') || 'aucun';
-      return `${tool.id} (${required})`;
-    }).join(' ; ');
-    return `- ${label} : ${tools}`;
+      const blurb = (tool.description ?? '').replace(/\s+/g, ' ').trim().slice(0, 90);
+      return blurb ? `${tool.id} (${required}) — ${blurb}` : `${tool.id} (${required})`;
+    }).join('\n    ');
+    return `- ${label} :\n    ${toolsLine}`;
   });
   return [
-    'Tu es le sélecteur. Tu es un agent.',
-    'Tu choisis le serveur MCP dont le nom ressemble le plus au nom cité dans la demande, même s’il est approximatif.',
-    'Tu ne choisis pas un serveur que la demande écarte.',
-    'Tu n’inventes aucun identifiant d’outil. Au plus 3 outils en lecture.',
-    'Si la demande contient un dépôt owner/repo, tu le recopies tel quel dans les arguments.',
-    'Réponds uniquement par un JSON : {"reads":[{"tool":"identifiant","args":{}}]}',
+    'Tu es le Sélecteur. Tu choisis le moteur MCP sur lequel monter le véhicule.',
+    'Tu raisonnes sur l’intention (ce qu’il faut afficher) et sur les moteurs réellement branchés, pas sur une marque par défaut.',
+    'Règles :',
+    '1. Un moteur = un serveur. Tu compares son nom, son serverName et la description de ses outils à la demande.',
+    '2. Si la demande nomme un moteur, même approximativement, tu le privilégies.',
+    '3. Tu ne choisis jamais un moteur que la demande écarte.',
+    '4. Sans exclusion explicite : le moteur de démo ne sert que si aucun autre moteur ne couvre la demande.',
+    '5. Si la demande veut des mesures et qu’un outil execute (paramètre code) existe : search_docs seul ne suffit pas, il faut l’outil qui renvoie les données.',
+    '6. Tu n’inventes aucun identifiant. Au plus 3 outils en lecture, de préférence sur le même moteur.',
+    '7. Un identifiant présent dans la demande (dépôt, ville, id) est recopié tel quel dans les arguments.',
+    '8. Remplis les args requis avec des valeurs tirées de la demande ; sinon laisse args à {}.',
+    'Réponds uniquement par un JSON : {"reads":[{"tool":"identifiant","args":{}}],"why":"une phrase"}',
     '',
-    'Serveurs :',
+    intentHint(demand),
+    '',
+    'Serveurs disponibles :',
     lines.join('\n') || '- aucun',
     '',
-    `Demande : ${demand.slice(0, 1200)}`,
+    `Demande : ${demand.slice(0, 1400)}`,
   ].join('\n');
 }
 
@@ -63,6 +86,8 @@ export function readsFromSelector(answer: string, tools: SourceTool[], demand: s
       }
     }
     if (requiredMissing(tool, args)) continue;
+    const props = tool.inputSchema?.properties ?? {};
+    if (Object.entries(args).some(([key, value]) => props[key] && !valueFits(value, props[key]))) continue;
     out.push({ tool: tool.id, args });
     if (out.length >= 3) break;
   }
