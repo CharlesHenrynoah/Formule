@@ -264,6 +264,10 @@ export function reviewSource(
   const chain = linkChain(prompt, fields, proof);
   if (docsMismatchIntent(thought, fields) || !chain.ok) {
     const missing = chain.missing.length ? chain.missing : thought.expectedFields;
+    const acquired = chain.links.filter((link) => {
+      const claim = chain.claims.find((item) => item.id === link.claim);
+      return link.state === 'tenu' && claim && !['meta', 'vue', 'action', 'operation'].includes(claim.kind);
+    }).map((link) => link.text);
     const kinds = chain.claims.filter((claim) => missing.includes(claim.text)).map((claim) => claim.kind);
     const entityGap = kinds.length > 0 && kinds.every((kind) => kind === 'entite' || kind === 'filtre' || kind === 'champ');
     const text = [
@@ -281,7 +285,9 @@ export function reviewSource(
         : 'search_docs (ou équivalent) ne suffit pas : il faut une lecture métier (souvent execute / list / get) qui renvoie ces mesures.',
       globalShape(fields) ? 'Les champs observés décrivent un agrégat global, pas le périmètre demandé.' : '',
       'Interdit de poser un dashboard « répartition de method/summary ».',
-      'Rien ne peut être généré tant que ces champs manquent.',
+      acquired.length
+        ? `Données acquises : ${acquired.join(', ')}. Données manquantes : ${missing.join(', ')}. Une acquisition partielle reste disponible.`
+        : 'Rien ne peut être généré tant que ces champs manquent.',
       '',
       chain.text,
     ].join('\n');

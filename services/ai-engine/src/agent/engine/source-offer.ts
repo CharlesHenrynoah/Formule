@@ -5,8 +5,12 @@
  */
 import { argsForTool, keepNamedServer, mentionedServers, readsForCollections, readsForUnmatched, valueFits, type SourceTool } from '../../app-agents/ingest.ts';
 import {
+  classifyRestriction,
   correctAcquisition,
+  dropOptionalArgument,
   executeCodePrompt,
+  parameterIsOptional,
+  restrictedParameter,
   findCodeTool,
   findDocsTool,
   mcpMetaNames,
@@ -21,11 +25,10 @@ import { admitExecute } from './execute-gate.ts';
 import { reviewSource } from './product-owner.ts';
 import { acquisitionNeeds, claimsFromPrompt, hitsInRows, linkChain } from './chain.ts';
 import { classifySearch, profileTool } from './capabilities.ts';
-import { rankNeeds } from '../../navigation/apf.ts';
 import { readsFromSelector, selectorPrompt } from './select-mcp.ts';
 import { routeDemand } from './pose.ts';
 import { splitAcquisition } from '../../discovery/acquire.ts';
-import { acquisitionProgress, attemptKey, callIdentity, methodFits, methodJournal, registerMethods, requirementsOf, responseInScope, selectMethod } from './sdk-scope.ts';
+import { acquisitionProgress, acquisitionsOf, attemptKey, callIdentity, methodFits, methodJournal, registerMethods, responseInScope, selectMethod, type Acquisition } from './sdk-scope.ts';
 import { alignPairSeries, keepSpan } from './series.ts';
 
 export type ResponseState = 'vide' | 'erreur' | 'inconnu' | 'valide';
@@ -180,9 +183,13 @@ export function offerFromReads(prompt: string, reads: SourceRead[], page = ''): 
     const chain = linkChain(prompt, fields, { hits });
     const needs = acquisitionNeeds(chain);
     if (!needs.length) return true;
-    if (needs.some((need) => need.kind === 'entite' || need.kind === 'filtre')) return hits.length > 0;
+    const entityNeeds = needs.some((need) => need.kind === 'entite' || need.kind === 'filtre');
+    if (entityNeeds && hits.length > 0) return true;
     const open = new Set(needs.map((need) => need.text));
-    return chain.links.some((link) => link.state === 'tenu' && !open.has(link.text) && !!link.field && fields.includes(link.field));
+    return chain.links.some((link) => {
+      const kind = chain.claims.find((claim) => claim.id === link.claim)?.kind;
+      return (kind === 'mesure' || kind === 'unite' || kind === 'dimension') && link.state === 'tenu' && !open.has(link.text) && !!link.field && fields.includes(link.field);
+    });
   };
   const useful = (read: SourceRead) => read.ok && read.rows.some((row) => !isDocumentationRow(row) && holdsDemand(row));
   const business = (read: SourceRead) => useful(read);
@@ -500,63 +507,65 @@ export async function collectSource(
         }
         const meta = mcpMetaNames(catalog, server);
         const registry = registerMethods(docs);
-        const banned = new Set<string>();
+        const plan = acquisitionsOf(prompt);
+        const banned = new Map<string, Set<string>>();
+        const blockedAcq = new Set<string>();
         const spent = new Map<string, number>();
         const seen = new Set<string>();
+        const ban = (id: string, method: string) => {
+          if (!method) return;
+          const set = banned.get(id) ?? new Set<string>();
+          set.add(method);
+          banned.set(id, set);
+        };
+        const denied = (id: string) => [...(banned.get(id) ?? [])];
         let lastError: string | undefined;
         let lastCode = '';
+        let replay = '';
+        let carried = '';
         let observed = '';
-        let stagnant = 0;
         let strategy: 'rewrite' | 'minimal' | 'stop' = 'rewrite';
-        const blocked: string[] = [];
         const prior = done.find((read) => read.tool === codeTool.id && read.error && typeof read.args.code === 'string');
         if (prior?.error && prior.raw != null) observed = observeShape(prior.raw);
         liveDocs = docs;
-        const businessFields = () => [...new Set(done.filter((read) => read.ok && read.rows.some((row) => !isDocumentationRow(row))).flatMap((read) => read.rows.filter((row) => !isDocumentationRow(row)).flatMap((row) => Object.keys(row))))];
+        const businessRows = () => done.filter((read) => read.ok && read.rows.some((row) => !isDocumentationRow(row))).flatMap((read) => read.rows.filter((row) => !isDocumentationRow(row)));
+        const businessFields = () => [...new Set(businessRows().flatMap((row) => Object.keys(row)))];
         const progress = () => acquisitionProgress(prompt, businessFields());
+        const satisfied = (acq: Acquisition) => businessRows().length > 0 && responseInScope(businessRows(), acq, { args: carried }).ok;
         let held = progress().held.length;
-        const ceiling = Math.min(8, Math.max(4, (requirementsOf(prompt).measures.length + requirementsOf(prompt).entities.length + 1) * 2));
+        const ceiling = Math.min(12, Math.max(4, (plan.length || 1) * 3));
         for (let attempt = 0; attempt < ceiling && strategy !== 'stop'; attempt++) {
-          const fields = businessFields();
-          const chain = linkChain(prompt, fields);
-          const ranked = rankNeeds(acquisitionNeeds(chain).filter((need) => DATA_KINDS.has(need.kind) && need.kind !== 'periode'), blocked);
-          const choice = ranked.find((item) => item.score > 0) ?? (strategy === 'minimal' ? ranked[0] : undefined);
-          if (!choice) {
-            strategy = 'stop';
-            break;
-          }
-          const claim = choice.text;
-          lastLayer = choice.layer;
-          if ((spent.get(claim) ?? 0) >= 2) {
-            blocked.push(claim);
-            continue;
-          }
-          const req = requirementsOf(prompt);
-          const available = registry.filter((method) => !banned.has(method.method));
-          const picked = registry.length ? selectMethod(available, req, [...banned]) : null;
+          const acq = plan.find((item) => !blockedAcq.has(item.id) && (spent.get(item.id) ?? 0) < 2 && !satisfied(item));
+          if (!acq) break;
+          const req = acq;
+          const claim = acq.measures.concat(acq.entities).join(', ') || acq.label;
+          lastLayer = acq.id;
+          const available = registry.filter((method) => !denied(acq.id).includes(method.method));
+          const picked = registry.length ? selectMethod(available, req, denied(acq.id)) : null;
           if (registry.length && !picked) {
-            selectionLog += methodJournal({ method: '', args: '', scope: req.scope, expected: req.measures.concat(req.entities).join(', ') || claim, obtained: '', decision: 'rejetée, aucune méthode au périmètre' }) + '\n';
-            blocked.push(claim);
+            selectionLog += methodJournal({ method: '', args: '', scope: req.scope, expected: claim, obtained: '', decision: 'rejetée, aucune méthode au périmètre' }) + '\n';
+            blockedAcq.add(acq.id);
             continue;
           }
-          const shown = picked ? docs.filter((doc) => doc.method === picked.method.method) : docs.filter((doc) => !doc.method || !banned.has(doc.method));
+          const shown = picked ? docs.filter((doc) => doc.method === picked.method.method) : docs.filter((doc) => !doc.method || !denied(acq.id).includes(doc.method));
           try {
             let code = '';
-            if (lastCode && lastError && strategy === 'rewrite') {
+            if (replay) {
+              code = replay;
+              replay = '';
+            } else if (lastCode && lastError && strategy === 'rewrite') {
               const fixed = correctAcquisition(lastCode, lastError, observed);
-              lastCorrection = fixed.strategy === 'raw' ? 'retour brut, propriété absente retirée' : fixed.strategy;
-              if (fixed.strategy === 'stop') {
-                strategy = 'stop';
-                break;
-              }
-              if (fixed.strategy === 'once' && attempt > 0) {
-                strategy = 'stop';
-                break;
+              lastCorrection = fixed.strategy === 'raw' ? 'retour brut, propriété absente retirée' : fixed.strategy === 'degrade' ? 'paramètre optionnel retiré' : fixed.strategy;
+              if (fixed.strategy === 'stop' || (fixed.strategy === 'once' && (spent.get(acq.id) ?? 0) > 0)) {
+                blockedAcq.add(acq.id);
+                selectionLog += `restriction : branche ${acq.label} arrêtée\n`;
+                lastCode = '';
+                continue;
               }
               const rewritten = fixed.code ? callIdentity(fixed.code)[0]?.method : '';
-              if (fixed.code && rewritten && banned.has(rewritten)) fixed.code = null;
-              if (fixed.code && !seen.has(attemptKey(rewritten || 'script', callIdentity(fixed.code)[0]?.args ?? '', [claim]))) code = stripTypeSuppression(fixed.code);
-              else strategy = fixed.strategy === 'raw' || fixed.strategy === 'reinspect' || fixed.strategy === 'minimal' ? 'minimal' : strategy;
+              if (fixed.code && rewritten && denied(acq.id).includes(rewritten)) fixed.code = null;
+              if (fixed.code && !seen.has(attemptKey(rewritten || 'script', callIdentity(fixed.code)[0]?.args ?? '', [acq.id]))) code = stripTypeSuppression(fixed.code);
+              else strategy = fixed.strategy === 'raw' || fixed.strategy === 'reinspect' || fixed.strategy === 'minimal' || fixed.strategy === 'degrade' ? 'minimal' : strategy;
             }
             if (!code) {
               const raw = await writeCode(executeCodePrompt({
@@ -568,7 +577,7 @@ export async function collectSource(
                 observed,
                 claim,
                 minimal: strategy === 'minimal',
-                excluded: [...banned],
+                excluded: denied(acq.id),
               }));
               code = stripTypeSuppression(stripCodeFence(raw));
               lastCorrection = strategy === 'minimal' ? 'appel minimal, retour brut' : 'nouvel appel ciblé';
@@ -578,25 +587,25 @@ export async function collectSource(
             const args = fact?.args ?? '';
             const known = method ? registry.find((item) => item.method === method) : undefined;
             const unfit = known ? methodFits(known, req) : null;
-            if (method && (banned.has(method) || (unfit && !unfit.ok))) {
-              banned.add(method);
-              selectionLog += methodJournal({ method, args, scope: req.scope, expected: req.measures.concat(req.entities).join(', ') || claim, obtained: known?.fields.join(', ') || '', decision: `rejetée avant l’appel, ${unfit?.reason ?? 'méthode hors périmètre'}` }) + '\n';
+            if (method && (denied(acq.id).includes(method) || (unfit && !unfit.ok))) {
+              ban(acq.id, method);
+              selectionLog += methodJournal({ method, args, scope: req.scope, expected: claim, obtained: known?.fields.join(', ') || '', decision: `rejetée avant l’appel, ${unfit?.reason ?? 'méthode hors périmètre'}` }) + '\n';
               lastCode = '';
               lastError = `méthode ${method} exclue`;
-              spent.set(claim, (spent.get(claim) ?? 0) + 1);
+              spent.set(acq.id, (spent.get(acq.id) ?? 0) + 1);
               continue;
             }
             const gate = admitExecute(code, shown.length ? shown : docs);
             if (!gate.ok) {
               lastError = gate.reason;
               lastCode = '';
-              stagnant += 1;
-              if (stagnant >= 2) strategy = 'stop';
+              spent.set(acq.id, (spent.get(acq.id) ?? 0) + 1);
+              if ((spent.get(acq.id) ?? 0) >= 2) blockedAcq.add(acq.id);
               continue;
             }
-            const key = attemptKey(method || 'script', args, [claim]);
+            const key = attemptKey(method || 'script', args, [acq.id]);
             if (seen.has(key)) {
-              strategy = strategy === 'rewrite' ? 'minimal' : 'stop';
+              blockedAcq.add(acq.id);
               continue;
             }
             seen.add(key);
@@ -605,63 +614,85 @@ export async function collectSource(
             done = keepFootholds(done, extra);
             const fresh = extra.find((read) => read.raw != null);
             if (fresh?.raw != null) observed = observeShape(fresh.raw);
-            const businessRows = extra.flatMap((read) => read.ok ? read.rows.filter((row) => !isDocumentationRow(row)) : []);
-            const verdict = businessRows.length ? responseInScope(businessRows, req) : null;
+            const freshRows = extra.flatMap((read) => read.ok ? read.rows.filter((row) => !isDocumentationRow(row)) : []);
+            const verdict = freshRows.length ? responseInScope(freshRows, req, { args }) : null;
             if (verdict) {
               selectionLog += methodJournal({
                 method,
                 args,
                 scope: `${req.scope}/${req.grain}`,
-                expected: req.measures.concat(req.entities).join(', ') || claim,
+                expected: claim,
                 obtained: verdict.obtained.join(', '),
                 decision: verdict.ok ? 'acceptée' : `rejetée, ${verdict.reason}`,
               }) + '\n';
+              if (verdict.ok) selectionLog += `preuve : ${acq.id} | ${method} | ${args || 'aucun'} | ${verdict.carried.concat(verdict.obtained).join(', ')}\n`;
             }
-            const dated = businessRows.some((row) => Object.keys(row).some((key) => /date|time|timestamp|jour/i.test(key)));
-            const historyLeft = req.grain === 'serie' && registry.some((item) => item.scope === 'historique' && item.method !== method && !banned.has(item.method));
+            const dated = freshRows.some((row) => Object.keys(row).some((field) => /date|time|timestamp|jour/i.test(field)));
+            const historyLeft = req.grain === 'serie' && registry.some((item) => item.scope === 'historique' && item.method !== method && !denied(acq.id).includes(item.method));
             if (verdict?.ok && historyLeft && !dated && method) {
-              banned.add(method);
-              selectionLog += methodJournal({ method, args, scope: `${req.scope}/${req.grain}`, expected: req.measures.concat(req.entities).join(', ') || claim, obtained: verdict.obtained.join(', '), decision: 'rejetée, granularité point alors qu’une série est documentée' }) + '\n';
+              ban(acq.id, method);
+              selectionLog += methodJournal({ method, args, scope: `${req.scope}/${req.grain}`, expected: claim, obtained: verdict.obtained.join(', '), decision: 'rejetée, granularité point alors qu’une série est documentée' }) + '\n';
               lastCode = '';
               lastError = 'granularité : série attendue';
-              spent.set(claim, (spent.get(claim) ?? 0) + 1);
+              spent.set(acq.id, (spent.get(acq.id) ?? 0) + 1);
               continue;
             }
             if (verdict && !verdict.ok && method) {
-              banned.add(method);
+              ban(acq.id, method);
               lastCode = '';
               lastError = verdict.reason;
-              spent.set(claim, (spent.get(claim) ?? 0) + 1);
+              spent.set(acq.id, (spent.get(acq.id) ?? 0) + 1);
               if (verdict.scopeMismatch) strategy = 'rewrite';
               continue;
             }
+            const failure = extra.find((read) => !read.ok && read.error);
+            const kind = failure?.error ? classifyRestriction(failure.error) : null;
+            if (failure && (failure.diagnostic === 'auth' || kind === 'AUTH_INVALID' || kind === 'PERMISSION_DENIED' || failure.diagnostic === 'quota' || kind === 'QUOTA_EXCEEDED' || kind === 'RATE_LIMIT')) {
+              blockedAcq.add(acq.id);
+              selectionLog += `restriction : ${kind ?? failure.diagnostic} sur ${acq.label}\n`;
+              lastCorrection = kind ?? failure.diagnostic ?? 'stop';
+              lastCode = '';
+              continue;
+            }
+            if (failure && (failure.diagnostic === 'restriction' || kind === 'PLAN_RESTRICTION' || kind === 'PARAMETER_RESTRICTION')) {
+              const param = restrictedParameter(failure.error ?? '');
+              const optional = !param || parameterIsOptional(known?.doc.params ?? '', param);
+              const stripped = param && optional ? dropOptionalArgument(lastCode, param) : null;
+              selectionLog += `restriction : ${kind ?? 'PLAN_RESTRICTION'}${param ? ` ${param}` : ''} sur ${acq.label}\n`;
+              if (stripped && !seen.has(attemptKey(method || 'script', callIdentity(stripped)[0]?.args ?? '', [acq.id]))) {
+                const degrades = acq.periods.length > 0 && /days|interval|from|to|start|end/i.test(param ?? '');
+                selectionLog += degrades ? `dégradation : ${param} retiré, granularité par défaut\n` : `paramètre ${param} retiré, valeur par défaut conservée\n`;
+                replay = stripped;
+                lastError = '';
+                continue;
+              }
+              ban(acq.id, method);
+              if (!stripped) blockedAcq.add(acq.id);
+              lastCode = '';
+              continue;
+            }
+            if (verdict?.ok) carried = `${carried} ${args}`.trim();
             owner = reviewSource(prompt, catalog, done);
             const next = progress();
             selectionLog += `progression : ${held} → ${next.held.length} exigences tenues\n`;
-            if (extra.some((read) => read.diagnostic === 'auth' || read.diagnostic === 'quota')) {
-              strategy = 'stop';
-              lastCorrection = extra.find((read) => read.diagnostic)?.diagnostic ?? 'stop';
-              break;
-            }
             if (!owner.ok && next.held.length <= held) {
-              if (method && verdict) banned.add(method);
-              blocked.push(claim);
-              spent.set(claim, (spent.get(claim) ?? 0) + 1);
-              stagnant += 1;
-              strategy = strategy === 'rewrite' ? 'minimal' : 'stop';
-            } else {
-              held = next.held.length;
-              stagnant = 0;
-            }
-            if (owner.ok || stagnant >= 2) break;
+              if (method && verdict) ban(acq.id, method);
+              spent.set(acq.id, (spent.get(acq.id) ?? 0) + 1);
+              if ((spent.get(acq.id) ?? 0) >= 2) blockedAcq.add(acq.id);
+              strategy = strategy === 'rewrite' ? 'minimal' : strategy;
+            } else held = next.held.length;
+            if (owner.ok) break;
             lastError = extra.map((read) => read.error).filter(Boolean).join('\n')
               || (verdict && !verdict.ok ? verdict.reason : '')
               || (extra.some((read) => read.ok && read.rows.length) ? 'lignes présentes mais hors intention' : 'réponse vide ou hors mesures');
           } catch (error) {
             lastError = (error as Error).message;
-            if (correctAcquisition('', lastError).strategy === 'stop') strategy = 'stop';
+            if (correctAcquisition('', lastError).strategy === 'stop') blockedAcq.add(acq.id);
           }
         }
+        const acquired = plan.filter((item) => satisfied(item)).map((item) => item.label);
+        const missingAcq = plan.filter((item) => !acquired.includes(item.label)).map((item) => item.label);
+        selectionLog += `acquises : ${acquired.join(', ') || 'aucune'}\nmanquantes : ${missingAcq.join(', ') || 'aucune'}\n`;
       }
     }
 

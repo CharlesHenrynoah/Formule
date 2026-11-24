@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { planAcquisitions } from '../src/agent/engine/execute-code.ts';
-import { attemptKey, callIdentity, methodFits, registerMethods, requirementsOf, responseInScope, selectMethod, type MethodDoc } from '../src/agent/engine/sdk-scope.ts';
+import { classifyRestriction, dropOptionalArgument, planAcquisitions } from '../src/agent/engine/execute-code.ts';
+import { claimsFromPrompt } from '../src/agent/engine/chain.ts';
+import { acquisitionsOf, attemptKey, callIdentity, methodFits, registerMethods, requirementsOf, responseInScope, selectMethod, type MethodDoc } from '../src/agent/engine/sdk-scope.ts';
 import { collectSource } from '../src/agent/engine/source-offer.ts';
 
 const catalog: MethodDoc[] = [
@@ -164,4 +165,95 @@ test('une série documentée écarte le cliché qui porte le même prix', async 
   assert.equal(point.ok, false);
   const series = responseInScope([{ timestamp: '2026-11-01', price: 4 }, { timestamp: '2026-11-02', price: 5 }], curve);
   assert.equal(series.ok, true);
+});
+
+test('une demande mélange instantané, historique et agrégat', () => {
+  const plan = acquisitionsOf('Affiche le prix et le volume de Orion, la courbe du prix sur 30 jours, et le top 10 par capitalisation.');
+  const grains = plan.map((item) => item.grain).sort();
+  assert.deepEqual(grains, ['liste', 'point', 'serie']);
+  const serie = plan.find((item) => item.grain === 'serie')!;
+  const point = plan.find((item) => item.grain === 'point')!;
+  assert.deepEqual(serie.measures, ['prix']);
+  assert.ok(point.measures.includes('volume'));
+  assert.equal(serie.measures.includes('volume'), false);
+  assert.equal(serie.measures.includes('capitalisation'), false);
+  const rows = [{ timestamp: '2026-11-01', price: 4 }, { timestamp: '2026-11-02', price: 5 }];
+  assert.equal(responseInScope(rows, serie).ok, true);
+  assert.equal(responseInScope(rows, point).ok, false);
+});
+
+test('trois cartes est une quantité, pas une entité', () => {
+  const claims = claimsFromPrompt('Ajoute Trois cartes du prix de Orion.');
+  assert.equal(claims.some((claim) => claim.kind === 'entite' && /trois/i.test(claim.text)), false);
+  assert.equal(claims.some((claim) => claim.kind === 'entite' && claim.text === 'Orion'), true);
+  assert.equal(claims.some((claim) => claim.kind === 'mesure' && claim.text === 'prix'), true);
+});
+
+test('l’entité et l’unité portées par les arguments restent tenues', () => {
+  const one = requirementsOf('Affiche le prix de Orion en EUR.');
+  const verdict = responseInScope([{ price: 4 }], one, { args: 'id="orion" currency="eur"' });
+  assert.equal(verdict.ok, true);
+  assert.ok(verdict.carried.some((item) => /orion/i.test(item)));
+  assert.ok(verdict.carried.some((item) => /eur/i.test(item)));
+});
+
+test('une restriction de paramètre optionnel retombe sur l’alternative autorisée', async () => {
+  const calls: string[] = [];
+  assert.equal(classifyRestriction('403 {"error":"plan_restricted","message":"The optional parameter interval is available on a paid plan"}'), 'PARAMETER_RESTRICTION');
+  assert.equal(classifyRestriction('401 unauthorized'), 'AUTH_INVALID');
+  assert.equal(dropOptionalArgument('client.items.history({ id: "orion", interval: "hourly", days: 30 })', 'interval')?.includes('interval'), false);
+  const offer = await collectSource(
+    'Affiche la courbe du prix sur 30 jours.',
+    '',
+    async () => ([
+      { id: 'atlas__search_docs', description: 'docs SDK', serverName: 'Atlas', schema: { required: ['query'], properties: { query: { type: 'string' } } } },
+      { id: 'atlas__execute', description: 'Runs JavaScript code to interact with the API', serverName: 'Atlas', schema: { required: ['code'], properties: { code: { type: 'string' } } } },
+    ]),
+    async (tool, args) => {
+      const code = String(args.code ?? '');
+      calls.push(code);
+      if (tool.endsWith('search_docs')) return catalog;
+      if (/interval/.test(code)) throw new Error('403 {"error":"plan_restricted","message":"The optional parameter interval is available on a paid plan"}');
+      return [{ timestamp: '2026-11-01', price: 4 }, { timestamp: '2026-11-02', price: 5 }];
+    },
+    async () => '{"reads":[{"tool":"atlas__search_docs","args":{"query":"prix"}}]}',
+    async () => 'async function run(client) { return client.items.history("orion", { interval: "hourly", days: 30 }); }',
+  );
+  assert.equal(calls.filter((code) => /interval/.test(code)).length, 1);
+  assert.equal(calls.some((code) => /items\.history/.test(code) && !/interval/.test(code)), true);
+  assert.equal(offer.canBuild, true);
+  assert.match(offer.log, /PARAMETER_RESTRICTION|paramètre interval retiré/);
+});
+
+test('un échec local laisse vivre les autres acquisitions', async () => {
+  const calls: string[] = [];
+  const offer = await collectSource(
+    'Affiche le prix de Orion et le total global.',
+    '',
+    async () => ([
+      { id: 'atlas__search_docs', description: 'docs SDK', serverName: 'Atlas', schema: { required: ['query'], properties: { query: { type: 'string' } } } },
+      { id: 'atlas__execute', description: 'Runs JavaScript code to interact with the API', serverName: 'Atlas', schema: { required: ['code'], properties: { code: { type: 'string' } } } },
+    ]),
+    async (tool, args) => {
+      const code = String(args.code ?? '');
+      calls.push(code || tool);
+      if (tool.endsWith('search_docs')) return catalog;
+      if (/items\.get/.test(code)) throw new Error('401 unauthorized');
+      if (/catalog\.totals/.test(code)) return [{ active_count: 12, total_market_cap: 90 }];
+      return [];
+    },
+    async () => '{"reads":[{"tool":"atlas__search_docs","args":{"query":"prix"}}]}',
+    async (mission) => {
+      const imposed = mission.match(/Méthode imposée : (\S+)/)?.[1] ?? '';
+      if (imposed === 'client.catalog.totals') return 'async function run(client) { return client.catalog.totals(); }';
+      return 'async function run(client) { return client.items.get("orion"); }';
+    },
+  );
+  assert.equal(calls.some((code) => /items\.get/.test(code)), true);
+  assert.equal(calls.some((code) => /catalog\.totals/.test(code)), true);
+  assert.equal(offer.canBuild, false);
+  assert.equal(offer.samples.some((sample) => sample.rows.some((row) => row.total_market_cap === 90)), true);
+  assert.match(offer.text, /total/);
+  assert.match(offer.log, /AUTH_INVALID|auth/);
+  assert.doesNotMatch(offer.text, /Données obtenues : aucune/);
 });

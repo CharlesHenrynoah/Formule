@@ -42,6 +42,9 @@ export type Requirements = {
   ui: string[];
 };
 
+/** Une acquisition a son propre contrat. Elle ne hérite pas des mesures des autres vues. */
+export type Acquisition = Requirements & { id: string; label: string; dependsOn: string[] };
+
 const UI_KIND = new Set(['meta', 'vue', 'action', 'operation', 'periode']);
 
 function fold(value: string): string {
@@ -58,26 +61,85 @@ function fieldNames(schema: string): string[] {
     .filter((name) => !/^(string|number|boolean|object|array|null|integer|true|false|undefined)$/i.test(name));
 }
 
-/** Exigences d'acquisition, séparées de l'interface. Un titre, une carte ou un filtre temporel ne se télécharge pas. */
-export function requirementsOf(prompt: string): Requirements {
+function unique(values: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const value of values) {
+    const key = fold(value);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(value);
+  }
+  return out;
+}
+
+function mentions(text: string, measure: string): boolean {
+  return fold(text).includes(fold(measure));
+}
+
+/** Découpe la demande en acquisitions indépendantes, puis fusionne celles qui partagent grain, entité et période. */
+export function acquisitionsOf(prompt: string): Acquisition[] {
   const claims = claimsFromPrompt(prompt);
-  const entities = claims.filter((claim) => claim.kind === 'entite').map((claim) => claim.text);
-  const measures = claims.filter((claim) => claim.kind === 'mesure').map((claim) => claim.text);
-  const units = claims.filter((claim) => claim.kind === 'unite').map((claim) => claim.text);
-  const periods = claims.filter((claim) => claim.kind === 'periode').map((claim) => claim.text);
-  const filters = claims.filter((claim) => claim.kind === 'filtre').map((claim) => claim.text);
-  const ui = claims.filter((claim) => claim.kind === 'vue' || claim.kind === 'meta' || claim.kind === 'action' || claim.kind === 'operation').map((claim) => claim.text);
+  const measures = unique(claims.filter((claim) => claim.kind === 'mesure').map((claim) => claim.text));
+  const entities = unique(claims.filter((claim) => claim.kind === 'entite').map((claim) => claim.text));
+  const units = unique(claims.filter((claim) => claim.kind === 'unite').map((claim) => claim.text));
+  const periods = unique(claims.filter((claim) => claim.kind === 'periode').map((claim) => claim.text));
+  const filters = unique(claims.filter((claim) => claim.kind === 'filtre').map((claim) => claim.text));
+  const ui = unique(claims.filter((claim) => claim.kind === 'vue' || claim.kind === 'meta' || claim.kind === 'action' || claim.kind === 'operation').map((claim) => claim.text));
+  const segments = prompt.split(/\s+et\s+|,\s*|;\s*/i).map((part) => part.trim()).filter(Boolean);
+  const isSeries = (part: string) => /courbe|graphique|historique|sparkline|par jour|par semaine|série|serie/i.test(part);
+  const isList = (part: string) => /top\s*\d+|classement|\btableau\b|\bliste\b|\bgrille\b/i.test(part);
+  const isGlobal = (part: string) => /\bglobal\b|ensemble du|tous les totaux/i.test(part);
+  const seriesText = segments.filter(isSeries).join(' ');
+  const listText = segments.filter(isList).join(' ');
+  const globalText = segments.filter(isGlobal).join(' ');
+  const pointText = segments.filter((part) => !isSeries(part) && !isList(part) && !isGlobal(part)).join(' ');
+  const namedIn = (text: string) => entities.filter((entity) => mentions(text, entity));
+  const measured = (text: string) => measures.filter((measure) => mentions(text, measure));
+  const wantsSeries = seriesText.length > 0;
+  const wantsList = listText.length > 0;
+  const wantsGlobal = globalText.length > 0;
+  const base = { units, filters, ui, dependsOn: [] as string[] };
+  const out: Acquisition[] = [];
+  if (wantsGlobal) {
+    const own = measured(globalText);
+    const totals = own.length ? own : measures.filter((measure) => /total|nombre|count/i.test(measure));
+    if (totals.length || !measures.length) out.push({ ...base, id: 'global', label: 'agrégat global', entities: [], measures: totals.length ? totals : measures, periods: [], grain: 'point', scope: 'global' });
+  }
+  if (wantsList) {
+    const own = measured(listText);
+    if (own.length) out.push({ ...base, id: 'liste', label: 'collection agrégée', entities: namedIn(listText), measures: own, periods: [], grain: 'liste', scope: 'agrege' });
+  }
+  if (wantsSeries) {
+    const own = measured(seriesText);
+    if (own.length || measures.length) out.push({ ...base, id: 'serie', label: 'série historique', entities: namedIn(seriesText), measures: own.length ? own : measures.slice(0, 1), periods, grain: 'serie', scope: 'historique' });
+  }
+  const pointMeasures = measured(pointText);
+  const pointEntities = namedIn(pointText);
+  if (pointMeasures.length || (!wantsSeries && !wantsList && !wantsGlobal && (measures.length || entities.length))) {
+    const own = pointMeasures.length ? pointMeasures : measures;
+    const who = pointEntities.length ? pointEntities : wantsSeries || wantsList || wantsGlobal ? [] : entities;
+    const scope: Scope = who.length ? 'individuel' : 'agrege';
+    out.push({ ...base, id: 'instant', label: 'mesures instantanées', entities: who, measures: own, periods: wantsSeries ? [] : periods, grain: 'point', scope });
+  }
+  if (!out.length && (measures.length || entities.length)) {
+    const grain: Grain = wantsSeries ? 'serie' : wantsList ? 'liste' : 'point';
+    const scope: Scope = grain === 'serie' ? 'historique' : grain === 'liste' ? 'agrege' : entities.length ? 'individuel' : wantsGlobal ? 'global' : 'agrege';
+    out.push({ ...base, id: grain, label: grain, entities, measures, periods, grain, scope });
+  }
+  return out;
+}
+
+/** Exigences d'une acquisition. Le grain dominant reste disponible pour les appels qui visent une seule vue. */
+export function requirementsOf(prompt: string): Requirements {
+  const all = acquisitionsOf(prompt);
   const grain: Grain = /courbe|graphique|historique|sparkline|par jour|par semaine|série|serie/i.test(prompt)
     ? 'serie'
     : /top\s*\d+|classement|tableau|liste|grille/i.test(prompt)
       ? 'liste'
       : 'point';
-  let scope: Scope = 'agrege';
-  if (grain === 'serie') scope = 'historique';
-  else if (grain === 'liste') scope = 'agrege';
-  else if (entities.length) scope = 'individuel';
-  else if (/\bglobal\b|ensemble du|tous les totaux/i.test(prompt)) scope = 'global';
-  return { entities, measures, units, periods, filters, grain, scope, ui };
+  const match = all.find((item) => item.grain === grain) ?? all[0];
+  return match ?? { entities: [], measures: [], units: [], periods: [], filters: [], grain: 'point', scope: 'agrege', ui: [] };
 }
 
 export function registerMethods(docs: MethodDoc[]): SdkMethod[] {
@@ -165,23 +227,39 @@ export function globalShape(fields: string[]): boolean {
   return totals && !named;
 }
 
-/** Après l'appel : une réponse techniquement valide peut rester hors sujet. */
-export function responseInScope(rows: Array<Record<string, unknown>>, req: Requirements): { ok: boolean; reason: string; obtained: string[]; scopeMismatch: boolean } {
-  if (!rows.length) return { ok: false, reason: 'réponse vide', obtained: [], scopeMismatch: false };
+function carriedTokens(args: string): Array<{ key: string; value: string }> {
+  const named = [...args.matchAll(/([A-Za-z_][\w]*)\s*[:=]\s*['"]([^'"]+)['"]/g)].map((match) => ({ key: match[1] ?? '', value: match[2] ?? '' }));
+  const positional = [...args.matchAll(/client(?:\.\w+)+\(\s*['"]([^'"]+)['"]/g)].map((match) => ({ key: 'id', value: match[1] ?? '' }));
+  return [...named, ...positional];
+}
+
+function tokenMatches(value: string, needle: string): boolean {
+  return fold(value) === fold(needle);
+}
+
+/** Après l'appel : la réponse est jugée sur le contrat de son acquisition, pas sur tout le dashboard. */
+export function responseInScope(rows: Array<Record<string, unknown>>, req: Requirements, carried?: { args?: string }): { ok: boolean; reason: string; obtained: string[]; scopeMismatch: boolean; carried: string[] } {
+  const kept = carriedTokens(carried?.args ?? '');
+  const carriedLabels = [
+    ...req.entities.filter((entity) => kept.some((item) => /id|slug|symbol|name/i.test(item.key) && tokenMatches(item.value, entity))).map((entity) => `entité ${entity}`),
+    ...req.units.filter((unit) => kept.some((item) => /currency|devise|unit|vs_currency/i.test(item.key) && tokenMatches(item.value, unit))).map((unit) => `unité ${unit}`),
+    ...req.periods.filter((period) => kept.some((item) => /days|interval|from|to/i.test(item.key) && fold(`${item.value} ${period}`).includes(fold(item.value)))).map((period) => `période ${period}`),
+  ];
+  if (!rows.length) return { ok: false, reason: 'réponse vide', obtained: [], scopeMismatch: false, carried: carriedLabels };
   const fields = [...new Set(rows.flatMap((row) => Object.keys(row)))].filter((field) => field !== 'collection');
   const obtained = fields.slice(0, 12);
   const measuresMissing = req.measures.filter((measure) => !fields.some((field) => termCovers(measure, field)));
-  const entityMissing = req.entities.filter((entity) => !hitsInRows(rows, [entity]).length);
+  const entityMissing = req.entities.filter((entity) => !hitsInRows(rows, [entity]).length && !kept.some((item) => /id|slug|symbol|name/i.test(item.key) && tokenMatches(item.value, entity)));
   if (req.scope !== 'global' && globalShape(fields)) {
-    return { ok: false, reason: 'périmètre global', obtained, scopeMismatch: true };
+    return { ok: false, reason: 'périmètre global', obtained, scopeMismatch: true, carried: carriedLabels };
   }
   const dated = fields.some((field) => /date|time|timestamp|jour/i.test(field));
   if (req.grain === 'serie' && !dated) {
-    return { ok: false, reason: 'granularité : série attendue', obtained, scopeMismatch: true };
+    return { ok: false, reason: 'granularité : série attendue', obtained, scopeMismatch: true, carried: carriedLabels };
   }
-  if (measuresMissing.length) return { ok: false, reason: `mesure absente : ${measuresMissing.join(', ')}`, obtained, scopeMismatch: false };
-  if (req.scope === 'individuel' && entityMissing.length) return { ok: false, reason: `entité absente : ${entityMissing.join(', ')}`, obtained, scopeMismatch: false };
-  return { ok: true, reason: 'périmètre tenu', obtained, scopeMismatch: false };
+  if (measuresMissing.length) return { ok: false, reason: `mesure absente : ${measuresMissing.join(', ')}`, obtained, scopeMismatch: false, carried: carriedLabels };
+  if (req.scope !== 'global' && req.entities.length && entityMissing.length) return { ok: false, reason: `entité absente : ${entityMissing.join(', ')}`, obtained, scopeMismatch: false, carried: carriedLabels };
+  return { ok: true, reason: carriedLabels.length ? `périmètre tenu (${carriedLabels.join(', ')})` : 'périmètre tenu', obtained, scopeMismatch: false, carried: carriedLabels };
 }
 
 export function acquisitionProgress(prompt: string, fields: string[], proof?: ChainProof): { held: string[]; open: string[] } {

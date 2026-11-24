@@ -26,7 +26,8 @@ export type DocHint = {
 
 export type CallShape = 'object' | 'hybrid' | 'unknown';
 export type ShapeErrorKind = 'want_string_first' | 'want_object' | 'want_more_args' | 'bad_property' | 'other';
-export type DiagnosticClass = 'signature' | 'property' | 'type' | 'structure' | 'auth' | 'availability' | 'quota' | 'transport' | 'session' | 'other';
+export type DiagnosticClass = 'signature' | 'property' | 'type' | 'structure' | 'auth' | 'availability' | 'quota' | 'transport' | 'session' | 'restriction' | 'other';
+export type RestrictionKind = 'AUTH_INVALID' | 'PERMISSION_DENIED' | 'PLAN_RESTRICTION' | 'PARAMETER_RESTRICTION' | 'QUOTA_EXCEEDED' | 'RATE_LIMIT' | 'TRANSPORT_ERROR' | 'INVALID_ARGUMENT';
 
 function serverOf(id: string): string {
   return id.includes('__') ? id.split('__')[0] : '';
@@ -210,11 +211,62 @@ export function ensureRunClient(code: string): string {
   ].join('\n');
 }
 
-/** Sept familles. Chaque famille a sa propre suite, sans réécrire tout le script. */
+/** Un 401 ou un 403 n'est une authentification que si le corps ne décrit pas une restriction de plan ou de paramètre. */
+export function classifyRestriction(error: string): RestrictionKind | null {
+  const text = error.toLowerCase();
+  if (/econn|etimedout|fetch failed|socket hang up|network error|headers timeout/.test(text)) return 'TRANSPORT_ERROR';
+  if (/429|too many requests|rate limit/.test(text) && /quota|credit|billing/.test(text)) return 'QUOTA_EXCEEDED';
+  if (/quota exceeded|credit limit|billing quota/.test(text)) return 'QUOTA_EXCEEDED';
+  if (/429|too many requests|rate limit/.test(text)) return 'RATE_LIMIT';
+  const plan = /plan|subscription|upgrade|paid plan|premium|enterprise|higher plan|abonnement|not available on your/.test(text);
+  const param = restrictedParameter(error);
+  if (plan && param) return 'PARAMETER_RESTRICTION';
+  if (plan) return 'PLAN_RESTRICTION';
+  if (param && /optional parameter|unknown parameter|invalid parameter|unrecognized parameter|reserved/.test(text)) return 'PARAMETER_RESTRICTION';
+  if (/401|unauthorized|invalid api key|invalid token|invalid credentials|authentication failed|api[_ ]?key/.test(text)) return 'AUTH_INVALID';
+  if (/403|forbidden|permission denied|insufficient scope|permission refus/.test(text)) return 'PERMISSION_DENIED';
+  if (/expected \d+\s*(?:-\d+)?\s+arguments?|not assignable|invalid argument/.test(text)) return 'INVALID_ARGUMENT';
+  return null;
+}
+
+export function restrictedParameter(error: string): string | null {
+  return error.match(/parameter\s+['"]?([A-Za-z_][\w]*)['"]?/i)?.[1]
+    ?? error.match(/"param(?:eter)?"\s*:\s*"([^"]+)"/i)?.[1]
+    ?? null;
+}
+
+export function parameterIsOptional(params: string, name: string): boolean {
+  if (!name) return false;
+  if (new RegExp(`\\b${name}\\s*\\?\\s*:`).test(params)) return true;
+  if (new RegExp(`\\b${name}\\s*:`).test(params)) return false;
+  return true;
+}
+
+/** Retire un paramètre optionnel. Un paramètre obligatoire n'est pas contourné. */
+export function dropOptionalArgument(code: string, name: string): string | null {
+  if (!name || !new RegExp(`\\b${name}\\b`).test(code)) return null;
+  const re = new RegExp(`\\s*,?\\s*${name}\\s*:\\s*(?:'[^']*'|"[^"]*"|\\d+|true|false)\\s*,?`);
+  if (!re.test(code)) return null;
+  const next = code
+    .replace(re, '')
+    .replace(/,\s*,/g, ',')
+    .replace(/,\s*}/g, ' }')
+    .replace(/{\s*,/g, '{ ')
+    .replace(/{\s*}/g, '{}');
+  return next === code ? null : next;
+}
+
+/** Sept familles, plus les restrictions commerciales. Chaque famille a sa propre suite. */
 export function classifyDiagnostic(error: string): DiagnosticClass {
+  const restriction = classifyRestriction(error);
+  if (restriction === 'TRANSPORT_ERROR') return 'transport';
+  if (restriction === 'PLAN_RESTRICTION' || restriction === 'PARAMETER_RESTRICTION') return 'restriction';
+  if (restriction === 'AUTH_INVALID' || restriction === 'PERMISSION_DENIED') return 'auth';
+  if (restriction === 'QUOTA_EXCEEDED' || restriction === 'RATE_LIMIT') return 'quota';
+  if (restriction === 'INVALID_ARGUMENT') return 'signature';
   const link = classifyLink(error);
   if (link.obstacle === 'transport' || link.obstacle === 'session') return link.obstacle;
-  if (/401|403|unauthorized|forbidden|api[_ ]?key|authent|permission refus/i.test(error)) return 'auth';
+  if (/401|unauthorized|invalid api key|invalid token|authentication failed/i.test(error)) return 'auth';
   if (/429|quota|rate limit|too many requests/i.test(error)) return 'quota';
   if (/503|502|504|unavailable|econn|etimedout|timeout|temporairement/i.test(error)) return 'availability';
   if (/does not exist|did you mean|unknown property|no such property/i.test(error)) return 'property';
@@ -274,8 +326,13 @@ export function stripTypeSuppression(code: string): string {
  * Correction d'une seule acquisition.
  * Une propriété absente n'est renommée que si le schéma la suggère et qu'elle n'est pas contredite par la réponse brute.
  */
-export function correctAcquisition(code: string, error: string, observed = ''): { code: string | null; diagnostic: DiagnosticClass; strategy: 'stop' | 'once' | 'reinspect' | 'raw' | 'rewrite' | 'minimal' } {
+export function correctAcquisition(code: string, error: string, observed = ''): { code: string | null; diagnostic: DiagnosticClass; strategy: 'stop' | 'once' | 'reinspect' | 'raw' | 'rewrite' | 'minimal' | 'degrade' } {
   const diagnostic = classifyDiagnostic(error);
+  if (diagnostic === 'restriction') {
+    const param = restrictedParameter(error);
+    const stripped = param ? dropOptionalArgument(code, param) : null;
+    return stripped ? { code: stripped, diagnostic, strategy: 'degrade' } : { code: null, diagnostic, strategy: 'minimal' };
+  }
   if (diagnostic === 'auth' || diagnostic === 'quota') return { code: null, diagnostic, strategy: 'stop' };
   if (diagnostic === 'availability' || diagnostic === 'transport' || diagnostic === 'session') return { code: null, diagnostic, strategy: 'once' };
   if (diagnostic === 'structure') return { code: null, diagnostic, strategy: 'raw' };

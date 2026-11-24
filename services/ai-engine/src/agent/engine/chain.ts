@@ -43,7 +43,8 @@ const SAME: Array<[RegExp, RegExp]> = [
   [/nombre|count|total|taux|score/, /count|total|rate|score|nombre/],
 ];
 
-const SKIP_PROPER = new Set(['affiche', 'montre', 'avec', 'pour', 'dans', 'sous', 'voici', 'ensuite', 'tableau', 'liste', 'page', 'carte', 'workflow', 'workflows', 'commit', 'commits', 'issue', 'issues', 'release', 'releases', 'note', 'notes', 'alerte', 'alertes', 'utilise', 'recupere', 'interface', 'element', 'dashboard', 'titre', 'cree', 'creer', 'haut', 'bas', 'milieu', 'mets', 'ajoute']);
+const SKIP_PROPER = new Set(['affiche', 'montre', 'avec', 'pour', 'dans', 'sous', 'voici', 'ensuite', 'tableau', 'liste', 'page', 'carte', 'cartes', 'kpi', 'kpis', 'graphique', 'courbe', 'bouton', 'formulaire', 'composant', 'panneau', 'grille', 'workflow', 'workflows', 'commit', 'commits', 'issue', 'issues', 'release', 'releases', 'note', 'notes', 'alerte', 'alertes', 'utilise', 'recupere', 'interface', 'element', 'dashboard', 'titre', 'cree', 'creer', 'haut', 'bas', 'milieu', 'mets', 'ajoute', 'change', 'retire', 'renomme', 'supprime', 'deplace']);
+const QUANTITY = new Set(['un', 'une', 'deux', 'trois', 'quatre', 'cinq', 'six', 'sept', 'huit', 'neuf', 'dix', 'onze', 'douze', 'treize', 'quatorze', 'quinze', 'seize', 'vingt', 'trente', 'quarante', 'cinquante', 'cent', 'mille', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten']);
 
 const MEASURE = /\b(prix|price|volume|variation|capitalisation|market cap|date|nom|statut|nombre|total|taux|score|plus haut)\b/gi;
 const VIEW = /\b(\d+\s+)?(cartes?|kpis?|courbe|graphique|tableau|liste|grille|page|écran|ecran|panneau|horodatage|top\s*\d+)\b([^.;\n]{0,90})/gi;
@@ -91,7 +92,7 @@ export function claimsFromPrompt(prompt: string): Claim[] {
   for (const match of prompt.matchAll(/\b(valider|valide|déclencher|declencher|publier|exécuter|executer)\b/gi)) add('operation', match[1]);
   for (const match of prompt.matchAll(/[«"]([^»"]{2,80})[»"]/g)) add('meta', match[1]);
   for (const match of prompt.matchAll(/\b([A-Z]{2,6})\b/g)) {
-    if (!/^(MCP|API|EUR|USD|GBP|JPY|CHF|GET|SDK|HTTP|KPI)$/.test(match[1])) add('entite', match[1]);
+    if (!/^(MCP|API|EUR|USD|GBP|JPY|CHF|GET|SDK|HTTP|KPI)$/.test(match[1]) && !QUANTITY.has(fold(match[1]))) add('entite', match[1]);
   }
   const named = prompt.match(/donn[ée]es de\s+([^,(.]{2,40})/i);
   if (named) add('entite', named[1]);
@@ -100,7 +101,7 @@ export function claimsFromPrompt(prompt: string): Claim[] {
     const at = match.index ?? 0;
     const before = bare.slice(0, at);
     if (before.trim().length === 0 || /[.!?]\s*$/.test(before)) continue;
-    if (SKIP_PROPER.has(fold(match[1]))) continue;
+    if (SKIP_PROPER.has(fold(match[1])) || QUANTITY.has(fold(match[1]))) continue;
     add('entite', match[1]);
   }
   for (const match of prompt.matchAll(/\b(issues?|commits?|releases?|pull requests?|commandes?|topics?|orders?|workflows?|notes?|alerts?)\b/gi)) add('collection', match[1]);
@@ -173,6 +174,17 @@ export function hitsInRows(rows: Array<Record<string, unknown>>, needles: string
   return hits;
 }
 
+/** Un identifiant passé au SDK tient l'entité, même si la réponse brute ne le répète pas. */
+function argumentHolds(proof: ChainProof | undefined, needle: string): boolean {
+  const code = typeof proof?.args?.code === 'string' ? proof.args.code : '';
+  const want = fold(needle);
+  if (want.length < 2) return false;
+  const named = [...code.matchAll(/([A-Za-z_][\w]*)\s*:\s*['"]([^'"]+)['"]/g)];
+  if (named.some((match) => /^(id|slug|symbol|name|currency|devise|vs_currency)$/i.test(match[1] ?? '') && fold(match[2] ?? '') === want)) return true;
+  const positional = [...code.matchAll(/client(?:\.\w+)+\(\s*['"]([^'"]+)['"]/g)];
+  return positional.some((match) => fold(match[1] ?? '') === want);
+}
+
 function proofTouches(proof: ChainProof | undefined, needle: string): boolean {
   if (!proof || needle.trim().length < 2) return false;
   const blob = fold(JSON.stringify({ args: proof.args ?? {}, values: proof.values ?? [], docs: proof.docs ?? '' }));
@@ -203,7 +215,9 @@ export function linkChain(prompt: string, fields: string[], proof?: ChainProof):
       const hit = (proof?.hits ?? []).find((item) => fold(item.needle) === fold(claim.text) || valueHolds(item.value, claim.text));
       if (hit) return { claim: claim.id, text: claim.text, state: 'tenu' as const, field: `${hit.field}#${hit.rowId}` };
       const literal = business.find((item) => fold(item) === fold(claim.text));
-      return literal ? { claim: claim.id, text: claim.text, state: 'tenu' as const, field: literal } : open;
+      if (literal) return { claim: claim.id, text: claim.text, state: 'tenu' as const, field: literal };
+      if (argumentHolds(proof, claim.text)) return { claim: claim.id, text: claim.text, state: 'tenu' as const, field: 'argument' };
+      return open;
     }
     if (claim.kind === 'champ') {
       const field = business.find((item) => fold(item) === fold(claim.text) || fold(item).endsWith(`.${fold(claim.text)}`));
