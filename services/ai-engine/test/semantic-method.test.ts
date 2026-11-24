@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { classifyRestriction, dropOptionalArgument, planAcquisitions } from '../src/agent/engine/execute-code.ts';
-import { claimsFromPrompt } from '../src/agent/engine/chain.ts';
+import { claimsFromPrompt, linkChain, observedFields } from '../src/agent/engine/chain.ts';
 import { acquisitionsOf, attemptKey, callIdentity, methodFits, registerMethods, requirementsOf, responseInScope, selectMethod, type MethodDoc } from '../src/agent/engine/sdk-scope.ts';
 import { collectSource } from '../src/agent/engine/source-offer.ts';
+import { reviewSource } from '../src/agent/engine/product-owner.ts';
 
 const catalog: MethodDoc[] = [
   { method: 'client.catalog.totals', summary: 'totaux de tout le catalogue', response: '{ active_count: number, total_market_cap: number }', params: '' },
@@ -256,4 +257,105 @@ test('un échec local laisse vivre les autres acquisitions', async () => {
   assert.match(offer.text, /total/);
   assert.match(offer.log, /AUTH_INVALID|auth/);
   assert.doesNotMatch(offer.text, /Données obtenues : aucune/);
+});
+
+const domains = [
+  { prompt: 'Affiche le prix de Orion.', entity: 'Orion', measure: 'prix', field: 'price' },
+  { prompt: 'Affiche le nombre d’issues du dépôt Acme.', entity: 'Acme', measure: 'nombre', field: 'count' },
+  { prompt: 'Affiche le volume de la cuve Nord.', entity: 'Nord', measure: 'volume', field: 'volume' },
+  { prompt: 'Affiche le score du spécimen Cedrus.', entity: 'Cedrus', measure: 'score', field: 'score' },
+];
+
+test('une valeur observée tient la mesure, quel que soit le domaine, l’ordre et la forme', () => {
+  for (const domain of domains) {
+    const req = requirementsOf(domain.prompt);
+    assert.ok(req.measures.some((measure) => measure.toLowerCase() === domain.measure), domain.prompt);
+    const noise = ['market', 'symbol', 'index_id', 'ref', 'code', 'bucket', 'lane', 'note'];
+    const labelRow = (name: string) => {
+      const row: Record<string, unknown> = { [domain.field]: 'élevé', delta: 1.2, name };
+      for (const key of noise) row[key] = key;
+      return row;
+    };
+    const crowd = [labelRow('A'), labelRow('B'), labelRow('C')];
+    const missed = responseInScope(crowd, req, { args: `id="${domain.entity}"` });
+    assert.equal(missed.ok, false, domain.prompt);
+    assert.match(missed.reason, /population|mesure/, domain.prompt);
+
+    const nested = { name: domain.entity, [domain.field]: { value: '4,5' }, delta: null };
+    const shuffled = Object.fromEntries([...noise].reverse().map((key) => [key, key]));
+    const held = responseInScope([{ ...shuffled, ...nested }], req);
+    assert.equal(held.ok, true, domain.prompt);
+    const seen = observedFields([nested]);
+    assert.ok(seen.measured.some((field) => field.startsWith(domain.field)), domain.prompt);
+
+    const chain = linkChain(domain.prompt, [domain.field, 'delta', 'name'], { measured: [], witness: [domain.field] });
+    assert.equal(chain.links.find((link) => link.text === domain.measure)?.state, 'ouvert', domain.prompt);
+  }
+});
+
+test('le recensement ne laisse pas la documentation recouvrir la mesure', () => {
+  const docs = [{ method: 'a', summary: 'b', description: 'c', endpoint: 'd', params: 'e', response: 'f' }];
+  const row: Record<string, unknown> = { market: 'x', symbol: 'y', index_id: 'i', ref: 'r', code: 'c', bucket: 'b', lane: 'l', note: 'n', price: 12, name: 'Orion' };
+  const verdict = reviewSource('Affiche le prix de Orion.', [], [
+    { tool: 'atlas__search_docs', args: {}, ok: true, rows: docs },
+    { tool: 'atlas__execute', args: {}, ok: true, rows: [row] },
+  ]);
+  assert.equal(verdict.ok, true);
+  assert.equal(verdict.missing.includes('prix'), false);
+});
+
+test('une population sans l’entité est refusée puis une autre méthode est retenue', async () => {
+  const calls: string[] = [];
+  const offer = await collectSource(
+    'Affiche le score du spécimen Cedrus.',
+    '',
+    async () => ([
+      { id: 'herbier__search_docs', description: 'docs SDK', serverName: 'Herbier', schema: { required: ['query'], properties: { query: { type: 'string' } } } },
+      { id: 'herbier__execute', description: 'Runs JavaScript code to interact with the API', serverName: 'Herbier', schema: { required: ['code'], properties: { code: { type: 'string' } } } },
+    ]),
+    async (tool, args) => {
+      const code = String(args.code ?? '');
+      calls.push(code || tool);
+      if (tool.endsWith('search_docs')) {
+        return [
+          { method: 'client.specimens.page', summary: 'fiche', params: 'id: string', response: '{ name: string, score: number }' },
+          { method: 'client.specimens.read', summary: 'fiche', params: 'id: string', response: '{ name: string, score: number }' },
+        ];
+      }
+      if (/specimens\.page/.test(code)) return Array.from({ length: 20 }, (_, index) => ({ name: `lot-${index}`, score: 'élevé', delta: index }));
+      if (/specimens\.read/.test(code)) return [{ name: 'Cedrus', score: { value: '4,5' } }];
+      return [];
+    },
+    async () => '{"reads":[{"tool":"herbier__search_docs","args":{"query":"score"}}]}',
+    async (mission) => {
+      const imposed = mission.match(/Méthode imposée : (\S+)/)?.[1] ?? '';
+      if (imposed === 'client.specimens.page') return 'async function run(client) { return client.specimens.page("Cedrus"); }';
+      return 'async function run(client) { return client.specimens.read("Cedrus"); }';
+    },
+  );
+  assert.equal(calls.filter((code) => /specimens\.page/.test(code)).length, 1);
+  assert.equal(calls.some((code) => /specimens\.read/.test(code)), true);
+  assert.equal(offer.canBuild, true);
+  assert.doesNotMatch(offer.text, /recherche incomplète/);
+});
+
+test('un constat de découverte ne parle plus à la place d’une lecture déjà faite', async () => {
+  const offer = await collectSource(
+    'Affiche le volume de la cuve Nord.',
+    '',
+    async () => ([
+      { id: 'cuves__search_docs', description: 'docs SDK', serverName: 'Cuves', schema: { required: ['query'], properties: { query: { type: 'string' } } } },
+      { id: 'cuves__execute', description: 'Runs JavaScript code to interact with the API', serverName: 'Cuves', schema: { required: ['code'], properties: { code: { type: 'string' } } } },
+    ]),
+    async (tool, args) => {
+      if (tool.endsWith('search_docs')) return [{ method: 'client.tanks.list', summary: 'liste', params: 'limit?: number', response: '[{ name: string, volume: number }]' }];
+      if (String(args.code ?? '').includes('tanks.list')) return Array.from({ length: 8 }, (_, index) => ({ name: `cuve-${index}`, volume: index + 1 }));
+      return [];
+    },
+    async () => '{"reads":[{"tool":"cuves__search_docs","args":{"query":"volume"}}]}',
+    async () => 'async function run(client) { return client.tanks.list({ limit: 8 }); }',
+  );
+  assert.doesNotMatch(offer.text, /recherche incomplète/);
+  assert.match(offer.text, /Nord/);
+  assert.equal(offer.canBuild, false);
 });

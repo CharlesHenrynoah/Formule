@@ -4,7 +4,7 @@
  */
 import { keepNamedServer, mentionedServers, type SourceTool } from '../../app-agents/ingest.ts';
 import { keepSpan } from './series.ts';
-import { claimsFromPrompt, hitsInRows, linkChain, type ChainProof } from './chain.ts';
+import { claimsFromPrompt, hitsInRows, linkChain, measurableFields, observedFields, rowsAbout, type ChainProof } from './chain.ts';
 import { globalShape } from './sdk-scope.ts';
 import { classifyLink } from '../../../../mcp-hub/src/link-state.ts';
 
@@ -40,13 +40,32 @@ function serverOf(id: string): string {
   return id.includes('__') ? id.split('__')[0] : '';
 }
 
+function isDocRow(row: Record<string, unknown>): boolean {
+  const keys = Object.keys(row).filter((key) => key !== 'id');
+  return keys.length > 0 && keys.every((key) => DOC_FIELD.test(key));
+}
+
 function fieldsOf(reads: OwnerRead[]): string[] {
-  const keys = new Set<string>();
+  const business: string[] = [];
+  const docs: string[] = [];
+  const seen = new Set<string>();
+  const businessRows: Array<Record<string, unknown>> = [];
   for (const read of reads) {
     if (!read.ok) continue;
-    for (const row of read.rows) for (const key of Object.keys(row)) if (key !== 'id' && keys.size < 10) keys.add(key);
+    for (const row of read.rows) {
+      const doc = isDocRow(row);
+      if (!doc) businessRows.push(row);
+      for (const key of Object.keys(row)) {
+        if (key === 'id' || seen.has(key)) continue;
+        seen.add(key);
+        (doc ? docs : business).push(key);
+      }
+    }
   }
-  return [...keys];
+  const pool = business.length ? business : docs;
+  const measured = measurableFields(businessRows);
+  const holds = (key: string) => measured.some((field) => field === key || field.startsWith(`${key}.`));
+  return [...pool].sort((a, b) => Number(holds(b)) - Number(holds(a))).slice(0, 24);
 }
 
 export function fieldsLookLikeDocs(fields: string[]): boolean {
@@ -160,7 +179,13 @@ function samplesOf(reads: OwnerRead[]): OwnerSample[] {
       args: read.args,
       rows: keepSpan(read.rows, 240).map((row) => {
         const clipped: Record<string, unknown> = {};
-        for (const [key, value] of Object.entries(row).slice(0, 12)) clipped[key] = typeof value === 'string' && value.length > 180 ? value.slice(0, 180) : value;
+        const measured = measurableFields([row]);
+        const holds = (key: string) => measured.some((field) => field === key || field.startsWith(`${key}.`));
+        const keys = Object.keys(row).sort((a, b) => Number(holds(b)) - Number(holds(a)));
+        for (const key of keys.slice(0, 12)) {
+          const value = row[key];
+          clipped[key] = typeof value === 'string' && value.length > 180 ? value.slice(0, 180) : value;
+        }
         return clipped;
       }),
     }));
@@ -260,7 +285,9 @@ export function reviewSource(
 
   const needles = claimsFromPrompt(prompt).filter((claim) => claim.kind === 'entite' || claim.kind === 'filtre').map((claim) => claim.text);
   const hits = okReads.filter((read) => read.rows.some((row) => !Object.keys(row).every((key) => /^(method|endpoint|summary|description|params|response|query|language|path|url)$/i.test(key)))).flatMap((read) => hitsInRows(read.rows, needles, read.tool));
-  const proof: ChainProof = { ...proofOf(okReads), hits };
+  const businessRows = okReads.flatMap((read) => read.rows.filter((row) => !isDocRow(row)));
+  const seen = observedFields(rowsAbout(businessRows, needles));
+  const proof: ChainProof = { ...proofOf(okReads), hits, measured: seen.measured, witness: seen.witness, population: businessRows.length };
   const chain = linkChain(prompt, fields, proof);
   if (docsMismatchIntent(thought, fields) || !chain.ok) {
     const missing = chain.missing.length ? chain.missing : thought.expectedFields;

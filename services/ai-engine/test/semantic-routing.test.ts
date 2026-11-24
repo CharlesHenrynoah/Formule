@@ -190,6 +190,7 @@ test('GitHub : une entité absente ne bascule pas vers un outil de validation', 
   assert.equal(wrote, 0);
   assert.equal(offer.canBuild, false);
   assert.match(offer.log, /VALIDATE/);
-  assert.match(offer.text, /recherche incomplète/);
+  assert.match(offer.text, /Orion/);
+  assert.doesNotMatch(offer.text, /recherche incomplète/);
   assert.doesNotMatch(calls.join(' '), /validate/);
 });

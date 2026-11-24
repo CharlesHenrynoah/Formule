@@ -23,7 +23,7 @@ import {
 import { classifyLink } from '../../../../mcp-hub/src/link-state.ts';
 import { admitExecute } from './execute-gate.ts';
 import { reviewSource } from './product-owner.ts';
-import { acquisitionNeeds, claimsFromPrompt, hitsInRows, linkChain } from './chain.ts';
+import { acquisitionNeeds, claimsFromPrompt, hitsInRows, linkChain, measurableFields, observedFields, rowsAbout } from './chain.ts';
 import { classifySearch, profileTool } from './capabilities.ts';
 import { readsFromSelector, selectorPrompt } from './select-mcp.ts';
 import { routeDemand } from './pose.ts';
@@ -123,16 +123,24 @@ export function projectResponse(data: unknown): { state: ResponseState; rows: Ar
   return { state: 'inconnu', rows: [], collections: {}, shape: observeShape(data) };
 }
 
-function roleOf(key: string, value: unknown): 'date' | 'libellé' | 'nombre' | 'état' {
-  if (/state|status/i.test(key)) return 'état';
-  if (/date|created|published|updated|merged|closed/i.test(key) || (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}/.test(value))) return 'date';
-  if (typeof value === 'number') return 'nombre';
+function columnRole(key: string, rows: Array<Record<string, unknown>>): 'date' | 'libellé' | 'nombre' | 'état' {
+  const values = rows.map((row) => row[key]).filter((value) => value != null && value !== '');
+  if (/state|status|etat|statut/i.test(key)) return 'état';
+  if (values.some((value) => typeof value === 'number' && Number.isFinite(value) || (typeof value === 'string' && /^-?\d+(?:[.,]\d+)?$/.test(value.trim())))) return 'nombre';
+  if (/date|created|published|updated|merged|closed|timestamp/i.test(key) || values.some((value) => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}/.test(value))) return 'date';
   return 'libellé';
 }
 
-function fieldsOf(row: Record<string, unknown> | undefined): string {
-  if (!row) return 'aucun champ observé';
-  return Object.entries(row).slice(0, 8).map(([key, value]) => `${key} (${roleOf(key, value)})`).join(', ');
+function fieldsOf(rows: Array<Record<string, unknown>>): string {
+  const list = rows.filter((row) => row && !isDocumentationRow(row));
+  const pool = list.length ? list : rows;
+  if (!pool.length) return 'aucun champ observé';
+  const keys = [...new Set(pool.flatMap((item) => Object.keys(item)))];
+  const ranked = [...keys].sort((a, b) => {
+    const score = (key: string) => columnRole(key, pool) === 'nombre' ? 0 : columnRole(key, pool) === 'date' ? 1 : 2;
+    return score(a) - score(b);
+  });
+  return ranked.slice(0, 8).map((key) => `${key} (${columnRole(key, pool)})`).join(', ');
 }
 
 function norm(value: string): string {
@@ -180,7 +188,8 @@ export function offerFromReads(prompt: string, reads: SourceRead[], page = ''): 
   const holdsDemand = (row: Record<string, unknown>) => {
     const fields = Object.keys(row).filter((key) => key !== 'collection');
     const hits = hitsInRows([row], needles);
-    const chain = linkChain(prompt, fields, { hits });
+    const seen = observedFields([row]);
+    const chain = linkChain(prompt, fields, { hits, measured: seen.measured, witness: seen.witness, population: 1 });
     const needs = acquisitionNeeds(chain);
     if (!needs.length) return true;
     const entityNeeds = needs.some((need) => need.kind === 'entite' || need.kind === 'filtre');
@@ -199,7 +208,7 @@ export function offerFromReads(prompt: string, reads: SourceRead[], page = ''): 
     ? reads.map((read) => {
       const where = [read.args.owner, read.args.repo].filter(Boolean).join('/') || String(Object.entries(read.args).find(([key, value]) => key !== 'language' && key !== 'code' && typeof value === 'string' && value.length > 2 && value.length < 80 && !/function|=>|client\./.test(value))?.[1] ?? '');
       if (!read.ok) return `${read.tool}${where ? ` sur ${where}` : ''} a échoué : ${read.error ?? 'lecture impossible'}.`;
-      const fields = fieldsOf(read.rows[0]);
+      const fields = fieldsOf(read.rows);
       if (read.rows.length && !read.rows.every((row) => isDocumentationRow(row)) && !useful(read)) return `${read.tool}${where ? ` sur ${where}` : ''} : ${read.rows.length} ligne, champs hors demande : ${fields}.`;
       return `${read.tool}${where ? ` sur ${where}` : ''} : ${read.rows.length} ligne${read.rows.length > 1 ? 's' : ''}. Champs : ${fields}.`;
     })
@@ -340,10 +349,11 @@ function filterArgs(tool: SourceTool, prompt: string, needle: string): Record<st
 }
 
 function hasDataNeed(prompt: string, done: SourceRead[]): boolean {
-  const rows = done.filter((read) => read.ok).flatMap((read) => read.rows);
+  const rows = done.filter((read) => read.ok).flatMap((read) => read.rows).filter((row) => !isDocumentationRow(row));
   const fields = [...new Set(rows.flatMap((row) => Object.keys(row)))];
   const needles = claimsFromPrompt(prompt).filter((claim) => claim.kind === 'entite' || claim.kind === 'filtre').map((claim) => claim.text);
-  const chain = linkChain(prompt, fields, { hits: hitsInRows(rows, needles) });
+  const seen = observedFields(rowsAbout(rows, needles));
+  const chain = linkChain(prompt, fields, { hits: hitsInRows(rows, needles), measured: seen.measured, witness: seen.witness, population: rows.length });
   return acquisitionNeeds(chain).some((need) => DATA_KINDS.has(need.kind));
 }
 
@@ -530,7 +540,12 @@ export async function collectSource(
         liveDocs = docs;
         const businessRows = () => done.filter((read) => read.ok && read.rows.some((row) => !isDocumentationRow(row))).flatMap((read) => read.rows.filter((row) => !isDocumentationRow(row)));
         const businessFields = () => [...new Set(businessRows().flatMap((row) => Object.keys(row)))];
-        const progress = () => acquisitionProgress(prompt, businessFields());
+        const progress = () => {
+          const rows = businessRows();
+          const needles = claimsFromPrompt(prompt).filter((claim) => claim.kind === 'entite' || claim.kind === 'filtre').map((claim) => claim.text);
+          const seen = observedFields(rowsAbout(rows, needles));
+          return acquisitionProgress(prompt, businessFields(), { hits: hitsInRows(rows, needles), measured: seen.measured, witness: seen.witness, population: rows.length });
+        };
         const satisfied = (acq: Acquisition) => businessRows().length > 0 && responseInScope(businessRows(), acq, { args: carried }).ok;
         let held = progress().held.length;
         const ceiling = Math.min(12, Math.max(4, (plan.length || 1) * 3));
@@ -707,6 +722,8 @@ export async function collectSource(
     const { skip: skipShow } = mentionedServers(prompt, catalog);
     const visible = done.filter((read) => !skipShow.includes(serverOf(read.tool)) && !(/^demo/.test(serverOf(read.tool)) && skipShow.some((id) => /^demo/.test(id))));
     const offer = offerFromReads(prompt, visible.length ? visible : done.filter((read) => !/^demo/.test(serverOf(read.tool))), page);
+    const sawBusiness = done.some((read) => read.ok && read.rows.some((row) => !isDocumentationRow(row)));
+    if (sawBusiness) gap = '';
     const missing = owner.ok ? 'aucune' : (owner.missing.filter((item) => item !== 'lecture métier').join(', ') || gap || 'lecture exploitable');
     const result = owner.ok && offer.canBuild ? 'exigences tenues' : gap || (offer.samples.length ? 'acquisitions réussies conservées, exigences encore ouvertes' : 'rien ne peut être généré');
     const text = [

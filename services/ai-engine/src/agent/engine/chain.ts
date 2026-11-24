@@ -24,7 +24,7 @@ export type Chain = {
   missing: string[];
 };
 
-export type ChainProof = { args?: Record<string, unknown>; values?: unknown[]; docs?: string; hits?: ValueHit[] };
+export type ChainProof = { args?: Record<string, unknown>; values?: unknown[]; docs?: string; hits?: ValueHit[]; measured?: string[]; witness?: string[]; population?: number };
 
 const NOT_ACQUIRED = new Set<ClaimKind>(['meta', 'vue', 'action', 'operation']);
 
@@ -174,8 +174,60 @@ export function hitsInRows(rows: Array<Record<string, unknown>>, needles: string
   return hits;
 }
 
-/** Un identifiant passé au SDK tient l'entité, même si la réponse brute ne le répète pas. */
+function scalarKind(value: unknown): 'nombre' | 'date' | 'texte' | null {
+  if (typeof value === 'number') return Number.isFinite(value) ? 'nombre' : null;
+  if (typeof value === 'boolean') return 'texte';
+  if (typeof value !== 'string') return null;
+  const text = value.trim();
+  if (!text) return null;
+  if (/^-?\d+(?:[.,]\d+)?$/.test(text)) return 'nombre';
+  if (/^\d{4}-\d{2}-\d{2}/.test(text)) return 'date';
+  return 'texte';
+}
+
+/** Champs dont une valeur observée est une quantité, une date, ou simplement présente. */
+export function observedFields(rows: Array<Record<string, unknown>>): { measured: string[]; witness: string[] } {
+  const measured = new Set<string>();
+  const witness = new Set<string>();
+  const visit = (value: unknown, field: string) => {
+    const kind = scalarKind(value);
+    if (kind) {
+      if (field) witness.add(field);
+      if (field && (kind === 'nombre' || kind === 'date')) measured.add(field);
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item, field);
+      return;
+    }
+    if (value && typeof value === 'object') {
+      for (const [key, child] of Object.entries(value as Record<string, unknown>)) visit(child, field ? `${field}.${key}` : key);
+    }
+  };
+  for (const row of rows) for (const [key, value] of Object.entries(row)) if (key !== 'collection') visit(value, key);
+  return { measured: [...measured], witness: [...witness] };
+}
+
+export function measurableFields(rows: Array<Record<string, unknown>>): string[] {
+  return observedFields(rows).measured;
+}
+
+/** Une date, un état ou un nom se prouvent par leur forme. Les autres mesures se prouvent par une quantité. */
+export function quantitativeClaim(text: string): boolean {
+  return /\b(date|jour|heure|horodat|etat|statut|status|nom|name|titre|title)\b/.test(fold(text)) === false;
+}
+
+/** Les lignes qui portent l'entité. Une population qui ne la contient pas ne prête pas ses mesures. */
+export function rowsAbout(rows: Array<Record<string, unknown>>, entities: string[]): Array<Record<string, unknown>> {
+  if (!entities.length) return rows;
+  const hits = new Set(hitsInRows(rows, entities).map((hit) => hit.rowId));
+  if (!hits.size) return rows.length <= 1 ? rows : [];
+  return rows.filter((row, index) => hits.has(rowIdOf(row, index)));
+}
+
+/** Un identifiant passé au SDK tient l'entité d'une fiche, pas d'une population qui ne la contient pas. */
 function argumentHolds(proof: ChainProof | undefined, needle: string): boolean {
+  if ((proof?.population ?? 0) > 1) return false;
   const code = typeof proof?.args?.code === 'string' ? proof.args.code : '';
   const want = fold(needle);
   if (want.length < 2) return false;
@@ -201,14 +253,21 @@ export function acquisitionNeeds(chain: Chain): Array<{ text: string; kind: Clai
 
 export function linkChain(prompt: string, fields: string[], proof?: ChainProof): Chain {
   const claims = claimsFromPrompt(prompt);
-  const clean = [...new Set(fields.map((field) => field.trim()).filter(Boolean))].slice(0, 12);
+  const clean = [...new Set(fields.map((field) => field.trim()).filter(Boolean))].slice(0, 32);
   const docsOnly = clean.length > 0 && clean.every((field) => DOC_FIELD.test(field));
   const business = clean.filter((field) => !DOC_FIELD.test(field));
   const links: Link[] = claims.map((claim) => {
     const open = { claim: claim.id, text: claim.text, state: 'ouvert' as const };
     if (claim.kind === 'mesure' || claim.kind === 'dimension') {
-      const field = clean.find((item) => !DOC_FIELD.test(item) && covers(claim.text, item))
-        ?? (wantsDocs(prompt) ? clean.find((item) => covers(claim.text, item)) : undefined);
+      const named = clean.filter((item) => !DOC_FIELD.test(item) && covers(claim.text, item));
+      const quantitative = quantitativeClaim(claim.text);
+      const pool = proof?.measured
+        ? (quantitative ? proof.measured : [...(proof.witness ?? []), ...proof.measured])
+        : null;
+      const confirmed = pool
+        ? named.find((item) => pool.some((got) => got === item || got.startsWith(`${item}.`) || item.startsWith(`${got}.`)))
+        : named[0];
+      const field = confirmed ?? (wantsDocs(prompt) ? clean.find((item) => covers(claim.text, item)) : undefined);
       return field ? { claim: claim.id, text: claim.text, state: 'tenu' as const, field } : open;
     }
     if (claim.kind === 'entite' || claim.kind === 'filtre') {

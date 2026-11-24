@@ -3,7 +3,7 @@
  * Un champ commun ne rend pas deux périmètres interchangeables.
  */
 import ts from 'typescript';
-import { claimsFromPrompt, hitsInRows, linkChain, termCovers, type ChainProof } from './chain.ts';
+import { claimsFromPrompt, hitsInRows, linkChain, observedFields, quantitativeClaim, rowsAbout, termCovers, type ChainProof } from './chain.ts';
 
 export type Scope = 'global' | 'individuel' | 'agrege' | 'historique';
 export type Grain = 'point' | 'serie' | 'liste';
@@ -248,8 +248,9 @@ export function responseInScope(rows: Array<Record<string, unknown>>, req: Requi
   if (!rows.length) return { ok: false, reason: 'réponse vide', obtained: [], scopeMismatch: false, carried: carriedLabels };
   const fields = [...new Set(rows.flatMap((row) => Object.keys(row)))].filter((field) => field !== 'collection');
   const obtained = fields.slice(0, 12);
-  const measuresMissing = req.measures.filter((measure) => !fields.some((field) => termCovers(measure, field)));
-  const entityMissing = req.entities.filter((entity) => !hitsInRows(rows, [entity]).length && !kept.some((item) => /id|slug|symbol|name/i.test(item.key) && tokenMatches(item.value, entity)));
+  const entityInValues = (entity: string) => hitsInRows(rows, [entity]).length > 0;
+  const entityInArgs = (entity: string) => rows.length <= 1 && kept.some((item) => /id|slug|symbol|name/i.test(item.key) && tokenMatches(item.value, entity));
+  const entityMissing = req.entities.filter((entity) => !entityInValues(entity) && !entityInArgs(entity));
   if (req.scope !== 'global' && globalShape(fields)) {
     return { ok: false, reason: 'périmètre global', obtained, scopeMismatch: true, carried: carriedLabels };
   }
@@ -257,7 +258,21 @@ export function responseInScope(rows: Array<Record<string, unknown>>, req: Requi
   if (req.grain === 'serie' && !dated) {
     return { ok: false, reason: 'granularité : série attendue', obtained, scopeMismatch: true, carried: carriedLabels };
   }
-  if (measuresMissing.length) return { ok: false, reason: `mesure absente : ${measuresMissing.join(', ')}`, obtained, scopeMismatch: false, carried: carriedLabels };
+  if (req.scope !== 'global' && req.entities.length && entityMissing.length && rows.length > 1) {
+    return { ok: false, reason: `population hors entité : ${entityMissing.join(', ')}`, obtained, scopeMismatch: true, carried: carriedLabels };
+  }
+  const about = rowsAbout(rows, req.entities);
+  const seen = observedFields(about);
+  const measuresMissing = req.measures.filter((measure) => {
+    const quantitative = quantitativeClaim(measure);
+    const pool = quantitative ? seen.measured : [...seen.witness, ...seen.measured];
+    return !pool.some((field) => termCovers(measure, field));
+  });
+  if (measuresMissing.length) {
+    const named = measuresMissing.filter((measure) => fields.some((field) => termCovers(measure, field)));
+    const reason = named.length ? `mesure sans valeur : ${named.join(', ')}` : `mesure absente : ${measuresMissing.join(', ')}`;
+    return { ok: false, reason, obtained, scopeMismatch: false, carried: carriedLabels };
+  }
   if (req.scope !== 'global' && req.entities.length && entityMissing.length) return { ok: false, reason: `entité absente : ${entityMissing.join(', ')}`, obtained, scopeMismatch: false, carried: carriedLabels };
   return { ok: true, reason: carriedLabels.length ? `périmètre tenu (${carriedLabels.join(', ')})` : 'périmètre tenu', obtained, scopeMismatch: false, carried: carriedLabels };
 }
