@@ -33,6 +33,14 @@ test('une courbe de commits placée sous les releases vise commits, et l\'outil 
   assert.match(mission, /aucun autre serveur/);
 });
 
+test('nommer une collection suffit à demander sa lecture', () => {
+  const route = routeDemand('Crée une interface avec les workflows de l’instance.');
+  assert.equal(route.collection, 'workflows');
+  assert.equal(route.data, true);
+  const color = routeDemand('Change la couleur du bouton Envoyer');
+  assert.equal(color.data, false);
+});
+
 test('le routeur classe une demande qui n\'est pas un dépôt', () => {
   const orders = routeDemand('Ajoute une page de suivi des commandes du jour');
   assert.equal(orders.kind, 'page');

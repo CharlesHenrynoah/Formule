@@ -81,7 +81,8 @@ export function routeDemand(prompt: string): DemandRoute {
   const kind = added ? kindOf((added[2] ?? '').toLowerCase()) : 'element';
   const collections = collectionsInDemand(prompt);
   const collection = collections[0] ?? 'lignes';
-  const reads = kind === 'courbe' || kind === 'tableau' || kind === 'page' || /montre|affiche|nombre|compte|données|donnees|par semaine|par jour|par mois|derni[eè]r|croise/i.test(prompt);
+  const namedFamily = FAMILIES.some(([pattern]) => pattern.test(prompt));
+  const reads = namedFamily || kind === 'courbe' || kind === 'tableau' || kind === 'page' || /montre|affiche|nombre|compte|données|donnees|par semaine|par jour|par mois|derni[eè]r|croise/i.test(prompt);
   const data = reads && kind !== 'formulaire' && kind !== 'filtre' && kind !== 'action' && !(/couleur|déplace|deplace|renomme|retire|supprime/i.test(prompt) && kind !== 'courbe' && kind !== 'tableau');
   const labels = collections.map(labelOf);
   const span = /3 derniers mois/i.test(prompt) ? ' (3 derniers mois)' : '';

@@ -200,13 +200,21 @@ export function offerFromReads(prompt: string, reads: SourceRead[], page = ''): 
   const element = `Ce qui peut être généré : ${route.kind} « ${named || route.title} ».`;
   const obtained = reads.filter(business);
   const failed = reads.filter((read) => !read.ok);
-  const summary = [
-    `Données obtenues : ${obtained.map((read) => `${read.tool} (${read.rows.length} ligne${read.rows.length > 1 ? 's' : ''})`).join(', ') || 'aucune'}.`,
-    `Données manquantes : ${ready ? 'aucune' : 'lecture exploitable'}.`,
-    `Obstacle : ${failed.map((read) => read.error).filter(Boolean).join(' ; ') || 'aucun'}.`,
-    'Correction : aucune.',
-    `Résultat : ${ready ? 'lecture exploitable' : 'rien ne peut être généré'}.`,
-  ].join('\n');
+  const summary = !route.data
+    ? [
+      'Données obtenues : aucune.',
+      'Données manquantes : aucune lecture demandée.',
+      'Obstacle : aucun.',
+      'Correction : aucune.',
+      'Résultat : génération sans lecture.',
+    ].join('\n')
+    : [
+      `Données obtenues : ${obtained.map((read) => `${read.tool} (${read.rows.length} ligne${read.rows.length > 1 ? 's' : ''})`).join(', ') || 'aucune'}.`,
+      `Données manquantes : ${ready ? 'aucune' : 'lecture exploitable'}.`,
+      `Obstacle : ${failed.map((read) => read.error).filter(Boolean).join(' ; ') || 'aucun'}.`,
+      'Correction : aucune.',
+      `Résultat : ${ready ? 'lecture exploitable' : 'rien ne peut être généré'}.`,
+    ].join('\n');
   const text = [
     summary,
     'Voici les données pour cette demande.',
