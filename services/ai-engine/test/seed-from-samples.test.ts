@@ -100,6 +100,14 @@ test('un texte renvoyé par n\'importe quel outil devient les lignes de la colle
   assert.equal(seed.pages[1].label, 'Routing');
 });
 
+test('un contrat explicite ignore l’affinité lexicale', () => {
+  const seed = seedFromSamples(`export const tools = { a: { run: (_a, db) => db.list('profil') } };`, [
+    { tool: 'github__get_me', collection: 'lectures', result: [{ id: '1', title: 'Page' }] },
+  ]);
+  assert.equal(seed.profil, undefined);
+  assert.equal(seed.lectures[0].title, 'Page');
+});
+
 test('hors GitHub, le mot me ne verse pas les lignes dans profil', () => {
   const seed = seedFromSamples(`export const tools = { a: { run: (_a, db) => db.list('profil') } };`, [
     { tool: 'atlas__get_me', result: [{ id: '1', title: 'Page' }] },

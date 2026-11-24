@@ -121,12 +121,12 @@ export function linkChain(prompt: string, fields: string[]): Chain {
       : { claim: claim.id, text: claim.text, state: 'ouvert' as const };
   });
 
-  const measures = links.filter((link) => claims.find((claim) => claim.id === link.claim)?.kind === 'mesure');
-  const views = links.filter((link) => claims.find((claim) => claim.id === link.claim)?.kind === 'vue');
-  const measuresHold = !measures.length || measures.some((link) => link.state === 'tenu');
-  const viewsHold = !views.length || views.some((link) => link.state === 'tenu');
-  const ok = clean.length > 0 && !(docsOnly && !wantsDocs(prompt)) && measuresHold && viewsHold;
+  const required = new Set(claims.filter((claim) => claim.kind === 'mesure' || (claim.kind === 'vue' && !/écran des données demandées|horodat/i.test(claim.text))).map((claim) => claim.id));
+  const missing = links.filter((link) => required.has(link.claim) && link.state !== 'tenu');
+  const viewsHold = links.some((link) => claims.find((claim) => claim.id === link.claim)?.kind === 'vue' && link.state === 'tenu');
+  const ok = clean.length > 0 && !(docsOnly && !wantsDocs(prompt)) && missing.length === 0;
 
+  const measures = links.filter((link) => claims.find((claim) => claim.id === link.claim)?.kind === 'mesure');
   const tableHeld = links.some((link) => link.state === 'tenu' && /tableau|liste|grille|top\s*\d+|écran des données/i.test(link.text));
   const allowed = tableHeld || (!measures.length && viewsHold)
     ? clean.filter((field) => wantsDocs(prompt) || !DOC_FIELD.test(field) || docsOnly)
@@ -146,6 +146,7 @@ export function linkChain(prompt: string, fields: string[]): Chain {
     `Données ${dataSeal.hash} ← ${promptSeal.hash}`,
     held.length ? `  tenus : ${held.join(' ; ')}` : '  tenus : aucun',
     open.length ? `  ouverts : ${open.join(' ; ')}` : '  ouverts : aucun',
+    missing.length ? `  exigences manquantes : ${missing.map((link) => link.text).join(' ; ')}` : '  exigences manquantes : aucune',
     ok
       ? `Écran : il devra sceller ${dataSeal.hash}. Champs permis : ${allowed.join(', ') || '(aucun)'}. Un maillon ouvert ne s'affiche pas.`
       : `Écran : chaîne rompue en ${dataSeal.hash}. Rien ne s'affiche tant qu'un maillon ouvert n'a pas de champ.`,

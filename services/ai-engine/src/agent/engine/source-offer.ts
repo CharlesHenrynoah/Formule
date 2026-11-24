@@ -17,6 +17,7 @@ import {
 import { reviewSource } from './product-owner.ts';
 import { readsFromSelector, selectorPrompt } from './select-mcp.ts';
 import { routeDemand } from './pose.ts';
+import { splitAcquisition } from '../../discovery/acquire.ts';
 import { alignPairSeries, keepSpan } from './series.ts';
 
 export type SourceRead = { tool: string; args: Record<string, unknown>; ok: boolean; error?: string; rows: Array<Record<string, unknown>> };
@@ -128,7 +129,7 @@ export function offerFromReads(prompt: string, reads: SourceRead[], page = ''): 
   const samples = reads.filter((read) => read.ok && read.rows.length).slice(0, 3).map((read) => ({
     tool: read.tool,
     args: read.args,
-    rows: read.rows.slice(0, 40).map((row) => {
+    rows: splitAcquisition(read.rows).stored.map((row) => {
       const clipped: Record<string, unknown> = {};
       for (const [key, value] of Object.entries(row).slice(0, 12)) clipped[key] = typeof value === 'string' && value.length > 180 ? value.slice(0, 180) : value;
       return clipped;

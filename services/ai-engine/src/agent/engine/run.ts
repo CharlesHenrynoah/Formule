@@ -16,6 +16,8 @@ import { runAgentLoop } from './loop.ts';
 import { bindCharts } from './bind-charts.ts';
 import { dropIncomplete, liaisonMission, poseRequest, repairDateSort, routeDemand } from './pose.ts';
 import { collectSource } from './source-offer.ts';
+import { evaluate } from '../../evaluation/evaluator.ts';
+import { inferContract } from '../../semantic/infer.ts';
 import { reviewSource } from './product-owner.ts';
 import { alignCalls, alignObserved, interfaceChecklist, observedFields } from './align-calls.ts';
 import type { SpawnAgent } from './tools/types.ts';
@@ -174,6 +176,32 @@ export async function runEngine(input: CrewInput, cfg: CrewConfig, ctx: { mcp?: 
     if (dated.changed) { await ws.write('src/App.tsx', dated.code); patched = true; note('Finition', 'dates', 'Tri des dates réparé', 'ok'); }
     else note('Finition', 'dates', 'dates déjà triées', 'ok');
     if (incremental && (ws.files.get('src/App.tsx') ?? '') === pageBefore) throw new Error("L'élément demandé n'a pas été posé : la page est inchangée.");
+    const samples = cleanSourceSamples(input.sourceSamples);
+    const certifiedRows = samples.flatMap((sample) => sample.rows);
+    const docField = /^(method|endpoint|summary|description|params|response|query|language|path|url)$/i;
+    const live = certifiedRows.filter((row) => Object.keys(row).some((key) => !docField.test(key)));
+    const basis = live.length ? live : certifiedRows;
+    if (basis.length) {
+      const contract = inferContract({
+        server: String(samples[0]?.tool ?? '').split('__')[0],
+        tool: samples[0]?.tool ?? '',
+        rawRef: 'source',
+        entity: 'lecture',
+        rows: basis,
+      });
+      const report = evaluate({
+        prompt: input.prompt,
+        page: ws.files.get('src/App.tsx') ?? '',
+        raw: basis,
+        stored: basis,
+        contract,
+      });
+      if (!report.passed) {
+        note('Finition', 'certification', report.failures.map((failure) => failure.note).join(' ; '), 'error');
+        throw new Error(`Certification impossible : ${report.failures.map((failure) => failure.note).join(' ; ')}`);
+      }
+      note('Finition', 'certification', 'contrat, mesures et rendu alignés', 'ok');
+    }
     if (patched || !tb.lastBuild?.ok) { note('Finition', 'build', 'Build final'); await tb.build(); }
     if (!tb.lastBuild?.ok || !tb.lastBuild.html) throw new Error(`Build final en échec : ${tb.lastBuild?.output.slice(-600) ?? 'aucun build'}`);
   };

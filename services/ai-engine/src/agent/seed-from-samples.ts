@@ -3,7 +3,7 @@
  * Les lignes ramenées par la liaison sont versées dans les collections que le backend lit vraiment.
  */
 
-export type McpSample = { tool: string; args?: unknown; result: unknown };
+export type McpSample = { tool: string; args?: unknown; result: unknown; collection?: string };
 
 export function collectionsInBackend(src: string): string[] {
   const names = new Set<string>();
@@ -201,14 +201,16 @@ export function seedFromSamples(toolsSource: string, samples: McpSample[], extra
     for (const group of sampleGroups(sample.result)) {
       const ranked = collections.map((collection) => ({ collection, score: affinity(collection, sample.tool, group.key) }));
       const best = ranked.reduce((max, item) => Math.max(max, item.score), 0);
-      let targets = ranked.filter((item) => item.score === best && best > 0).map((item) => item.collection);
+      let targets = sample.collection
+        ? [sample.collection]
+        : ranked.filter((item) => item.score === best && best > 0).map((item) => item.collection);
       const only = fromBackend.length === 1 ? fromBackend[0] : '';
-      if (!targets.length && only && sameServer(sample.tool, only) && !CANONICAL.includes(only)) targets = [only];
-      if (!targets.length && best === 0) {
+      if (!sample.collection && !targets.length && only && sameServer(sample.tool, only) && !CANONICAL.includes(only)) targets = [only];
+      if (!sample.collection && !targets.length && best === 0) {
         const home = collectionForRead('', [{ tool: sample.tool }]);
         if (home && home !== 'lignes') targets = [home];
       }
-      if (!targets.length || (best === 0 && !targets.length)) continue;
+      if (!targets.length) continue;
       for (const target of targets) {
         const rows = seed[target] ?? [];
         const ids = seen.get(target) ?? new Set<string>();

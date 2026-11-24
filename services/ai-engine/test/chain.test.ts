@@ -14,17 +14,22 @@ test('la doc ne prolonge pas une demande de mesures', () => {
 
 test('une mesure n’est tenue que par un champ qui la nomme', () => {
   const chain = linkChain(solana, ['name', 'price', 'volume', 'change_24h']);
-  assert.equal(chain.ok, true);
-  const prix = chain.links.find((link) => /prix/i.test(link.text) && link.state === 'tenu');
+  assert.equal(chain.ok, false);
+  const prix = chain.links.find((link) => /^prix$/i.test(link.text) && link.state === 'tenu');
   assert.equal(prix?.field, 'price');
   assert.ok(chain.links.some((link) => /capitalisation/i.test(link.text) && link.state === 'ouvert'));
-  assert.ok(chain.allowed.includes('price'));
-  assert.ok(!chain.allowed.includes('method'));
+  assert.match(chain.text, /exigences manquantes/);
+});
+
+test('toutes les mesures nommées doivent être tenues', () => {
+  const chain = linkChain('Affiche le prix et le volume.', ['price', 'volume']);
+  assert.equal(chain.ok, true);
+  assert.match(chain.text, /exigences manquantes : aucune/);
 });
 
 test('un autre serveur, d’autres mots : le fil reste le même', () => {
-  const prompt = 'Montre le tableau des issues ouvertes du dépôt, avec le statut et le nombre.';
-  const chain = linkChain(prompt, ['title', 'state', 'comments']);
+  const prompt = 'Montre le tableau des issues ouvertes du dépôt, avec le statut.';
+  const chain = linkChain(prompt, ['title', 'state']);
   assert.equal(chain.ok, true);
   assert.ok(chain.allowed.includes('state'));
   assert.match(chain.text, /tableau/);

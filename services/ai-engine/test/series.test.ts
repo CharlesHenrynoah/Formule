@@ -25,6 +25,11 @@ test('une série plus longue que le plafond garde la première et la dernière o
   assert.equal(rows?.at(-1)?.mesure, 18);
 });
 
+test('un horodatage en millisecondes garde l’heure', () => {
+  const rows = alignPairSeries({ prices: [[1_700_000_000_000, 64.2]] });
+  assert.equal(rows?.[0]?.date, '2023-11-14T22:13:20.000Z');
+});
+
 test('keepSpan sur une liste courte ne retire rien', () => {
   assert.deepEqual(keepSpan([1, 2, 3], 10), [1, 2, 3]);
 });

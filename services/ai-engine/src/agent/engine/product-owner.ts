@@ -3,6 +3,7 @@
  * (n’importe quel logiciel / MCP), puis vérifie que les lectures y correspondent.
  */
 import { keepNamedServer, mentionedServers, type SourceTool } from '../../app-agents/ingest.ts';
+import { keepSpan } from './series.ts';
 import { linkChain } from './chain.ts';
 
 export type OwnerRead = { tool: string; args: Record<string, unknown>; ok: boolean; error?: string; rows: Array<Record<string, unknown>> };
@@ -153,7 +154,7 @@ function samplesOf(reads: OwnerRead[]): OwnerSample[] {
     .map((read) => ({
       tool: read.tool,
       args: read.args,
-      rows: read.rows.slice(0, 40).map((row) => {
+      rows: keepSpan(read.rows, 240).map((row) => {
         const clipped: Record<string, unknown> = {};
         for (const [key, value] of Object.entries(row).slice(0, 12)) clipped[key] = typeof value === 'string' && value.length > 180 ? value.slice(0, 180) : value;
         return clipped;

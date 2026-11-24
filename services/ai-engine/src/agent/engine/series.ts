@@ -19,7 +19,7 @@ function markOf(value: unknown): string {
 }
 
 function shownDate(value: unknown): unknown {
-  if (typeof value === 'number' && value > 1e11) return new Date(value).toISOString().slice(0, 10);
+  if (typeof value === 'number' && value > 1e11) return new Date(value).toISOString();
   return value;
 }
 
