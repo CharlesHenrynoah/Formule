@@ -142,7 +142,7 @@ test('execute générique : docs → run(client) + retry, sans méta-outils MCP'
         const code = String(args.code ?? '');
         assert.match(code, /async function run\(client\)/);
         if (calls === 1) throw new Error('Property \'search_docs\' does not exist on type');
-        return [{ name: 'Bitcoin', symbol: 'BTC', price: 91000, volume: 2e9 }];
+        return [{ name: 'Bitcoin', symbol: 'BTC', price: 91000, volume: 2e9, timestamp: '2026-11-24' }];
       }
       return [];
     },

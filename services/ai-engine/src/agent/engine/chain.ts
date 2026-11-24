@@ -109,6 +109,10 @@ export function claimsFromPrompt(prompt: string): Claim[] {
   return claims.slice(0, 24);
 }
 
+export function termCovers(claim: string, field: string): boolean {
+  return covers(claim, field);
+}
+
 function covers(claim: string, field: string): boolean {
   const left = fold(claim);
   const right = fold(field);

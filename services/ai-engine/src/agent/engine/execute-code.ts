@@ -9,6 +9,7 @@ import ts from 'typescript';
 import type { SourceTool } from '../../app-agents/ingest.ts';
 import { claimsFromPrompt } from './chain.ts';
 import { profileTool } from './capabilities.ts';
+import { registerMethods, requirementsOf, selectMethod } from './sdk-scope.ts';
 import { classifyLink } from '../../../../mcp-hub/src/link-state.ts';
 
 export type DocHint = {
@@ -416,17 +417,15 @@ export function paramsErrorHint(lastError: string): string {
   return '';
 }
 
-/** Une acquisition = une exigence, une méthode, un retour brut. */
+/** Une acquisition = les exigences métier, une méthode au bon périmètre, un retour brut. */
 export function planAcquisitions(prompt: string, docs: DocHint[]): Array<{ id: string; claim: string; hint?: DocHint }> {
-  const claims = claimsFromPrompt(prompt).filter((claim) => claim.kind === 'mesure' || claim.kind === 'vue' || claim.kind === 'periode' || claim.kind === 'collection');
+  const claims = claimsFromPrompt(prompt).filter((claim) => claim.kind === 'mesure' || claim.kind === 'entite' || claim.kind === 'collection');
+  const chosen = selectMethod(registerMethods(docs), requirementsOf(prompt));
+  const hint = chosen ? docs.find((doc) => doc.method === chosen.method.method) : undefined;
   if (!docs.length) {
     return (claims.length ? claims : [{ id: 'c1', text: prompt.slice(0, 80) }]).slice(0, 4).map((claim) => ({ id: claim.id, claim: claim.text }));
   }
-  return claims.slice(0, 4).map((claim) => {
-    const needle = claim.text.toLowerCase().slice(0, 16);
-    const hint = docs.find((doc) => `${doc.method ?? ''} ${doc.summary ?? ''} ${doc.endpoint ?? ''} ${doc.response ?? ''} ${doc.returns ?? ''} ${doc.signature ?? ''}`.toLowerCase().includes(needle));
-    return { id: claim.id, claim: claim.text, hint };
-  });
+  return claims.slice(0, 4).map((claim) => ({ id: claim.id, claim: claim.text, hint }));
 }
 
 export function executeCodePrompt(input: {
@@ -438,6 +437,7 @@ export function executeCodePrompt(input: {
   observed?: string;
   claim?: string;
   minimal?: boolean;
+  excluded?: string[];
 }): string {
   const server = serverOf(input.tool.id) || input.tool.serverName || 'mcp';
   const forbidden = input.metaNames.length
@@ -483,7 +483,9 @@ export function executeCodePrompt(input: {
     '6. N’utilise que des champs présents dans la signature, le schéma de réponse ou la réponse déjà observée. N’invente aucune propriété.',
     '7. Retourne la valeur brute du SDK. Pas de map, pas d’agrégation, pas de calcul, pas de renommage.',
     '8. Interdit : @ts-nocheck, @ts-ignore, as any, et toute désactivation de vérification.',
-    '9. Un seul appel SDK pour l’exigence indiquée. Les autres exigences auront leur propre acquisition.',
+    '9. Un seul appel SDK. Si une méthode est imposée, appelle celle-là. N’appelle aucune méthode exclue.',
+    input.docs.length === 1 && input.docs[0]?.method ? `Méthode imposée : ${input.docs[0].method}` : '',
+    input.excluded?.length ? `Méthodes exclues : ${input.excluded.join(', ')}` : '',
     '',
     'Méthodes SDK (documentation) :',
     methods,

@@ -11,7 +11,6 @@ import {
   findDocsTool,
   mcpMetaNames,
   observeShape,
-  planAcquisitions,
   sdkHintsFromDocs,
   stripCodeFence,
   stripTypeSuppression,
@@ -26,7 +25,7 @@ import { rankNeeds } from '../../navigation/apf.ts';
 import { readsFromSelector, selectorPrompt } from './select-mcp.ts';
 import { routeDemand } from './pose.ts';
 import { splitAcquisition } from '../../discovery/acquire.ts';
-import { withinBudget } from '../../runtime/resilience.ts';
+import { acquisitionProgress, attemptKey, callIdentity, methodFits, methodJournal, registerMethods, requirementsOf, responseInScope, selectMethod } from './sdk-scope.ts';
 import { alignPairSeries, keepSpan } from './series.ts';
 
 export type ResponseState = 'vide' | 'erreur' | 'inconnu' | 'valide';
@@ -500,30 +499,47 @@ export async function collectSource(
           }
         }
         const meta = mcpMetaNames(catalog, server);
-        const planned = planAcquisitions(prompt, docs);
+        const registry = registerMethods(docs);
+        const banned = new Set<string>();
+        const spent = new Map<string, number>();
+        const seen = new Set<string>();
         let lastError: string | undefined;
         let lastCode = '';
         let observed = '';
         let stagnant = 0;
         let strategy: 'rewrite' | 'minimal' | 'stop' = 'rewrite';
-        const tried = new Set<string>();
         const blocked: string[] = [];
         const prior = done.find((read) => read.tool === codeTool.id && read.error && typeof read.args.code === 'string');
         if (prior?.error && prior.raw != null) observed = observeShape(prior.raw);
         liveDocs = docs;
-        for (let attempt = 0; withinBudget(attempt, 3) && strategy !== 'stop'; attempt++) {
-          const before = owner.missing.length;
-          const fields = [...new Set(done.filter((read) => read.ok && read.rows.some((row) => !isDocumentationRow(row))).flatMap((read) => read.rows.filter((row) => !isDocumentationRow(row)).flatMap((row) => Object.keys(row))))];
+        const businessFields = () => [...new Set(done.filter((read) => read.ok && read.rows.some((row) => !isDocumentationRow(row))).flatMap((read) => read.rows.filter((row) => !isDocumentationRow(row)).flatMap((row) => Object.keys(row))))];
+        const progress = () => acquisitionProgress(prompt, businessFields());
+        let held = progress().held.length;
+        const ceiling = Math.min(8, Math.max(4, (requirementsOf(prompt).measures.length + requirementsOf(prompt).entities.length + 1) * 2));
+        for (let attempt = 0; attempt < ceiling && strategy !== 'stop'; attempt++) {
+          const fields = businessFields();
           const chain = linkChain(prompt, fields);
-          const ranked = rankNeeds(acquisitionNeeds(chain).filter((need) => DATA_KINDS.has(need.kind)), blocked);
+          const ranked = rankNeeds(acquisitionNeeds(chain).filter((need) => DATA_KINDS.has(need.kind) && need.kind !== 'periode'), blocked);
           const choice = ranked.find((item) => item.score > 0) ?? (strategy === 'minimal' ? ranked[0] : undefined);
           if (!choice) {
             strategy = 'stop';
             break;
           }
           const claim = choice.text;
-          if (choice) lastLayer = choice.layer;
-          const hint = planned.find((item) => item.claim === claim)?.hint;
+          lastLayer = choice.layer;
+          if ((spent.get(claim) ?? 0) >= 2) {
+            blocked.push(claim);
+            continue;
+          }
+          const req = requirementsOf(prompt);
+          const available = registry.filter((method) => !banned.has(method.method));
+          const picked = registry.length ? selectMethod(available, req, [...banned]) : null;
+          if (registry.length && !picked) {
+            selectionLog += methodJournal({ method: '', args: '', scope: req.scope, expected: req.measures.concat(req.entities).join(', ') || claim, obtained: '', decision: 'rejetée, aucune méthode au périmètre' }) + '\n';
+            blocked.push(claim);
+            continue;
+          }
+          const shown = picked ? docs.filter((doc) => doc.method === picked.method.method) : docs.filter((doc) => !doc.method || !banned.has(doc.method));
           try {
             let code = '';
             if (lastCode && lastError && strategy === 'rewrite') {
@@ -537,24 +553,40 @@ export async function collectSource(
                 strategy = 'stop';
                 break;
               }
-              if (fixed.code && !tried.has(fixed.code)) code = stripTypeSuppression(fixed.code);
+              const rewritten = fixed.code ? callIdentity(fixed.code)[0]?.method : '';
+              if (fixed.code && rewritten && banned.has(rewritten)) fixed.code = null;
+              if (fixed.code && !seen.has(attemptKey(rewritten || 'script', callIdentity(fixed.code)[0]?.args ?? '', [claim]))) code = stripTypeSuppression(fixed.code);
               else strategy = fixed.strategy === 'raw' || fixed.strategy === 'reinspect' || fixed.strategy === 'minimal' ? 'minimal' : strategy;
             }
             if (!code) {
               const raw = await writeCode(executeCodePrompt({
                 prompt,
                 tool: codeTool,
-                docs: hint ? [hint] : docs,
+                docs: shown.length ? shown : docs,
                 metaNames: meta,
                 lastError,
                 observed,
                 claim,
                 minimal: strategy === 'minimal',
+                excluded: [...banned],
               }));
               code = stripTypeSuppression(stripCodeFence(raw));
               lastCorrection = strategy === 'minimal' ? 'appel minimal, retour brut' : 'nouvel appel ciblé';
             }
-            const gate = admitExecute(code, docs);
+            const fact = callIdentity(code)[0];
+            const method = fact?.method ?? '';
+            const args = fact?.args ?? '';
+            const known = method ? registry.find((item) => item.method === method) : undefined;
+            const unfit = known ? methodFits(known, req) : null;
+            if (method && (banned.has(method) || (unfit && !unfit.ok))) {
+              banned.add(method);
+              selectionLog += methodJournal({ method, args, scope: req.scope, expected: req.measures.concat(req.entities).join(', ') || claim, obtained: known?.fields.join(', ') || '', decision: `rejetée avant l’appel, ${unfit?.reason ?? 'méthode hors périmètre'}` }) + '\n';
+              lastCode = '';
+              lastError = `méthode ${method} exclue`;
+              spent.set(claim, (spent.get(claim) ?? 0) + 1);
+              continue;
+            }
+            const gate = admitExecute(code, shown.length ? shown : docs);
             if (!gate.ok) {
               lastError = gate.reason;
               lastCode = '';
@@ -562,30 +594,69 @@ export async function collectSource(
               if (stagnant >= 2) strategy = 'stop';
               continue;
             }
-            if (tried.has(code)) {
+            const key = attemptKey(method || 'script', args, [claim]);
+            if (seen.has(key)) {
               strategy = strategy === 'rewrite' ? 'minimal' : 'stop';
               continue;
             }
-            tried.add(code);
+            seen.add(key);
             lastCode = code;
             const extra = await runReads([{ tool: codeTool.id, args: { code, intent: claim.slice(0, 160) } }], call, admitCall);
             done = keepFootholds(done, extra);
             const fresh = extra.find((read) => read.raw != null);
             if (fresh?.raw != null) observed = observeShape(fresh.raw);
+            const businessRows = extra.flatMap((read) => read.ok ? read.rows.filter((row) => !isDocumentationRow(row)) : []);
+            const verdict = businessRows.length ? responseInScope(businessRows, req) : null;
+            if (verdict) {
+              selectionLog += methodJournal({
+                method,
+                args,
+                scope: `${req.scope}/${req.grain}`,
+                expected: req.measures.concat(req.entities).join(', ') || claim,
+                obtained: verdict.obtained.join(', '),
+                decision: verdict.ok ? 'acceptée' : `rejetée, ${verdict.reason}`,
+              }) + '\n';
+            }
+            const dated = businessRows.some((row) => Object.keys(row).some((key) => /date|time|timestamp|jour/i.test(key)));
+            const historyLeft = req.grain === 'serie' && registry.some((item) => item.scope === 'historique' && item.method !== method && !banned.has(item.method));
+            if (verdict?.ok && historyLeft && !dated && method) {
+              banned.add(method);
+              selectionLog += methodJournal({ method, args, scope: `${req.scope}/${req.grain}`, expected: req.measures.concat(req.entities).join(', ') || claim, obtained: verdict.obtained.join(', '), decision: 'rejetée, granularité point alors qu’une série est documentée' }) + '\n';
+              lastCode = '';
+              lastError = 'granularité : série attendue';
+              spent.set(claim, (spent.get(claim) ?? 0) + 1);
+              continue;
+            }
+            if (verdict && !verdict.ok && method) {
+              banned.add(method);
+              lastCode = '';
+              lastError = verdict.reason;
+              spent.set(claim, (spent.get(claim) ?? 0) + 1);
+              if (verdict.scopeMismatch) strategy = 'rewrite';
+              continue;
+            }
             owner = reviewSource(prompt, catalog, done);
+            const next = progress();
+            selectionLog += `progression : ${held} → ${next.held.length} exigences tenues\n`;
             if (extra.some((read) => read.diagnostic === 'auth' || read.diagnostic === 'quota')) {
               strategy = 'stop';
               lastCorrection = extra.find((read) => read.diagnostic)?.diagnostic ?? 'stop';
               break;
             }
-            if (!owner.ok && owner.missing.length >= before) {
+            if (!owner.ok && next.held.length <= held) {
+              if (method && verdict) banned.add(method);
               blocked.push(claim);
+              spent.set(claim, (spent.get(claim) ?? 0) + 1);
               stagnant += 1;
               strategy = strategy === 'rewrite' ? 'minimal' : 'stop';
-            } else stagnant = 0;
+            } else {
+              held = next.held.length;
+              stagnant = 0;
+            }
             if (owner.ok || stagnant >= 2) break;
             lastError = extra.map((read) => read.error).filter(Boolean).join('\n')
-              || (extra.some((read) => read.ok && read.rows.length) ? 'lignes présentes mais hors intention (souvent de la doc)' : 'réponse vide ou hors mesures');
+              || (verdict && !verdict.ok ? verdict.reason : '')
+              || (extra.some((read) => read.ok && read.rows.length) ? 'lignes présentes mais hors intention' : 'réponse vide ou hors mesures');
           } catch (error) {
             lastError = (error as Error).message;
             if (correctAcquisition('', lastError).strategy === 'stop') strategy = 'stop';

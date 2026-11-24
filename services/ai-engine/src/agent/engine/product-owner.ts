@@ -5,6 +5,7 @@
 import { keepNamedServer, mentionedServers, type SourceTool } from '../../app-agents/ingest.ts';
 import { keepSpan } from './series.ts';
 import { claimsFromPrompt, hitsInRows, linkChain, type ChainProof } from './chain.ts';
+import { globalShape } from './sdk-scope.ts';
 import { classifyLink } from '../../../../mcp-hub/src/link-state.ts';
 
 export type OwnerRead = { tool: string; args: Record<string, unknown>; ok: boolean; error?: string; rows: Array<Record<string, unknown>>; diagnostic?: string };
@@ -278,6 +279,7 @@ export function reviewSource(
       entityGap
         ? 'Une entité ou un filtre se cherche dans les valeurs des lignes déjà lues, ou dans un paramètre de recherche prévu pour cela. Un outil de validation ne les fournit pas.'
         : 'search_docs (ou équivalent) ne suffit pas : il faut une lecture métier (souvent execute / list / get) qui renvoie ces mesures.',
+      globalShape(fields) ? 'Les champs observés décrivent un agrégat global, pas le périmètre demandé.' : '',
       'Interdit de poser un dashboard « répartition de method/summary ».',
       'Rien ne peut être généré tant que ces champs manquent.',
       '',
