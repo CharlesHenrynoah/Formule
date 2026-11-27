@@ -26,11 +26,11 @@ export type SealedContract = {
   intentLock: Map<string, string>;
 };
 
-const DESIGN_RE = /(design|theme|th[eè]me|couleur|color|sombre|dark|clair|layout|typograph|police|font|style|minimaliste|professionnel|vert pour|rouge pour|en haut|au milieu|en bas|indicateurs en|graphiques? au|tableau en bas|interface sombre|dashboard)/i;
+const DESIGN_RE = /(design|theme|th[eè]me|couleur|color|sombre|dark|clair|layout|disposition|typograph|police|font|style|minimaliste|professionnel|vert pour|rouge pour|en haut|au milieu|en bas|indicateurs en|indicators?\s+top|charts?\s+middle|table\s+bottom|graphiques? au|tableau en bas|interface sombre)/i;
 const INTERACT_RE = /(onglet|tab\b|curseur|slider|bouton|button|rafra[iî]ch|actualis|refresh|reset|clic|hover|drag)/i;
 const TECH_RE = /(optimise|mcp|quota|cache|latence|budget|appel|rate.?limit|permission|s[eé]curit|mutualis|minimise les appels|provenance|fra[iî]cheur)/i;
 /** Titre / branding / consigne méta — jamais une lecture MCP. */
-const META_RE = /(intitul[eé]|titr[eé]\s*[:=«"]|dashboard intitul|cr[eé]e[rz]?\s+(une?\s+)?(interface|dashboard|console|application)|nomm[eé]e?\s*[:=«"])/i;
+const META_RE = /(intitul[eé]|title[dd]?\s*[:=«"']|titr[eé]\s*[:=«"']|titled\s+[«"']|dashboard\s+(intitul|titl)|cr[eé]e[rz]?\s+(une?\s+)?(interface|dashboard|console|application)|create\s+(an?\s+)?(interface|dashboard|console|application)|nomm[eé]e?\s*[:=«"'])/i;
 
 export type CoverageKind = 'analytical' | 'design' | 'interaction' | 'reliability' | 'meta';
 
@@ -40,11 +40,11 @@ export function classifyCoveragePoint(text: string): CoverageKind {
   if (/(bouton|button|rafra[iî]ch|actualis|refresh)/i.test(text) && INTERACT_RE.test(text)) {
     return 'interaction';
   }
-  // Titre / branding dashboard : pas une acquisition.
-  if (META_RE.test(text) && !/(capitalisation|volume|prix|classement|tableau de|graphique en|courbe|barres|donut|kpi)/i.test(text)) {
+  // Titre / branding dashboard : pas une acquisition (avant design : « dashboard » n'est pas un layout).
+  if (META_RE.test(text) && !/(capitalisation|volume|prix|classement|tableau contenant|tableau de données|graphique en|courbe|barres|donut|kpi)/i.test(text)) {
     return 'meta';
   }
-  // Layout / thème sans mesure à lire.
+  // Layout / thème sans mesure à lire (placement graphique ≠ intention analytique).
   if (DESIGN_RE.test(text) && !/(capitalisation|volume|prix|classement|courbe|tableau contenant|graphique en|barres|donut|ratio|somme|nombre|part\b|kpi)/i.test(text)) {
     return 'design';
   }
@@ -125,7 +125,7 @@ export function sealContract(
   const cleaned = stripUngroundedEntities(prompt, stripUngroundedUnits(prompt, reqs));
   const analytical = separateNonAnalytical(cleaned, constraints);
   const mergedConstraints = {
-    global: [...constraints.global],
+    global: [...new Set([...constraints.global, ...analytical.movedGlobal])],
     design: [...new Set([...constraints.design, ...analytical.movedDesign])],
     interactions: [...new Set([...constraints.interactions, ...analytical.movedInteractions])],
     reliability: [...new Set([...constraints.reliability, ...analytical.movedTech])],
@@ -203,32 +203,30 @@ function attachOrphanCoverage(reqs: ReqTemplate[], coverage: string[]): ReqTempl
   });
 }
 
-/** Exigences design/interactions/tech → contraintes ; pas de visualisation. */
+/** Exigences design/interactions/tech/titre → contraintes ; pas de visualisation. */
 export function separateNonAnalytical(reqs: ReqTemplate[], constraints: ContractConstraints): {
   reqs: ReqTemplate[];
+  movedGlobal: string[];
   movedDesign: string[];
   movedInteractions: string[];
   movedTech: string[];
 } {
   const kept: ReqTemplate[] = [];
+  const movedGlobal: string[] = [];
   const movedDesign: string[] = [];
   const movedInteractions: string[] = [];
   const movedTech: string[] = [];
   for (const r of reqs) {
     const text = `${r.label} ${r.title} ${r.acceptance ?? ''}`;
     if (r.view === 'note') { kept.push(r); continue; }
-    if (DESIGN_RE.test(text) && !/(kpi|capitalisation|volume|prix|classement|courbe|tableau|graphique|ratio|somme|nombre)/i.test(text)) {
-      movedDesign.push(r.label); continue;
-    }
-    if (INTERACT_RE.test(text) && !/(kpi|capitalisation|volume|prix|classement|courbe|tableau)/i.test(text)) {
-      movedInteractions.push(r.label); continue;
-    }
-    if (TECH_RE.test(text) && !/(kpi|capitalisation|volume|prix|classement|courbe|tableau)/i.test(text)) {
-      movedTech.push(r.label); continue;
-    }
+    const kind = classifyCoveragePoint(text);
+    if (kind === 'meta') { movedGlobal.push(r.label); continue; }
+    if (kind === 'design') { movedDesign.push(r.label); continue; }
+    if (kind === 'interaction') { movedInteractions.push(r.label); continue; }
+    if (kind === 'reliability') { movedTech.push(r.label); continue; }
     kept.push(r);
   }
-  return { reqs: kept, movedDesign, movedInteractions, movedTech };
+  return { reqs: kept, movedGlobal, movedDesign, movedInteractions, movedTech };
 }
 
 /** Vérifie que les intentions scellées n'ont pas été altérées. */

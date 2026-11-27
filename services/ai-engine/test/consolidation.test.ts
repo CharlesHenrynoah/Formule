@@ -199,6 +199,28 @@ describe('consolidation · chrome UI hors gaps d’acquisition', () => {
     const gaps = structuredCoverageGaps(sealed.coverage, sealed.reqs, sealed.constraints);
     expect(gaps.filter((g) => /intitul|bouton|en haut/i.test(g))).toEqual([]);
   });
+
+  it('ne bloque pas les faux positifs EN title/layout/refresh (Crypto Pulse)', () => {
+    const chrome = [
+      'Create dashboard titled « Crypto Pulse »',
+      'Layout: indicators top, charts middle, table bottom',
+      'Add functional refresh button that updates comparative chart',
+    ];
+    const analytical = 'Market cap of top assets';
+    const sealed = sealContract(
+      'Create dashboard titled Crypto Pulse with layout and refresh',
+      [req({ id: 'k1', label: 'Market cap', view: 'kpi', measures: ['market_cap'], covers: [analytical] })],
+      [...chrome, analytical],
+      { global: [], design: [], interactions: [], reliability: [] },
+    );
+    expect(sealed.coverage).toEqual([analytical]);
+    expect(sealed.constraints.global.some((c) => /Crypto Pulse/i.test(c))).toBe(true);
+    expect(sealed.constraints.design.some((c) => /Layout/i.test(c))).toBe(true);
+    expect(sealed.constraints.interactions.some((c) => /refresh/i.test(c))).toBe(true);
+    // Même sur coverage brut : structuredCoverageGaps ne doit pas signaler le chrome.
+    expect(structuredCoverageGaps([...chrome, analytical], sealed.reqs, sealed.constraints)).toEqual([]);
+    expect(structuredCoverageGaps(chrome, sealed.reqs, { global: [], design: [], interactions: [], reliability: [] })).toEqual([]);
+  });
 });
 
 describe('consolidation · seal verrouille les exigences validées', () => {

@@ -262,6 +262,7 @@ toolHints?:string[], argHints?:objet de valeurs string/number/boolean, certainty
 section?:string, limit?:entier 1..50, order?:"asc"|"desc", covers?:string[]}.
 acquisitions facultatif (0..40 objets) : {id:string, purpose?:string, entity?:string, forRequirementIds:string[] non vide,
 toolHints?:string[], argHints?:objet de valeurs string/number/boolean, dataNotDocs?:boolean}.
+Tip : coverage[] = intentions analytiques uniquement (KPI, tableaux, courbes, mesures). Titre / design / layout / refresh / chrome UI → constraints (global|design|interactions), jamais coverage ni gaps MCP.
 Respecte les types et valeurs exacts. Omettre les champs facultatifs sans valeur. Pas de null. Ne pas inventer d'exigence.`;
 
 /** Chemins Zod explicites, sans valeur brute ni données sensibles. */
@@ -387,10 +388,10 @@ export async function interpretAndPlan(prompt: string, catalog: CatalogServer[],
     interactions: parsed.data.constraints?.interactions ?? [],
     reliability: parsed.data.constraints?.reliability ?? [],
   };
-  // Séparation stricte : design / interactions / tech ne restent pas des vues analytiques.
+  // Séparation stricte : titre / design / interactions / tech → constraints, pas des vues.
   const separated = separateNonAnalytical(reqs, rawConstraints);
   const sealed = sealContract(prompt, separated.reqs, parsed.data.coverage, {
-    global: rawConstraints.global,
+    global: [...rawConstraints.global, ...separated.movedGlobal],
     design: [...rawConstraints.design, ...separated.movedDesign],
     interactions: [...rawConstraints.interactions, ...separated.movedInteractions],
     reliability: [...rawConstraints.reliability, ...separated.movedTech],
