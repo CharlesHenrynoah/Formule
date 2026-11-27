@@ -67,9 +67,17 @@ app.get<{ Params: { id: string; n: string } }>('/apps/:id/:n/index.html', async 
 // ---------- Conversation & jobs ----------
 app.get('/api/meta', async () => {
   const ai = await call<B>('ai-engine', '/meta').catch(() => ({ demo: true }));
+  const engine = await call<B>('ai-engine', '/engine').catch(() => null);
   const voice = await call<B>('voice-gateway', '/health').catch(() => null);
-  return { demo: ai.demo, voice: voice ? { stt: voice.stt, tts: voice.tts } : null };
+  return {
+    demo: ai.demo,
+    engine: ai.engine ?? engine?.engineId ?? null,
+    semanticEngine: ai.semanticEngine ?? engine?.semanticEngine ?? null,
+    git: ai.git ?? engine?.git ?? null,
+    voice: voice ? { stt: voice.stt, tts: voice.tts } : null,
+  };
 });
+app.get('/api/engine', async () => call('ai-engine', '/engine'));
 app.post<{ Body: B }>('/api/chat', async (r) => call('ai-engine', '/chat', { body: { projectId: r.body.projectId ?? null, mode: r.body.mode, message: r.body.message, fileIds: (r.body.fileIds ?? []).slice(0, 3), version: r.body.version }, timeoutMs: 90_000 }));
 app.get<{ Querystring: { projectId?: string } }>('/api/jobs', async (r) => call('storage', `/jobs${r.query.projectId ? `?projectId=${encodeURIComponent(r.query.projectId)}` : ''}`));
 app.get<{ Params: { id: string } }>('/api/jobs/:id', async (r) => call('storage', `/jobs/${r.params.id}`));

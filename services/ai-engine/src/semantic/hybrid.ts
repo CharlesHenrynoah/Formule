@@ -9,8 +9,15 @@ import { llm } from '../llm.js';
 import type { CatalogServer } from '../discovery/catalog.js';
 import { AGGS, VIEW_KINDS, norm, type ClauseFilter, type ReqTemplate, type Understanding, type ViewKind } from './lexicon.js';
 import { capRequirements, freezeReqs } from './analytical.js';
+import {
+  exactFieldMatch, filterForbiddenDrops, LlmBudget, sealContract, separateNonAnalytical,
+  type ContractConstraints, type SealedContract,
+} from './contract-guard.js';
 import type { Dataset } from './resolve.js';
 import type { PlannedReq } from './plan.js';
+
+export { LlmBudget, sealContract };
+export type { ContractConstraints, SealedContract };
 
 const FilterSchema = z.object({
   field: z.array(z.string().min(1).max(40)).min(1).max(6),
@@ -118,9 +125,10 @@ export interface HybridPlan {
   argHints: Map<string, Record<string, unknown>>;
   acquisitions: AcquisitionGroup[];
   coverage: string[];
-  constraints: { global: string[]; design: string[]; interactions: string[]; reliability: string[] };
+  constraints: ContractConstraints;
   source: DraftSource;
   reason?: string;
+  sealed?: SealedContract;
 }
 
 const CALL_A_SYSTEM = `Tu es le moteur d'interprétation Formule (AI-first). Tu produis le contrat analytique COMPLET depuis le prompt original.
@@ -162,14 +170,19 @@ export async function interpretAndPlan(prompt: string, catalog: CatalogServer[],
   // Mode démo sans LLM : packs explicites seulement, jamais readContract présenté comme succès.
   if (llm.name === 'mock') {
     if (!base.generic && base.reqs.length) {
+      const reqs = freezeReqs(capRequirements(base.reqs));
+      const coverage = reqs.map((r) => r.label);
+      const constraints = emptyConstraints();
+      const sealed = sealContract(prompt, reqs, coverage, constraints);
       return {
         ok: true,
-        u: { ...base, reqs: freezeReqs(capRequirements(base.reqs)) },
+        u: { ...base, reqs: sealed.reqs },
         toolHints: new Map(), argHints: new Map(), acquisitions: [],
-        coverage: base.reqs.map((r) => r.label),
-        constraints: emptyConstraints(),
+        coverage: sealed.coverage,
+        constraints: sealed.constraints,
         source: 'demo_pack',
         reason: 'mode démo : contrat pack, pas d’interprétation sémantique LLM',
+        sealed,
       };
     }
     return unavailable('Interprétation sémantique indisponible (aucun LLM configuré). Le moteur syntaxique n’est plus utilisé comme équivalent.', base);
@@ -234,29 +247,38 @@ export async function interpretAndPlan(prompt: string, catalog: CatalogServer[],
     }
   }
 
-  const constraints = {
+  const rawConstraints: ContractConstraints = {
     global: parsed.data.constraints?.global ?? [],
     design: parsed.data.constraints?.design ?? [],
     interactions: parsed.data.constraints?.interactions ?? [],
     reliability: parsed.data.constraints?.reliability ?? [],
   };
+  // Séparation stricte : design / interactions / tech ne restent pas des vues analytiques.
+  const separated = separateNonAnalytical(reqs, rawConstraints);
+  const sealed = sealContract(prompt, separated.reqs, parsed.data.coverage, {
+    global: rawConstraints.global,
+    design: [...rawConstraints.design, ...separated.movedDesign],
+    interactions: [...rawConstraints.interactions, ...separated.movedInteractions],
+    reliability: [...rawConstraints.reliability, ...separated.movedTech],
+  });
 
   return {
     ok: true,
     u: {
       title: parsed.data.title.slice(0, 80),
       mission: parsed.data.mission.slice(0, 400),
-      reqs,
+      reqs: sealed.reqs,
       commands: base.commands,
-      simulation: reqs.some((r) => r.view === 'simulation') || base.simulation,
+      simulation: sealed.reqs.some((r) => r.view === 'simulation') || base.simulation,
       generic: false,
     },
     toolHints,
     argHints,
     acquisitions,
-    coverage: parsed.data.coverage,
-    constraints,
+    coverage: sealed.coverage,
+    constraints: sealed.constraints,
     source: 'llm',
+    sealed,
   };
 }
 
@@ -308,14 +330,18 @@ export function coverageGaps(coverage: string[], reqs: ReqTemplate[]): string[] 
   });
 }
 
-/** Appel 2 : liaison sémantique proposée ; le moteur valide ensuite. */
+/** Appel 2 : liaison sémantique proposée ; le moteur valide ensuite (intentions scellées immuables). */
 export async function bindAndCompose(
   prompt: string,
   reqs: ReqTemplate[],
   datasets: Map<string, Dataset>,
+  opts?: { budget?: LlmBudget; sealed?: SealedContract },
 ): Promise<{ reqs: ReqTemplate[]; source: 'llm' | 'skipped'; reason?: string }> {
   if (llm.name === 'mock' || !reqs.length || !datasets.size) {
     return { reqs, source: 'skipped', reason: 'liaison IA non disponible — validation déterministe seule' };
+  }
+  if (opts?.budget && !opts.budget.take()) {
+    return { reqs, source: 'skipped', reason: 'budget LLM épuisé — liaison déterministe seule' };
   }
 
   const catalogue = [...datasets.entries()].flatMap(([qid, ds]) => {
@@ -332,6 +358,7 @@ export async function bindAndCompose(
   const raw = await llm.json<unknown>([
     { role: 'system', content: `Tu liais un contrat analytique à des données MCP déjà lues.
 Sens métier des champs, pas ressemblance lexicale. Respecte entities, population, period, limit, transform.
+Ne change PAS visualization/operation/entities/period/population/transform — seulement queryId + measure exacte.
 Aucune substitution silencieuse. unsatisfied=true + reason si impossible. JSON uniquement.` },
     { role: 'user', content: `Consigne : ${fenceUntrusted('demande', prompt, 3000)}
 Exigences : ${JSON.stringify(reqs.map((r) => ({ id: r.id, label: r.label, view: r.view, operation: r.operation ?? r.agg, measures: r.measures ?? r.measure, entities: r.entities, population: r.population, period: r.period, unit: r.unit, transform: r.transform, limit: r.limit, filters: r.filters ?? r.where })))}
@@ -351,25 +378,34 @@ Schéma : {"bindings":[...],"layout?":[...]}` },
     if (!b) return r;
     if (b.unsatisfied) return { ...r, acceptance: `${r.acceptance ?? ''} · IA: ${b.reason ?? 'insatisfaite'}`.slice(0, 300) };
     const ds = b.queryId && knownQ.has(b.queryId) ? datasets.get(b.queryId) : undefined;
-    const measureOk = b.measure && ds ? ds.fields.some((f) => {
-      const rel = norm(f.rel);
-      const m = norm(b.measure!);
-      return rel === m || rel.endsWith('.' + m) || rel.split(/[._]/).pop() === m;
-    }) : false;
-    const measures = measureOk && b.measure ? [...new Set([b.measure, ...(r.measures ?? r.measure ?? [])].map(norm))] : r.measures ?? r.measure;
-    const view = (b.visualization && VIEW_KINDS.includes(b.visualization) ? b.visualization : r.visualization ?? r.view) as ViewKind;
-    const op = b.operation ?? r.operation ?? r.agg;
-    const filters = (b.filters as ClauseFilter[] | undefined) ?? r.filters ?? r.where;
+    // Liaison exacte : path égal ou suffixe `.field` — jamais includes flou / pop stem.
+    const measureOk = b.measure && ds
+      ? ds.fields.some((f) => exactFieldMatch(f.rel, b.measure!))
+      : false;
+    const measures = measureOk && b.measure
+      ? [...new Set([b.measure, ...(r.measures ?? r.measure ?? [])])]
+      : r.measures ?? r.measure;
+    // Intentions scellées : view / op / transform / limit restent ceux du contrat.
     const section = layout.get(r.id)?.section ?? b.section ?? r.section;
-    const tool = b.queryId && ds ? [norm(ds.acq.ref.tool.name)] : r.tool;
+    const tool = b.queryId && ds ? [ds.acq.queryId, norm(ds.acq.ref.tool.name)] : r.tool;
+    const filters = (b.filters as ClauseFilter[] | undefined) ?? r.filters ?? r.where;
     return Object.freeze({
-      ...r, view, visualization: view, operation: op, agg: op,
+      ...r,
+      view: r.visualization ?? r.view,
+      visualization: r.visualization ?? r.view,
+      operation: r.operation ?? r.agg,
+      agg: r.operation ?? r.agg,
       measure: measures, measures, filters, where: filters, tool, section,
-      transform: b.transform ?? r.transform, limit: b.limit ?? r.limit,
-      label_: b.label ? [norm(b.label)] : r.label_,
+      transform: r.transform,
+      limit: r.limit,
+      entities: r.entities,
+      population: r.population,
+      period: r.period,
+      label_: b.label && measureOk ? [norm(b.label)] : r.label_,
     }) as ReqTemplate;
   });
 
+  void opts?.sealed; // empreinte consultée côté orchestrateur via assertIntentIntact
   return { reqs: freezeReqs(next), source: 'llm' };
 }
 
@@ -378,14 +414,17 @@ export async function diagnoseCorrection(
   prompt: string,
   planned: PlannedReq[],
   divergences: string[],
+  opts?: { budget?: LlmBudget },
 ): Promise<Correction | null> {
   if (llm.name === 'mock' || !divergences.length) return null;
+  if (opts?.budget && !opts.budget.take()) return null;
   const raw = await llm.json<unknown>([
     { role: 'system', content: `Tu corriges un contrat Formule incorrect AVANT de multiplier les acquisitions.
-Priorité : patchRequirements (réécrire des exigences) ou dropRequirementIds.
+Priorité : patchRequirements (mesures / filters) — JAMAIS supprimer une exigence obligatoire (mandatory).
+Ne change pas visualization/entities/period/population d'une exigence obligatoire.
 rebind seulement si les datasets déjà lus suffisent. Pas de nouvel appel MCP. JSON uniquement.` },
     { role: 'user', content: `Consigne : ${fenceUntrusted('demande', prompt, 2000)}
-Exigences : ${JSON.stringify(planned.map((p) => ({ id: p.tpl.id, label: p.tpl.label, status: p.status, reason: p.reason, view: p.tpl.view, op: p.tpl.operation ?? p.tpl.agg, entities: p.tpl.entities, population: p.tpl.population })))}
+Exigences : ${JSON.stringify(planned.map((p) => ({ id: p.tpl.id, label: p.tpl.label, mandatory: p.tpl.mandatory, status: p.status, reason: p.reason, view: p.tpl.view, op: p.tpl.operation ?? p.tpl.agg, entities: p.tpl.entities, population: p.tpl.population })))}
 Divergences : ${fenceUntrusted('divergences', divergences.join('\n'), 2000)}
 Schéma : {"dropRequirementIds?","rebind?","patchRequirements?","note?"}` },
   ], 45_000).catch(() => null);
@@ -393,8 +432,14 @@ Schéma : {"dropRequirementIds?","rebind?","patchRequirements?","note?"}` },
   return parsed.success ? parsed.data : null;
 }
 
+/**
+ * Applique une correction en protégeant les exigences obligatoires :
+ * - drop interdit si mandatory
+ * - patch ne peut pas altérer view / entities / period / population / transform / operation d'une mandatory
+ */
 export function applyCorrection(reqs: ReqTemplate[], correction: Correction, allowedQueryIds: Set<string>): ReqTemplate[] {
-  const drop = new Set(correction.dropRequirementIds ?? []);
+  const { allowed: dropAllowed } = filterForbiddenDrops(reqs, correction.dropRequirementIds);
+  const drop = new Set(dropAllowed);
   const rebind = new Map((correction.rebind ?? []).map((r) => [r.requirementId, r]));
   const patches = new Map((correction.patchRequirements ?? []).map((p, i) => {
     const tpl = aiReqToTpl(p, i, undefined);
@@ -403,7 +448,21 @@ export function applyCorrection(reqs: ReqTemplate[], correction: Correction, all
 
   let next = reqs.filter((r) => !drop.has(r.id)).map((r) => {
     const patch = patches.get(r.id);
-    if (patch) return patch;
+    if (patch) {
+      if (!r.mandatory) return patch;
+      // Conservation intégrale des intentions analytiques obligatoires.
+      return {
+        ...r,
+        label: patch.label || r.label,
+        title: patch.title || r.title,
+        measure: patch.measure ?? r.measure,
+        measures: patch.measures ?? r.measures,
+        filters: patch.filters ?? r.filters,
+        where: patch.where ?? r.where,
+        tool: patch.tool?.length ? patch.tool : r.tool,
+        acceptance: `${r.acceptance ?? ''} · patch:mesures`.slice(0, 300),
+      };
+    }
     const b = rebind.get(r.id);
     if (!b) return r;
     if (b.queryId && !allowedQueryIds.has(b.queryId)) return r;
@@ -411,13 +470,13 @@ export function applyCorrection(reqs: ReqTemplate[], correction: Correction, all
       ...r,
       measure: b.measure ? [norm(b.measure)] : r.measure,
       measures: b.measure ? [norm(b.measure)] : r.measures,
-      operation: b.operation ?? r.operation,
-      agg: b.operation ?? r.agg,
+      // operation figée si mandatory
+      operation: r.mandatory ? r.operation : (b.operation ?? r.operation),
+      agg: r.mandatory ? r.agg : (b.operation ?? r.agg),
       acceptance: `${r.acceptance ?? ''} · corr:${b.reason ?? 'rebind'}`.slice(0, 300),
     };
   });
 
-  // Nouvelles exigences patchées (id inconnu) : ajout plafonné.
   for (const [id, tpl] of patches) {
     if (!next.some((r) => r.id === id) && !drop.has(id)) next.push(tpl);
   }

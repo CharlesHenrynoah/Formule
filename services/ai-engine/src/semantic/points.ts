@@ -1,6 +1,7 @@
 import { getCollection, getPath, parseTime } from '@formule/contracts';
 import { contradicts } from '../evaluation/oracle.js';
 import { periodInterval } from './analytical.js';
+import { attachFusedSeries, prepareDatasetsForBinding } from './fusion.js';
 import { norm, type ReqTemplate } from './lexicon.js';
 import type { PlannedReq } from './plan.js';
 import { resolveRequirement, type Dataset } from './resolve.js';
@@ -9,14 +10,17 @@ import { resolveRequirement, type Dataset } from './resolve.js';
  * Lie un contrat déjà figé aux champs réellement lus.
  * Contraintes d'entité, population, période, grain et unité = éliminatoires.
  * Le score ne départage que les datasets déjà compatibles.
+ * Multi-entités line → fusion déterministe avant résolution.
  */
 export function bindClauses(reqs: ReqTemplate[], datasets: Map<string, Dataset>): PlannedReq[] {
+  const prepared = prepareDatasetsForBinding(reqs, datasets);
   const used = new Set<string>();
-  return reqs.map((tpl) => {
+  return reqs.map((raw) => {
+    const tpl = attachFusedSeries(raw, prepared);
     if ((tpl.visualization ?? tpl.view) === 'note' || tpl.view === 'note') {
-      return { tpl, status: 'unavailable' as const, reason: tpl.acceptance ?? 'note' };
+      return { tpl: raw, status: 'unavailable' as const, reason: tpl.acceptance ?? 'note' };
     }
-    const candidates = rankDatasets(tpl, datasets);
+    const candidates = rankDatasets(tpl, prepared);
     if (!candidates.length) {
       const why = [...datasets.values()].map((ds) => eliminate(tpl, ds)).find(Boolean);
       return { tpl, status: 'unavailable' as const, reason: why ?? 'aucune donnée lue ne porte cette exigence' };
@@ -28,10 +32,10 @@ export function bindClauses(reqs: ReqTemplate[], datasets: Map<string, Dataset>)
       if (!resolved.ok) { reasons.push(`${ds.acq.queryId}: ${resolved.reason}`); continue; }
       const clash = contradicts(tpl, resolved.view);
       if (clash) { reasons.push(`${ds.acq.queryId}: ${clash}`); continue; }
-      return { tpl, status: 'covered' as const, queryId: ds.acq.queryId, view: resolved.view, evidencePath: resolved.evidencePath, envelopeId: ds.acq.envelope.id };
+      return { tpl: raw, status: 'covered' as const, queryId: ds.acq.queryId, view: resolved.view, evidencePath: resolved.evidencePath, envelopeId: ds.acq.envelope.id };
     }
     const fail = candidates[0].ds.acq.envelope.status === 'error' ? 'unavailable' as const : 'missing' as const;
-    return { tpl, status: fail, reason: reasons[0] ?? 'aucune acquisition compatible' };
+    return { tpl: raw, status: fail, reason: reasons[0] ?? 'aucune acquisition compatible' };
   });
 }
 
@@ -50,11 +54,16 @@ export function eliminate(req: ReqTemplate, ds: Dataset): string | null {
   if (req.scopeSize != null && rows.length !== req.scopeSize) return `population de ${req.scopeSize} lignes demandée, ${rows.length} obtenues`;
   const labelFields = ds.fields.filter((f) => f.role === 'dimension' || f.role === 'text' || f.role === 'identifier');
 
+  const fusedEntities = Array.isArray((ds.acq.args as { entities?: unknown })?.entities)
+    ? ((ds.acq.args as { entities: string[] }).entities).map(norm)
+    : null;
   for (const entity of req.entities ?? []) {
+    if (fusedEntities?.includes(norm(entity))) continue; // fusion déterministe atteste déjà l'entité
+    const argsHit = norm(JSON.stringify(ds.acq.args ?? {})).includes(norm(entity));
     const hit = rows.some((r) => labelFields.some((f) => hitValue(getPath(r, f.rel), entity)));
     const rootHit = ds.contract.fields.some((f) => !f.path.includes('[]') && f.type === 'string' && ['identifier','dimension','text'].includes(f.role) && hitValue(getPath(ds.acq.raw, f.path), entity));
-    if (!hit && !rootHit) return `entité « ${entity} » absente`;
-    if ((req.view === 'line' || req.visualization === 'line') && !rootHit && hit) {
+    if (!hit && !rootHit && !argsHit) return `entité « ${entity} » absente`;
+    if ((req.view === 'line' || req.visualization === 'line') && !rootHit && !argsHit && !fusedEntities && hit) {
       const field = labelFields.find((f) => rows.some((r) => hitValue(getPath(r, f.rel), entity)));
       if (!field || rows.some((r) => !(req.entities ?? []).some((e) => hitValue(getPath(r, field.rel), e)))) return 'série multi-entité non filtrée';
     }
@@ -113,8 +122,9 @@ export function eliminate(req: ReqTemplate, ds: Dataset): string | null {
 
 function scoreDataset(req: ReqTemplate, ds: Dataset): number {
   let score = 0;
+  if (ds.acq.queryId.startsWith('fuse_') && (req.entities?.length ?? 0) > 1) score += 20;
   const tools = req.tool.map(norm).filter((t) => t && t !== '*');
-  if (tools.some((t) => norm(ds.acq.ref.tool.name).includes(t) || t.includes(norm(ds.acq.ref.tool.name)))) score += 4;
+  if (tools.some((t) => norm(ds.acq.ref.tool.name).includes(t) || t.includes(norm(ds.acq.ref.tool.name)) || norm(ds.acq.queryId) === t)) score += 4;
 
   const measureKws = [...(req.measures ?? []), ...(req.measure ?? [])].map(norm);
   const measureHits = ds.fields.filter((f) => f.role === 'measure' && measureKws.some((k) => k.length > 2 && norm(f.rel).includes(k)));

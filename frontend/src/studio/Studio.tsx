@@ -56,7 +56,7 @@ export function Studio({ go }: { go: (p: string) => void }) {
   const [items, setItems] = useState<Item[]>([]);
   const [mode, setMode] = useState<'ask' | 'agent'>('agent');
   const [job, setJob] = useState<{ id: string } | null>(null);
-  const [meta, setMeta] = useState<{ demo: boolean; voice: unknown } | null>(null);
+  const [meta, setMeta] = useState<{ demo: boolean; voice: unknown; engine?: string | null; semanticEngine?: string | null; git?: { commit?: string | null; branch?: string | null } | null } | null>(null);
   const [toolCount, setToolCount] = useState<number | null>(null);
   const [files, setFiles] = useState<{ id: string; name: string; rows: number }[]>([]);
   const [text, setText] = useState('');
@@ -345,6 +345,14 @@ export function Studio({ go }: { go: (p: string) => void }) {
               </label>
               <button type="button" onClick={() => setMcpOpen(true)} className="flex items-center gap-1 rounded-xl border border-edge px-1.5 py-1 text-[11px] text-mute hover:text-ink"><Plug size={12} /><span className="label-f">MCP</span><span className="num">{toolCount ?? '—'}</span></button>
               {meta?.demo && <span className="label-f rounded-xl border border-warn/50 px-1.5 py-0.5 text-warn" title="Sans clé : moteur de démonstration déterministe">Démo</span>}
+              {meta?.engine && (
+                <span
+                  className="label-f max-w-[11rem] truncate rounded-xl border border-edge px-1.5 py-0.5 text-[10px] text-mute"
+                  title={`Moteur exécuté : ${meta.engine}`}
+                >
+                  {meta.semanticEngine ?? 'moteur'}·{(meta.git?.commit ?? meta.engine.split('/').pop())?.slice(0, 7)}
+                </span>
+              )}
               <span className="flex-1" />
               {job && <Button type="button" variant="danger" size="sm" onClick={cancel}><Square size={11} />Arrêter</Button>}
               <Button type="submit" variant="primary" size="sm" disabled={!text.trim() || !!job}>{currentId ? 'Envoyer' : 'Générer'}</Button>

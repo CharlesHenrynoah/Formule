@@ -71,8 +71,9 @@ export async function planAcquisitions(
     return { args, missing: stillMissing.length ? stillMissing : missing };
   };
 
-  // 1) Groupes d'acquisition IA (mutualisés / multi-entités).
-  for (const g of hints.groups ?? []) {
+  // 1) Groupes d'acquisition IA — plus larges d'abord pour mutualiser les lectures.
+  const groups = [...(hints.groups ?? [])].sort((a, b) => b.forRequirementIds.length - a.forRequirementIds.length);
+  for (const g of groups) {
     const reqIds = g.forRequirementIds.filter((id) => reqs.some((r) => r.id === id && r.view !== 'note'));
     if (!reqIds.length) continue;
     const sample = reqs.find((r) => r.id === reqIds[0])!;

@@ -9,7 +9,10 @@ import { assembleSpec, bindTools, planActions, planRequirements, queryIdFor, typ
 import { draftAnalytical } from '../semantic/analytical.js';
 import { acquisitionKey, planAcquisitions, type PlannedAcquisition } from '../semantic/acquire-plan.js';
 import { bindClauses } from '../semantic/points.js';
-import { applyCorrection, bindAndCompose, coverageGaps, diagnoseCorrection } from '../semantic/hybrid.js';
+import { applyCorrection, bindAndCompose, coverageGaps, diagnoseCorrection, LlmBudget, sealContract } from '../semantic/hybrid.js';
+import {
+  assertIntentIntact, fidelityAgainstPrompt, independentPromptAudit, type ContractConstraints, type SealedContract,
+} from '../semantic/contract-guard.js';
 import { isMultiSection } from '../semantic/sections.js';
 import { buildWorkspace, cleanupWorkspace, createWorkspace, shadcnAdd, writeWorkspaceFile } from './workspace.js';
 import { emit, setState, type JobRef } from './events.js';
@@ -139,6 +142,8 @@ async function runContractBuild(job: JobRef, input: { prompt: string; fileIds: s
   if (named.length) await emit(job, 'log', { text: `Périmètre : ${scoped.map((s) => s.name).join(', ')}` });
 
   let u: Understanding = understand(prompt, scoped);
+  const budget = new LlmBudget(3); // A interprétation + B liaison + C correction max
+  budget.take(); // appel 1 consommé dans draftAnalytical / interpretAndPlan
   const draft = await draftAnalytical(prompt, u, scoped);
   if (!draft.ok) {
     await setState(job, 'BLOCKED');
@@ -148,26 +153,43 @@ async function runContractBuild(job: JobRef, input: { prompt: string; fileIds: s
   if (draft.source === 'demo_pack') {
     await emit(job, 'log', { text: `Contrat démo (pack) — ${draft.reason ?? 'sans LLM'}` });
   }
-  let reqs = draft.u.reqs;
-  u = draft.u;
-  let coverage = [...draft.coverage];
-  await emit(job, 'log', { text: `Contrat analytique figé (${draft.source}) : ${reqs.map((r) => `${r.label} [${r.visualization ?? r.view}${r.operation ?? r.agg ? ` ${r.operation ?? r.agg}` : ''}]`).join(' · ')}` });
-  if (draft.constraints.design.length || draft.constraints.interactions.length) {
-    await emit(job, 'log', { text: `Contraintes : ${[...draft.constraints.design, ...draft.constraints.interactions, ...draft.constraints.global].slice(0, 6).join(' · ')}` });
+  let constraints: ContractConstraints = { ...draft.constraints };
+  let sealed: SealedContract = draft.sealed ?? sealContract(prompt, draft.u.reqs, draft.coverage, constraints);
+  let reqs = [...sealed.reqs];
+  u = { ...draft.u, reqs };
+  constraints = sealed.constraints;
+  const coverage = [...sealed.coverage];
+  await emit(job, 'log', { text: `Contrat analytique scellé (${draft.source} · ${sealed.fingerprint}) : ${reqs.map((r) => `${r.label} [${r.visualization ?? r.view}${r.operation ?? r.agg ? ` ${r.operation ?? r.agg}` : ''}]`).join(' · ')}` });
+  if (constraints.design.length || constraints.interactions.length || constraints.reliability.length) {
+    await emit(job, 'log', { text: `Contraintes conservées : ${[...constraints.design, ...constraints.interactions, ...constraints.reliability, ...constraints.global].slice(0, 8).join(' · ')}` });
   }
   check(job);
   if (!reqs.length) return blocked(job, prompt, named.length ? scoped : catalog);
 
-  // Couverture du prompt AVANT toute acquisition.
-  let gapsBefore = coverageGaps(coverage, reqs);
+  // Couverture LLM + audit sémantique indépendant AVANT toute acquisition.
+  let gapsBefore = [
+    ...coverageGaps(coverage, reqs),
+    ...independentPromptAudit(prompt, reqs, constraints),
+  ];
   if (gapsBefore.length) {
     await emit(job, 'log', { text: `Couverture incomplète avant lecture : ${gapsBefore.slice(0, 4).join(' ; ')}` });
-    const preFix = await diagnoseCorrection(prompt, reqs.map((r) => ({ tpl: r, status: 'missing' as const, reason: 'hors coverage' })), gapsBefore);
+    const preFix = await diagnoseCorrection(
+      prompt,
+      reqs.map((r) => ({ tpl: r, status: 'missing' as const, reason: 'hors coverage' })),
+      gapsBefore,
+      { budget },
+    );
     if (preFix?.patchRequirements?.length || preFix?.dropRequirementIds?.length) {
       reqs = applyCorrection(reqs, preFix, new Set());
-      u = { ...u, reqs };
-      gapsBefore = coverageGaps(coverage, reqs);
-      await emit(job, 'log', { text: `Contrat corrigé avant acquisition${preFix.note ? ` : ${preFix.note}` : ''}` });
+      const intact = assertIntentIntact(sealed, reqs);
+      if (intact.length) {
+        await emit(job, 'log', { text: `Correction refusée (contrat scellé) : ${intact.slice(0, 3).join(' ; ')}` });
+        reqs = [...sealed.reqs];
+      } else {
+        u = { ...u, reqs };
+        gapsBefore = [...coverageGaps(coverage, reqs), ...independentPromptAudit(prompt, reqs, constraints)];
+        await emit(job, 'log', { text: `Contrat corrigé avant acquisition${preFix.note ? ` : ${preFix.note}` : ''}` });
+      }
     }
     if (gapsBefore.length) {
       await setState(job, 'BLOCKED');
@@ -186,6 +208,7 @@ async function runContractBuild(job: JobRef, input: { prompt: string; fileIds: s
     }
     return blocked(job, prompt, named.length ? scoped : catalog);
   }
+  await emit(job, 'log', { text: `Acquisitions mutualisées : ${acqPlan.length} lecture(s) pour ${reqs.filter((r) => r.view !== 'note').length} exigence(s)` });
 
   const usedIds = new Set<string>();
   const limitedServers = new Set<string>();
@@ -193,10 +216,27 @@ async function runContractBuild(job: JobRef, input: { prompt: string; fileIds: s
   const datasets = new Map<string, Dataset>();
   for (const a of acqs) datasets.set(a.queryId, datasetOf(a));
 
-  // Appel 2 : liaison sémantique proposée ; le moteur valide.
-  const composed = await bindAndCompose(prompt, reqs, datasets);
+  // Appel 2 : liaison sémantique proposée ; le moteur valide (intentions scellées).
+  const composed = await bindAndCompose(prompt, reqs, datasets, { budget, sealed });
   if (composed.source === 'llm') {
-    reqs = composed.reqs;
+    const intact = assertIntentIntact(sealed, composed.reqs);
+    if (intact.length) {
+      await emit(job, 'log', { text: `Liaison IA partiellement refusée (intentions figées) : ${intact.slice(0, 3).join(' ; ')}` });
+      // Conserve mesures/outils proposés seulement si l'intention reste intacte par exigence.
+      reqs = composed.reqs.map((r) => {
+        const lock = sealed.intentLock.get(r.id);
+        const orig = sealed.reqs.find((x) => x.id === r.id);
+        if (!orig || !lock) return orig ?? r;
+        const key = [
+          r.visualization ?? r.view, r.operation ?? r.agg ?? '',
+          (r.entities ?? []).map((e) => e.toLowerCase()).sort().join(','),
+          r.population ?? '', r.period ?? '', r.transform ?? '', r.limit ?? '', r.unit ?? '',
+        ].join('|');
+        return key === lock ? r : orig;
+      });
+    } else {
+      reqs = composed.reqs;
+    }
     u = { ...u, reqs };
     await emit(job, 'log', { text: 'Liaison sémantique proposée par l’IA (vérification déterministe)' });
   } else if (composed.reason) {
@@ -206,19 +246,25 @@ async function runContractBuild(job: JobRef, input: { prompt: string; fileIds: s
   let planned: PlannedReq[] = bindClauses(reqs, datasets);
   const attempted = new Set(acqPlan.map((p) => acquisitionKey(p.ref, p.args)));
 
-  // Correction de contrat AVANT de multiplier les acquisitions.
+  // Correction de contrat AVANT de multiplier les acquisitions (1 tour LLM max restant).
   const earlyGaps = planned.filter((p) => p.tpl.mandatory && p.status !== 'covered' && p.tpl.view !== 'note');
   if (earlyGaps.length) {
-    const correction = await diagnoseCorrection(prompt, planned, earlyGaps.map((g) => `${g.tpl.id}: ${g.reason ?? g.status}`));
+    const correction = await diagnoseCorrection(prompt, planned, earlyGaps.map((g) => `${g.tpl.id}: ${g.reason ?? g.status}`), { budget });
     if (correction) {
       const allowedQ = new Set([...datasets.keys()].filter((qid) => {
         const ds = datasets.get(qid);
         return ds && ds.acq.envelope.status !== 'error' && !limitedServers.has(ds.acq.ref.serverId);
       }));
-      reqs = applyCorrection(reqs, correction, allowedQ);
-      u = { ...u, reqs };
-      planned = bindClauses(reqs, datasets);
-      await emit(job, 'log', { text: `Correction de contrat avant nouvelles lectures${correction.note ? ` : ${correction.note}` : ''}` });
+      const candidate = applyCorrection(reqs, correction, allowedQ);
+      const intact = assertIntentIntact(sealed, candidate);
+      if (intact.length) {
+        await emit(job, 'log', { text: `Correction refusée (exigences obligatoires protégées) : ${intact.slice(0, 3).join(' ; ')}` });
+      } else {
+        reqs = candidate;
+        u = { ...u, reqs };
+        planned = bindClauses(reqs, datasets);
+        await emit(job, 'log', { text: `Correction de contrat avant nouvelles lectures${correction.note ? ` : ${correction.note}` : ''}` });
+      }
     }
   }
 
@@ -239,10 +285,14 @@ async function runContractBuild(job: JobRef, input: { prompt: string; fileIds: s
     }
   }
 
-  // Couverture du prompt après liaison (avant approbation utilisateur).
-  const afterGaps = coverageGaps(coverage, planned.filter((p) => p.status === 'covered').map((p) => p.tpl));
+  // Fidélité vs prompt original + couverture (jamais adapter l'intention aux données).
+  const afterGaps = [
+    ...coverageGaps(coverage, planned.filter((p) => p.status === 'covered').map((p) => p.tpl)),
+    ...fidelityAgainstPrompt(sealed, planned),
+    ...assertIntentIntact(sealed, planned.map((p) => p.tpl)),
+  ];
   if (afterGaps.length) {
-    await emit(job, 'log', { text: `Couverture partielle après liaison : ${afterGaps.slice(0, 4).join(' ; ')}` });
+    await emit(job, 'log', { text: `Fidélité partielle après liaison : ${afterGaps.slice(0, 4).join(' ; ')}` });
   }
   for (const p of planned) await emit(job, 'log', { text: `Lien · ${p.tpl.label} → ${p.status}${p.reason ? ` (${p.reason})` : ''} [${p.tpl.visualization ?? p.tpl.view}${p.tpl.operation ?? p.tpl.agg ? ` ${p.tpl.operation ?? p.tpl.agg}` : ''}]` });
 
@@ -256,6 +306,9 @@ async function runContractBuild(job: JobRef, input: { prompt: string; fileIds: s
     })),
     canApprove: covered.length > 0,
     demo: acqs.some((a) => a.ref.demo),
+    engine: engineBanner(),
+    contractFingerprint: sealed.fingerprint,
+    llmBudgetUsed: budget.used,
   };
   await emit(job, 'source', summary);
   if (!summary.canApprove) {
@@ -287,7 +340,16 @@ async function runContractBuild(job: JobRef, input: { prompt: string; fileIds: s
 
   await setState(job, 'CONTRACT');
   const usedServers = new Set(acqs.filter((a) => a.envelope.status !== 'error').map((a) => a.ref.serverId));
-  const spec = assembleSpec({ u, planned, datasets, actions: planActions(catalog, usedServers, datasets), demo: summary.demo, prompt, pointsLocked: true });
+  // Certification fonctionnelle : assembler contre le prompt/contrat scellé (constraints conservées).
+  const fidelity = fidelityAgainstPrompt(sealed, planned);
+  if (fidelity.filter((g) => /intention dérivée|non couverte/.test(g)).length) {
+    await emit(job, 'log', { text: `Avertissement fidélité avant build : ${fidelity.slice(0, 3).join(' ; ')}` });
+  }
+  const spec = assembleSpec({
+    u, planned, datasets,
+    actions: planActions(catalog, usedServers, datasets),
+    demo: summary.demo, prompt, pointsLocked: true, constraints,
+  });
   await buildAndCertify(job, { spec, datasets, catalog, base: null, touched: new Set() });
 }
 

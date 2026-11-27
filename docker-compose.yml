@@ -2,7 +2,11 @@
 # Les services internes écoutent dans le conteneur ; seule la gateway est exposée.
 services:
   formule:
-    build: .
+    build:
+      context: .
+      args:
+        FORMULE_GIT_COMMIT: ${FORMULE_GIT_COMMIT:-unknown}
+        FORMULE_GIT_BRANCH: ${FORMULE_GIT_BRANCH:-unknown}
     ports: ["4000:4000"]
     env_file:
       - path: .env          # INCEPTION_API_KEY / OPENAI_API_KEY, Basic Auth… (facultatif)
