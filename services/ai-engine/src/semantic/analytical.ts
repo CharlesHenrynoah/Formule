@@ -204,9 +204,8 @@ export function periodInterval(period: string, refMs = Date.now()): { start: num
   const canonical = normalizePeriod(raw) ?? raw;
   const p = norm(canonical).replace(/\s+/g, ' ').trim();
   const ref = new Date(refMs);
-  // « 30 jours », « 30 derniers jours », « 7 heures »
-  const duration = p.match(/^(\d{1,3})\s*(?:derniers?\s+)?(jours?|heures?)$/)
-    ?? raw.match(/\b(\d{1,3})\s*(?:derniers?\s+)?(jours?|heures?)\b/);
+  // « 30 jours » (après normalizePeriod : aussi « 30 derniers/dernières jours|heures », « historique »)
+  const duration = p.match(/^(\d{1,3})\s*(jours?|heures?)$/);
   if (duration && Number(duration[1]) > 0) {
     return { start: refMs - Number(duration[1]) * (duration[2].startsWith('jour') ? 86400_000 : 3600_000), end: refMs };
   }
@@ -222,7 +221,7 @@ export function periodInterval(period: string, refMs = Date.now()): { start: num
   if (/24\s*h/.test(p) || p === 'jour') return { start: refMs - 24 * 3600_000, end: refMs };
   if (/7\s*jours|semaine/.test(p)) return { start: refMs - 7 * 24 * 3600_000, end: refMs };
   if (/30\s*jours|mois/.test(p) && !MONTHS[p]) return { start: refMs - 30 * 24 * 3600_000, end: refMs };
-  if (/annee|historique|history/.test(p)) return { start: refMs - 30 * 24 * 3600_000, end: refMs };
+  if (/annee/.test(p)) return { start: Date.UTC(ref.getUTCFullYear(), 0, 1), end: refMs };
   return null;
 }
 

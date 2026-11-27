@@ -425,6 +425,7 @@ function aiReqToTpl(r: z.infer<typeof ReqSchema>, index: number, design?: string
   const measures = r.measures?.map(norm).filter((m) => m.length > 1).slice(0, 8);
   const entities = r.entities?.map((e) => e.trim()).filter((e) => e.length >= 2 && e.length <= 40 && e.split(/\s+/).length <= 3);
   const covers = r.covers?.map((c) => c.slice(0, 120));
+  const period = normalizePeriod(r.period) ?? r.period;
   return {
     id, label: r.label.slice(0, 120), mandatory: r.certainty !== 'hypothesis', tool: r.toolHints?.length ? r.toolHints.map(norm) : ['*'],
     title: r.label.slice(0, 80), view, visualization: view,
@@ -432,7 +433,7 @@ function aiReqToTpl(r: z.infer<typeof ReqSchema>, index: number, design?: string
     where: filters, filters,
     denWhere: agg === 'ratio' ? [] : undefined,
     percent: agg === 'ratio',
-    entities, population: r.population, period: normalizePeriod(r.period) ?? r.period, grain: r.grain, unit: r.unit,
+    entities, population: r.population, period, grain: r.grain, unit: r.unit,
     transform: r.transform, limit: r.limit, order: r.order, section: r.section, design, covers,
     label_: view === 'ranking' || view === 'donut' || view === 'bars' || view === 'table' ? ['nom', 'name', 'libelle', 'categorie', 'symbol', 'id'] : undefined,
     dimensions: view === 'ranking' || view === 'donut' || view === 'bars' || view === 'table' ? ['nom', 'name', 'libelle', 'categorie', 'symbol'] : undefined,
@@ -440,7 +441,7 @@ function aiReqToTpl(r: z.infer<typeof ReqSchema>, index: number, design?: string
       view, agg ? `op:${agg}` : null, r.transform ? `transform:${r.transform}` : null,
       r.certainty === 'hypothesis' ? 'hypothèse' : null,
       entities?.length ? `entite:${entities.join(',')}` : null,
-      r.population ? `pop:${r.population}` : null, r.period ? `periode:${r.period}` : null,
+      r.population ? `pop:${r.population}` : null, period ? `periode:${period}` : null,
       r.limit != null ? `limit:${r.limit}` : null,
       covers?.length ? `covers:${covers.join('|')}` : null,
     ].filter(Boolean).join(' · ').slice(0, 300),
