@@ -67,11 +67,12 @@ function sourceSummary(acqs: Acquired[]) {
   });
 }
 
-async function acquireFromPlan(job: JobRef, planned: PlannedAcquisition[], projectId: string | null, usedIds = new Set<string>()) {
+async function acquireFromPlan(job: JobRef, planned: PlannedAcquisition[], projectId: string | null, usedIds = new Set<string>(), limitedServers = new Set<string>()) {
   const acqs: Acquired[] = [];
   for (const p of planned) {
     check(job);
     const { ref, args } = p;
+    if (limitedServers.has(ref.serverId)) continue;
     const suffix = 'code' in args ? `_${String(args.intent ?? 'gabarit').replace(/^Formule : /, '')}` : Object.keys(args).length ? `_${Object.values(args).map(String).join('_').split('/').pop()}` : '';
     const baseId = (queryIdFor(ref.serverId, ref.tool.name) + suffix).toLowerCase().replace(/[^a-z0-9_-]+/g, '_').slice(0, 40);
     let qid = baseId; let n = 2;
@@ -80,7 +81,8 @@ async function acquireFromPlan(job: JobRef, planned: PlannedAcquisition[], proje
     await emit(job, 'log', { text: `Lecture ${ref.serverName} · ${ref.tool.name}${'code' in args ? ` (gabarit relu : ${args.intent})` : Object.keys(args).length ? ` ${JSON.stringify(args)}` : ''}${p.forReqIds[0] !== '*' ? ` ← ${p.forReqIds.join(',')}` : ''}` });
     const a = await acquire(ref, qid, { jobId: job.id, projectId }, args);
     acqs.push(a);
-    await emit(job, 'log', { text: `${ref.tool.name} : ${a.envelope.status}${a.envelope.error ? ` (${a.envelope.error.kind})` : ''}${a.envelope.coverage.note ? ` — ${a.envelope.coverage.note}` : ''}` });
+    if (a.envelope.error?.kind === 'quota' || a.envelope.error?.kind === 'rate_limited') limitedServers.add(ref.serverId);
+    await emit(job, 'log', { text: `${ref.tool.name} : ${a.envelope.status}${a.envelope.error ? ` (${a.envelope.error.kind}) — ${a.envelope.error.message}` : ''}${a.envelope.coverage.note ? ` — ${a.envelope.coverage.note}` : ''}`, retryAfterMs: a.envelope.error?.retryAfterMs });
   }
   return acqs;
 }
@@ -154,7 +156,8 @@ async function runContractBuild(job: JobRef, input: { prompt: string; fileIds: s
   }
 
   const usedIds = new Set<string>();
-  const acqs = await acquireFromPlan(job, acqPlan, null, usedIds);
+  const limitedServers = new Set<string>();
+  const acqs = await acquireFromPlan(job, acqPlan, null, usedIds, limitedServers);
   const datasets = new Map<string, Dataset>();
   for (const a of acqs) datasets.set(a.queryId, datasetOf(a));
 
@@ -166,11 +169,13 @@ async function runContractBuild(job: JobRef, input: { prompt: string; fileIds: s
     check(job);
     const missing = planned.filter((p) => p.status !== 'covered' && p.tpl.view !== 'note').map((p) => p.tpl);
     if (!missing.length) break;
-    const next = await planAcquisitions(missing, scoped, prompt, fileIds, attempted);
+    const available = scoped.filter((s) => !limitedServers.has(s.serverId));
+    if (!available.length) break;
+    const next = await planAcquisitions(missing, available, prompt, fileIds, attempted);
     const candidates = next.planned.slice(0, 8);
     if (!candidates.length) break;
     for (const p of candidates) attempted.add(acquisitionKey(p.ref, p.args));
-    const retry = await acquireFromPlan(job, candidates, null, usedIds);
+    const retry = await acquireFromPlan(job, candidates, null, usedIds, limitedServers);
     for (const a of retry) { acqs.push(a); datasets.set(a.queryId, datasetOf(a)); }
     planned = bindClauses(reqs, datasets);
   }

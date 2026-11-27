@@ -1,8 +1,9 @@
+import { canonicalJson } from '@formule/contracts';
 import { packReads, rankTools, resolveArgs, type CatalogServer, type ToolRef } from '../discovery/catalog.js';
 import type { ReqTemplate } from './lexicon.js';
 
 export interface PlannedAcquisition { ref: ToolRef; args: Record<string, unknown>; forReqIds: string[] }
-export const acquisitionKey = (ref: ToolRef, args: Record<string, unknown>) => `${ref.serverId}__${ref.tool.name}__${JSON.stringify(args)}`;
+export const acquisitionKey = (ref: ToolRef, args: Record<string, unknown>) => `${ref.serverId}__${ref.tool.name}__${canonicalJson(args)}`;
 
 /**
  * Planifie les lectures MCP par exigence et combinaison d'arguments.
@@ -25,7 +26,7 @@ export async function planAcquisitions(
   const add = (ref: ToolRef, args: Record<string, unknown>, reqId: string) => {
     const key = acquisitionKey(ref, args);
     if (excluded.has(key)) return false;
-    const existing = planned.find((p) => `${p.ref.serverId}__${p.ref.tool.name}__${JSON.stringify(p.args)}` === key);
+    const existing = planned.find((p) => acquisitionKey(p.ref, p.args) === key);
     if (existing) { if (!existing.forReqIds.includes(reqId)) existing.forReqIds.push(reqId); return true; }
     if (seen.has(key)) return true;
     seen.add(key);

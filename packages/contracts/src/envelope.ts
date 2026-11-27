@@ -25,7 +25,7 @@ export interface AcquisitionEnvelope {
   tool: string;
   args: Record<string, unknown>; // expurgés
   status: 'ok' | 'empty' | 'partial' | 'error';
-  error?: { kind: FailureKind; message: string };
+  error?: { kind: FailureKind; message: string; retryAfterMs?: number };
   requestId: string;
   schemaVersion: string;
   fetchedAt: string;
@@ -40,7 +40,8 @@ export function failureMessage(serverName: string, kind: FailureKind): string {
   const action: Partial<Record<FailureKind, string>> = {
     not_connected: 'Reconnecte-le pour continuer.',
     permission: 'Reconnecte-le pour continuer.',
-    quota: 'Réessaie plus tard.',
+    quota: 'Vérifie le quota fournisseur avant de réessayer.',
+    rate_limited: 'Réessaie après le délai indiqué par le fournisseur.',
     timeout: 'Actualise ou lance un diagnostic.',
     provider_down: 'Actualise plus tard ou lance un diagnostic.',
     method_missing: 'Choisis un autre outil ou une autre source.',
