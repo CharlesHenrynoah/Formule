@@ -28,6 +28,33 @@ const asStringArray = (max: number, itemMax: number) => z.preprocess((v) => {
   return [String(v).slice(0, itemMax)];
 }, z.array(z.string().min(1).max(itemMax)).max(max).optional());
 
+// Normalise uniquement des variantes de représentation connues, jamais une intention inconnue.
+const absent = (v: unknown) => v == null || v === '' ? undefined : v;
+const TransformEnum = z.preprocess((v) => {
+  if (v == null || v === '' || v === false) return undefined;
+  if (typeof v !== 'string') return v;
+  const s = norm(v).replace(/[\s_-]/g, '');
+  if (['none','raw','identity','aucune','notransform','notransformation'].includes(s)) return undefined;
+  if (['base100','index100','rebased100','rebase100','normalizebase100','normalisationbase100'].includes(s)) return 'base100';
+  return v; // Une transformation inconnue nécessite réparation, pas suppression.
+}, z.enum(['base100']).optional());
+
+const OrderEnum = z.preprocess((v) => {
+  if (absent(v) === undefined) return undefined;
+  if (typeof v !== 'string') return v;
+  const s = norm(v).trim();
+  if (['asc','ascending','croissant','croissante'].includes(s)) return 'asc';
+  if (['desc','descending','decroissant','decroissante'].includes(s)) return 'desc';
+  return v;
+}, z.enum(['asc', 'desc']).optional());
+
+const FilterOp = z.preprocess((v) => {
+  if (typeof v !== 'string') return v;
+  const s = v.trim().toLowerCase();
+  const aliases: Record<string, string> = { '=': 'eq', '==': 'eq', '!=': 'neq', '<>': 'neq', '>': 'gt', '<': 'lt', '>=': 'gte', '<=': 'lte' };
+  return aliases[s] ?? s;
+}, z.enum(['eq', 'neq', 'current_month', 'gt', 'lt', 'gte', 'lte', 'in', 'between']));
+
 const FilterSchema = z.object({
   field: z.preprocess((v) => {
     if (typeof v === 'string') return [v.slice(0, 40)];
@@ -35,7 +62,7 @@ const FilterSchema = z.object({
     if (v && typeof v === 'object') return Object.values(v as object).map((x) => String(x).slice(0, 40)).slice(0, 6);
     return ['id'];
   }, z.array(z.string().min(1).max(40)).min(1).max(6)),
-  op: z.enum(['eq', 'neq', 'current_month', 'gt', 'lt', 'gte', 'lte', 'in', 'between']),
+  op: FilterOp,
   value: z.union([z.string(), z.number(), z.array(z.union([z.string(), z.number()])).max(12)]).optional(),
 });
 
@@ -67,9 +94,9 @@ const AggEnum = z.preprocess((v) => {
 }, z.enum(AGGS).optional());
 
 const ReqSchema = z.object({
-  id: z.string().min(1).max(40).optional(),
+  id: z.preprocess((v) => typeof v === 'number' ? String(v) : absent(v), z.string().min(1).max(40).optional()),
   label: z.preprocess((v) => (v == null ? 'Exigence' : String(v).slice(0, 120)), z.string().min(1).max(120)),
-  kind: z.enum(['analytical', 'note']).default('analytical'),
+  kind: z.preprocess(absent, z.enum(['analytical', 'note']).default('analytical')),
   visualization: ViewEnum,
   operation: AggEnum,
   measures: asStringArray(6, 40),
@@ -78,12 +105,7 @@ const ReqSchema = z.object({
   period: z.preprocess((v) => (v == null ? undefined : String(v).slice(0, 40)), z.string().max(40).optional()),
   grain: z.preprocess((v) => (v == null ? undefined : String(v).slice(0, 20)), z.string().max(20).optional()),
   unit: z.preprocess((v) => (v == null ? undefined : String(v).slice(0, 20)), z.string().max(20).optional()),
-  transform: z.preprocess((v) => {
-    if (v == null || v === '' || v === false) return undefined;
-    const s = String(v).toLowerCase().replace(/[\s_-]/g, '');
-    if (s === 'base100' || s === 'rebase' || s === 'normalize' || s === 'normalise') return 'base100';
-    return undefined;
-  }, z.enum(['base100']).optional()),
+  transform: TransformEnum,
   filters: z.preprocess((v) => (v == null ? undefined : Array.isArray(v) ? v : [v]), z.array(FilterSchema).max(4).optional()),
   toolHints: asStringArray(6, 60),
   argHints: z.preprocess((v) => {
@@ -91,14 +113,14 @@ const ReqSchema = z.object({
     if (typeof v === 'object') return v;
     return undefined;
   }, z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional()),
-  certainty: z.enum(['certain', 'hypothesis']).optional(),
+  certainty: z.preprocess(absent, z.enum(['certain', 'hypothesis']).optional()),
   section: z.preprocess((v) => (v == null ? undefined : String(v).slice(0, 40)), z.string().max(40).optional()),
   limit: z.preprocess((v) => {
     if (v == null || v === '') return undefined;
     const n = Number(v);
     return Number.isFinite(n) ? Math.min(50, Math.max(1, Math.trunc(n))) : undefined;
   }, z.number().int().min(1).max(50).optional()),
-  order: z.enum(['asc', 'desc']).optional(),
+  order: OrderEnum,
   covers: asStringArray(6, 120),
 });
 
@@ -118,7 +140,7 @@ const AcquisitionGroupSchema = z.object({
     if (typeof v === 'object') return v;
     return undefined;
   }, z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional()),
-  dataNotDocs: z.boolean().default(true),
+  dataNotDocs: z.preprocess((v) => v == null ? undefined : v, z.boolean().default(true)),
 });
 
 const strList = (max: number) => z.preprocess((v) => {
@@ -135,12 +157,12 @@ export const InterpretPlanSchema = z.object({
   mission: z.preprocess((v) => (v == null || v === '' ? 'Analyse' : String(v).slice(0, 400)), z.string().min(1).max(400)),
   /** Points du prompt original qui doivent apparaître dans le contrat (couverture). */
   coverage: strList(40).pipe(z.array(z.string().min(1).max(160)).min(1).max(40)),
-  constraints: z.object({
+  constraints: z.preprocess(absent, z.object({
     global: strList(20).optional(),
     design: strList(20).optional(),
     interactions: strList(20).optional(),
     reliability: strList(20).optional(),
-  }).optional(),
+  }).optional()),
   requirements: z.preprocess((v) => (Array.isArray(v) ? v : v && typeof v === 'object' ? Object.values(v as object) : []), z.array(ReqSchema).min(1).max(40)),
   /** Groupes d'acquisition : mutualisation + décomposition multi-entités. */
   acquisitions: z.preprocess((v) => (v == null ? undefined : Array.isArray(v) ? v : [v]), z.array(AcquisitionGroupSchema).max(40).optional()),
@@ -157,7 +179,7 @@ export const BindComposeSchema = z.object({
     label: z.string().max(80).optional(),
     operation: z.enum(AGGS).optional(),
     visualization: z.enum(VIEW_KINDS).optional(),
-    transform: z.enum(['base100']).optional(),
+    transform: TransformEnum,
     filters: z.array(FilterSchema).max(4).optional(),
     unsatisfied: z.boolean().optional(),
     reason: z.string().max(200).optional(),
@@ -220,10 +242,41 @@ Règles :
 3. entities = noms propres courts. Jamais une phrase.
 4. measures = concepts métier, jamais des mots grammaticaux.
 5. Populations partagées → constraints.global + population sur chaque exigence concernée.
-6. Comparaison multi-entités / base 100 → transform=base100, entities listées, acquisitions décomposées si besoin.
+6. Comparaison multi-entités : entities listées, acquisitions décomposées si besoin. transform=base100 uniquement si la normalisation en base 100 est demandée ; sinon omets transform.
 7. toolHints = outils de DONNÉES. search_docs / documentation uniquement si demandé.
 8. covers[] sur chaque exigence pointe vers des entrées de coverage.
-9. JSON uniquement. Tu n'exécutes rien.`;
+9. JSON uniquement. Tu n'exécutes rien. Omettre les propriétés facultatives non pertinentes ; ne pas émettre null, des objets fictifs ou des valeurs hors enum.`;
+
+// Schéma de communication concret : les champs facultatifs de cet exemple ne doivent
+// être émis que lorsqu'ils correspondent au prompt. Les exemples ne sont pas des données.
+const INTERPRET_FORMAT = `Objet JSON : title (string, <=80), mission (string, <=400), coverage (string[] non vide).
+constraints facultatif : {global?:string[], design?:string[], interactions?:string[], reliability?:string[]}.
+requirements (1..40 objets) : {id?:string, label:string, kind?:"analytical"|"note",
+visualization?:${VIEW_KINDS.join('|')}, operation?:${AGGS.join('|')}, measures?:string[], entities?:string[],
+population?:string, period?:string, grain?:string, unit?:string, transform?:"base100",
+filters?:[{field:string[],op:"eq"|"neq"|"current_month"|"gt"|"lt"|"gte"|"lte"|"in"|"between",value?:string|number|array de strings/nombres}],
+toolHints?:string[], argHints?:objet de valeurs string/number/boolean, certainty?:"certain"|"hypothesis",
+section?:string, limit?:entier 1..50, order?:"asc"|"desc", covers?:string[]}.
+acquisitions facultatif (0..40 objets) : {id:string, purpose?:string, entity?:string, forRequirementIds:string[] non vide,
+toolHints?:string[], argHints?:objet de valeurs string/number/boolean, dataNotDocs?:boolean}.
+Respecte les types et valeurs exacts. Omettre les champs facultatifs sans valeur. Pas de null. Ne pas inventer d'exigence.`;
+
+/** Chemins Zod explicites, sans valeur brute ni données sensibles. */
+export function interpretationIssues(error: z.ZodError): string {
+  return error.issues.slice(0, 12).map((i) => {
+    const path = i.path.map(String).join('.') || 'racine';
+    return path + ': ' + i.message;
+  }).join(' ; ');
+}
+
+/** Une seule réparation de format, avant toute lecture MCP. Jamais de repli syntaxique. */
+export async function validateInterpretation(raw: unknown, repair?: (issues: string) => Promise<unknown>) {
+  const first = InterpretPlanSchema.safeParse(raw);
+  if (first.success || raw == null || !repair) return first;
+  const fixed = await repair(interpretationIssues(first.error));
+  if (fixed == null) return first;
+  return InterpretPlanSchema.safeParse(fixed);
+}
 
 function emptyConstraints() {
   return { global: [] as string[], design: [] as string[], interactions: [] as string[], reliability: [] as string[] };
@@ -237,7 +290,7 @@ function unavailable(reason: string, base: Understanding): HybridPlan {
 }
 
 /** Appel 1 : contrat depuis le prompt. Pas de repli syntaxique équivalent. */
-export async function interpretAndPlan(prompt: string, catalog: CatalogServer[], base: Understanding): Promise<HybridPlan> {
+export async function interpretAndPlan(prompt: string, catalog: CatalogServer[], base: Understanding, options?: { budget?: LlmBudget }): Promise<HybridPlan> {
   // Mode démo sans LLM : packs explicites seulement, jamais readContract présenté comme succès.
   if (llm.name === 'mock') {
     if (!base.generic && base.reqs.length) {
@@ -265,15 +318,22 @@ export async function interpretAndPlan(prompt: string, catalog: CatalogServer[],
     kind: /search_docs|documentation|readme|^docs?$/i.test(t.name) ? 'docs' : 'data',
   }))).slice(0, 48);
 
-  const raw = await llm.json<unknown>([
-    { role: 'system', content: CALL_A_SYSTEM },
-    { role: 'user', content: `Consigne originale (ne la découpe pas lexicalement) :\n${fenceUntrusted('demande', prompt, 7000)}\n\nCatalogue (kind=docs | data) :\n${fenceUntrusted('outils', JSON.stringify(tools), 5000)}\n\nSchéma : {"title","mission","coverage":[str],"constraints?":{"global?","design?","interactions?","reliability?"},"requirements":[{...}],"acquisitions?":[{"id","purpose?","entity?","forRequirementIds","toolHints?","argHints?","dataNotDocs?"}]}` },
-  ], 60_000).catch(() => null);
+  const messages = [
+    { role: 'system' as const, content: CALL_A_SYSTEM + '\n\n' + INTERPRET_FORMAT },
+    { role: 'user' as const, content: `Consigne originale (ne la découpe pas lexicalement) :\n${fenceUntrusted('demande', prompt, 7000)}\n\nCatalogue (kind=docs | data) :\n${fenceUntrusted('outils', JSON.stringify(tools), 5000)}` },
+  ];
+  const raw = await llm.json<unknown>(messages, 60_000).catch(() => null);
+  if (raw == null) return unavailable('Aucune réponse JSON exploitable du LLM (disponibilité, quota ou format à vérifier).', base);
 
-  const parsed = InterpretPlanSchema.safeParse(raw);
-  if (!parsed.success || !parsed.data.requirements.length) {
-    const detail = parsed.success ? 'contrat vide' : parsed.error.issues.slice(0, 3).map((i) => i.message).join(' ; ');
-    return unavailable(`Échec d’interprétation LLM : ${detail}. Aucun contrat syntaxique de substitution.`, base);
+  const parsed = await validateInterpretation(raw, async (issues) => {
+    if (options?.budget && !options.budget.take()) return null;
+    return llm.json<unknown>([
+      ...messages,
+      { role: 'user', content: `La réponse précédente est rejetée par le schéma. Répare uniquement le format JSON et les types, en préservant toutes les intentions explicites de la consigne originale. Renvoie le contrat complet.\nErreurs : ${issues}\nContrat à réparer : ${fenceUntrusted('contrat', JSON.stringify(raw), 12000)}` },
+    ], 30_000).catch(() => null);
+  });
+  if (!parsed.success) {
+    return unavailable(`Contrat JSON LLM non conforme : ${interpretationIssues(parsed.error)}. Aucun contrat syntaxique de substitution.`, base);
   }
 
   const designNote = [

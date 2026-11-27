@@ -6,6 +6,8 @@ import {
   applyCorrection,
   coverageGaps,
   interpretAndPlan,
+  validateInterpretation,
+  interpretationIssues,
 } from '../src/semantic/hybrid.js';
 import { draftAnalytical } from '../src/semantic/analytical.js';
 import type { ReqTemplate, Understanding } from '../src/semantic/lexicon.js';
@@ -171,5 +173,52 @@ describe('applyCorrection', () => {
     }, new Set());
     expect(out[0].measures).toContain('market_cap');
     expect(out[0].measures).not.toContain('permets');
+  });
+});
+
+
+describe('validation du contrat LLM', () => {
+  const fixture = (transform: unknown, extra: Record<string, unknown> = {}) => ({
+    title: 'Analyse', mission: 'Comparer', coverage: ['Comparer les séries'],
+    requirements: [{ id: 'r1', label: 'Comparer les séries', visualization: 'line', transform, ...extra }],
+  });
+
+  it('accepte base 100 et les valeurs facultatives nulles sans inventer de normalisation', () => {
+    const normalized = InterpretPlanSchema.parse(fixture('base 100', { order: null, certainty: null }));
+    expect(normalized.requirements[0].transform).toBe('base100');
+    const plain = InterpretPlanSchema.parse({ ...fixture('none'), constraints: null });
+    expect(plain.requirements[0].transform).toBeUndefined();
+  });
+
+  it('rejette une transformation inconnue et indique son chemin exact', () => {
+    const parsed = InterpretPlanSchema.safeParse(fixture('logarithm'));
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) expect(interpretationIssues(parsed.error)).toContain('requirements.0.transform');
+  });
+
+  it('répare une réponse invalide une seule fois', async () => {
+    let calls = 0;
+    const parsed = await validateInterpretation(fixture('logarithm'), async (issues) => {
+      calls++;
+      expect(issues).toContain('requirements.0.transform');
+      return fixture('base100');
+    });
+    expect(calls).toBe(1);
+    expect(parsed.success).toBe(true);
+  });
+
+  it('ne relance pas le LLM en absence de réponse ou après une réparation invalide', async () => {
+    let calls = 0;
+    const repair = async () => { calls++; return fixture('unsupported'); };
+    expect((await validateInterpretation(null, repair)).success).toBe(false);
+    expect(calls).toBe(0);
+    expect((await validateInterpretation(fixture('unsupported'), repair)).success).toBe(false);
+    expect(calls).toBe(1);
+  });
+
+  it('normalise les opérateurs de filtre et les ordres équivalents', () => {
+    const p = InterpretPlanSchema.parse(fixture(null, { order: 'descending', filters: [{ field: 'variation', op: '>', value: 0 }] }));
+    expect(p.requirements[0].order).toBe('desc');
+    expect(p.requirements[0].filters?.[0].op).toBe('gt');
   });
 });
