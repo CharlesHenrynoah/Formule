@@ -146,13 +146,23 @@ export function resolveRequirement(req: ReqTemplate, ds: Dataset, viewId: string
     const metric = op === 'count' ? undefined : matchField(F, measureKws, ['measure']);
     if (!label) return { ok: false, reason: `champ « ${req.label_?.[0] ?? 'libellé'} » absent des données lues (${src})` };
     if (measureKws?.length && op !== 'count' && !metric) return { ok: false, reason: `champ « ${measureKws[0]} » absent — pas de substitution par un comptage (${src})` };
+    // identity : mesure brute par entité, sans somme/comptage artificiel.
+    if (op === 'identity') {
+      if (!metric) return { ok: false, reason: `identité graphique sans mesure (${src})` };
+      const where = bindFilters(F, req.filters ?? req.where, src);
+      if (!where.ok) return where;
+      return { ok: true, evidencePath: `${coll}[].${metric.rel}`, view: {
+        kind: req.view, id: viewId, title: req.title, queryId, requirementIds: [req.id],
+        bindings: { collection: coll, label: label.rel, metric: metric.rel, agg: 'identity', unit: metric.unit ?? req.unit ?? null, limit: req.limit ?? Math.max(2, req.entities?.length ?? 8) },
+      } };
+    }
     if (metric && (op === 'sum' || op === undefined) && NON_ADDITIVE.test(norm(metric.rel))) {
       return { ok: false, reason: `somme interdite sur « ${metric.rel} » : mesure non additive (${src})` };
     }
     const agg = op === 'avg' ? 'avg' : op === 'count' || !metric ? 'count' : 'sum';
     return { ok: true, evidencePath: `${coll}[].${metric?.rel ?? label.rel}`, view: {
       kind: req.view, id: viewId, title: req.title, queryId, requirementIds: [req.id],
-      bindings: { collection: coll, label: label.rel, ...(metric && agg !== 'count' ? { metric: metric.rel } : {}), agg, unit: metric?.unit ?? null, limit: req.limit ?? 8 },
+      bindings: { collection: coll, label: label.rel, ...(metric && agg !== 'count' ? { metric: metric.rel } : {}), agg, unit: metric?.unit ?? req.unit ?? null, limit: req.limit ?? 8 },
     } };
   }
   if (req.view === 'histogram') {

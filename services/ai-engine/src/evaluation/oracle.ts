@@ -16,7 +16,7 @@ function coll(raw: unknown, path: string): unknown[] {
 }
 
 export type Expectation =
-  | { viewId: string; kind: 'kpi'; value: string }   // valeur attendue dans data-value ('' si non disponible)
+  | { viewId: string; kind: 'kpi'; value: string }
   | { viewId: string; kind: 'line'; points: number }
   | { viewId: string; kind: 'table'; rows: number }
   | { viewId: string; kind: 'ranking'; first: string }
@@ -63,7 +63,7 @@ export function expectations(views: ViewSpec[], raws: Record<string, unknown>, r
             let n = 0, d = 0, used = 0;
             for (const r of kept) { const x = num(r, a.measure), y = num(r, a.den); if (x !== null && y !== null) { n += x; d += y; used++; } }
             if (used && d) value = String(Math.round((a.percent ? (n / d) * 100 : n / d) * 100) / 100);
-          }           else if (a.agg === 'last') { const x = num(kept[kept.length - 1], a.measure); value = x === null ? '' : String(x); }
+          } else if (a.agg === 'last') { const x = num(kept[kept.length - 1], a.measure); value = x === null ? '' : String(x); }
           else if (a.agg === 'identity') {
             if (kept.length === 1) { const x = num(kept[0], a.measure); value = x === null ? '' : String(x); }
             else value = '';
@@ -99,15 +99,17 @@ export function expectations(views: ViewSpec[], raws: Record<string, unknown>, r
       out.push({ viewId: v.id, kind: 'ranking', first: list[0] ? `${list[0].label}=${list[0].value}` : '' });
     } else if (v.kind === 'bars' || v.kind === 'donut') {
       const b = v.bindings; const rows = coll(raw, b.collection);
-      const acc: Record<string, { s: number; n: number; c: number }> = {};
+      const acc: Record<string, { s: number; n: number; c: number; first: number | null }> = {};
       for (const r of rows) {
         const l = dig(r, b.label); const k = l === null || l === undefined || l === '' ? '(non renseigné)' : String(l);
-        acc[k] ??= { s: 0, n: 0, c: 0 }; acc[k].c++;
+        acc[k] ??= { s: 0, n: 0, c: 0, first: null }; acc[k].c++;
         const m = b.metric ? dig(r, b.metric) : undefined;
-        if (typeof m === 'number' && isFinite(m)) { acc[k].s += m; acc[k].n++; }
+        if (typeof m === 'number' && isFinite(m)) { acc[k].s += m; acc[k].n++; if (acc[k].first === null) acc[k].first = m; }
       }
-      const list = Object.entries(acc).map(([label, g]) => ({ label, value: b.agg === 'count' ? g.c : b.agg === 'sum' ? Math.round(g.s * 100) / 100 : g.n ? Math.round((g.s / g.n) * 100) / 100 : NaN }))
-        .filter((x) => !isNaN(x.value)).sort((a, c) => c.value - a.value || a.label.localeCompare(c.label));
+      const list = Object.entries(acc).map(([label, g]) => ({
+        label,
+        value: b.agg === 'count' ? g.c : b.agg === 'identity' ? (g.c === 1 && g.first !== null ? g.first : NaN) : b.agg === 'sum' ? Math.round(g.s * 100) / 100 : g.n ? Math.round((g.s / g.n) * 100) / 100 : NaN,
+      })).filter((x) => !isNaN(x.value)).sort((a, c) => c.value - a.value || a.label.localeCompare(c.label));
       out.push({ viewId: v.id, kind: 'ranking', first: list[0] ? `${list[0].label}=${list[0].value}` : '' });
     } else if (v.kind === 'histogram') {
       const rows = coll(raw, v.bindings.collection);
@@ -131,7 +133,6 @@ function asNumber(v: unknown): number | null {
   return null;
 }
 
-/** Même politique de filtre que le runtime, réécrite ici pour rester un oracle indépendant. */
 function keep(v: unknown, w: { op: string; value?: string | number | (string | number)[] }, ref: Date): boolean {
   if (w.op === 'eq') return v === w.value || (asNumber(v) !== null && asNumber(v) === asNumber(w.value));
   if (w.op === 'neq') return v !== w.value;
@@ -154,36 +155,66 @@ function keep(v: unknown, w: { op: string; value?: string | number | (string | n
   return !isNaN(+d) && d.getUTCFullYear() === ref.getUTCFullYear() && d.getUTCMonth() === ref.getUTCMonth();
 }
 
-/** L'oracle refuse toute divergence avec le contrat d'origine jusqu'à la certification. */
+function sameValue(a: unknown, b: unknown) {
+  if (a === b) return true;
+  if (asNumber(a) !== null && asNumber(a) === asNumber(b)) return true;
+  if (Array.isArray(a) && Array.isArray(b)) return a.length === b.length && a.every((x, i) => sameValue(x, b[i]));
+  return String(a) === String(b);
+}
+
+/** Refuse toute divergence avec le contrat d'origine jusqu'à la certification. */
 export function contradicts(
   req: {
     view: string; visualization?: string; agg?: string; operation?: string;
-    where?: { path?: string; op: string; value?: unknown }[]; filters?: { path?: string; op: string; value?: unknown }[];
-    percent?: boolean; limit?: number; order?: string; entities?: string[]; population?: string; period?: string; grain?: string;
+    where?: { field?: string[]; path?: string; op: string; value?: unknown }[];
+    filters?: { field?: string[]; path?: string; op: string; value?: unknown }[];
+    percent?: boolean; limit?: number; order?: string; entities?: string[];
+    population?: string; period?: string; grain?: string; unit?: string; columns?: string[];
   },
   view: {
     kind: string;
-    bindings?: {
-      aggregate?: { agg?: string; where?: { path: string; op: string; value?: unknown }[]; percent?: boolean };
-      limit?: number; order?: string; population?: string;
+    bindings?: Record<string, unknown> & {
+      aggregate?: { agg?: string; where?: { path: string; op: string; value?: unknown }[]; percent?: boolean; unitPath?: string; measure?: string };
+      limit?: number; order?: string; population?: string; unit?: string | null; columns?: { path: string }[];
+      label?: string; metric?: string; agg?: string;
     };
   } | undefined,
 ): string | null {
   if (!view) return `vue « ${req.visualization ?? req.view} » absente`;
   const wantView = req.visualization ?? req.view;
   if (view.kind !== wantView) return `vue « ${view.kind} » au lieu de « ${wantView} »`;
+
   const wantOp = req.operation ?? req.agg;
-  const got = view.bindings?.aggregate?.agg;
-  if (wantOp && got && got !== wantOp) return `opération « ${got} » au lieu de « ${wantOp} »`;
-  if (wantOp === 'identity' && got && got !== 'identity') return `identité remplacée par « ${got} »`;
+  const gotOp = view.bindings?.aggregate?.agg ?? (typeof view.bindings?.agg === 'string' ? view.bindings.agg : undefined);
+  if (wantOp && gotOp && gotOp !== wantOp) return `opération « ${gotOp} » au lieu de « ${wantOp} »`;
+  if (wantOp === 'identity' && gotOp && gotOp !== 'identity') return `identité remplacée par « ${gotOp} »`;
+
   const wantFilters = req.filters ?? req.where ?? [];
   const gotFilters = view.bindings?.aggregate?.where ?? [];
-  for (const w of wantFilters) {
-    const hit = gotFilters.find((g) => g.op === w.op && (w.path ? g.path === w.path || g.path.endsWith(w.path) : true));
-    if (!hit && view.kind === 'kpi') return `filtre « ${w.op} » absent de la vue certifiée`;
+  if (view.kind === 'kpi') {
+    for (const w of wantFilters) {
+      const hit = gotFilters.find((g) => g.op === w.op && (w.value === undefined || sameValue(g.value, w.value)));
+      if (!hit) return `filtre « ${w.op}${w.value !== undefined ? `=${JSON.stringify(w.value)}` : ''} » absent ou altéré`;
+    }
   }
+
   if (req.percent && view.bindings?.aggregate && view.bindings.aggregate.percent !== true) return 'pourcentage exigé absent';
   if (req.limit != null && view.bindings?.limit != null && view.bindings.limit !== req.limit) return `limite ${view.bindings.limit} au lieu de ${req.limit}`;
   if (req.order && view.bindings?.order && view.bindings.order !== req.order) return `ordre « ${view.bindings.order} » au lieu de « ${req.order} »`;
+  if (req.population && view.bindings?.population && !String(view.bindings.population).toLowerCase().includes(req.population.split(/\s+/)[0]?.toLowerCase() ?? '')) {
+    return `population « ${view.bindings.population} » au lieu de « ${req.population} »`;
+  }
+  if (req.unit && view.bindings?.unit != null && view.bindings.unit !== null) {
+    const u = String(view.bindings.unit).toLowerCase();
+    if (!u.includes(req.unit.toLowerCase()) && !req.unit.toLowerCase().includes(u)) return `unité « ${view.bindings.unit} » au lieu de « ${req.unit} »`;
+  }
+  if (req.columns?.length && view.kind === 'table' && Array.isArray(view.bindings?.columns)) {
+    const paths = (view.bindings.columns as { path: string }[]).map((c) => c.path.toLowerCase());
+    for (const col of req.columns) {
+      if (!paths.some((p) => p.includes(col.toLowerCase()) || col.toLowerCase().includes(p.split('.').pop() ?? ''))) {
+        return `colonne « ${col} » absente`;
+      }
+    }
+  }
   return null;
 }

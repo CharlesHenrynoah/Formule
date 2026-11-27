@@ -38,15 +38,33 @@ function analytical(t: string) {
   return /(nombre|combien|effectif|compte|total|somme|cumul|moyenne|part|proportion|pourcentage|ratio|repartition|classement|top\b|courbe|evolution|historique|serie|circulaire|camembert|donut|histogramme|distribution|barres|nuage|correlation|heatmap|chaleur|calendrier|tableau|liste|detail|simulation|scenario|prix|quantite|montant|variation|hausse|baisse|valeur (?:de|du|des)|identit)/.test(t);
 }
 
-/** Découpe atomique : une exigence = une opération + une visualisation. */
+/** Découpe atomique : une exigence = une opération + une visualisation. Conserve sujet et opération. */
 export function atomicSplit(text: string): string[] {
   const clean = text.replace(/\*\*/g, '').trim();
   if (!clean) return [];
   const parts = clean.split(/\s*(?:;|\bet puis\b|\bpuis\b|\bet aussi\b|\ainsi que\b)\s+/i).map((s) => s.trim()).filter(Boolean);
-  if (parts.length > 1 && parts.every((p) => analytical(norm(p)) || GLOBAL_CONSTRAINT.test(norm(p)))) return parts;
+  if (parts.length > 1) {
+    const kept = parts.filter((p) => analytical(norm(p)) || GLOBAL_CONSTRAINT.test(norm(p)));
+    if (kept.length > 1) return kept.map((p, i) => retainSubject(clean, p, i === 0 ? null : parts[0]));
+  }
   const andSplit = clean.split(/\s+\bet\b\s+/i).map((s) => s.trim()).filter(Boolean);
-  if (andSplit.length > 1 && andSplit.filter((p) => analytical(norm(p))).length >= 2) return andSplit;
+  if (andSplit.length > 1 && andSplit.filter((p) => analytical(norm(p))).length >= 2) {
+    return andSplit.filter((p) => analytical(norm(p))).map((p, i) => retainSubject(clean, p, i === 0 ? null : andSplit[0]));
+  }
   return [clean];
+}
+
+/** Si un fragment a perdu le sujet ou l'opération, on les réattache depuis la clause mère. */
+function retainSubject(parent: string, fragment: string, head: string | null): string {
+  const f = norm(fragment);
+  const hasOp = /(nombre|somme|total|moyenne|part|ratio|classement|courbe|circulaire|histogramme|barres|tableau|prix|montant|valeur)/.test(f);
+  if (hasOp && /[A-Za-zÀ-ÿ]{3,}/.test(fragment)) return fragment;
+  if (head && !hasOp) return `${head.replace(/[,:].*$/, '').trim()} ${fragment}`.trim();
+  if (!hasOp) {
+    const op = parent.match(/(nombre|somme|total|moyenne|part|classement|courbe|graphique circulaire|histogramme|barres|prix|montant|valeur)[^.|;]*/i);
+    if (op) return `${op[0].trim()} ${fragment}`.trim();
+  }
+  return fragment;
 }
 
 /**
@@ -140,6 +158,36 @@ function periodOf(t: string): string | undefined {
   return m ? m[1] : undefined;
 }
 
+const MONTHS: Record<string, number> = { janvier: 0, fevrier: 1, mars: 2, avril: 3, mai: 4, juin: 5, juillet: 6, aout: 7, septembre: 8, octobre: 9, novembre: 10, decembre: 11 };
+
+/** Intervalle temporel réel pour une période nommée — jamais une simple inclusion de chaîne ISO. */
+export function periodInterval(period: string, refMs = Date.now()): { start: number; end: number } | null {
+  const p = norm(period).replace(/\s+/g, ' ').trim();
+  const ref = new Date(refMs);
+  if (/^\d{4}$/.test(p)) {
+    const y = Number(p);
+    return { start: Date.UTC(y, 0, 1), end: Date.UTC(y + 1, 0, 1) - 1 };
+  }
+  const month = MONTHS[p];
+  if (month !== undefined) {
+    const y = ref.getUTCFullYear();
+    return { start: Date.UTC(y, month, 1), end: Date.UTC(y, month + 1, 1) - 1 };
+  }
+  if (/24\s*h/.test(p) || p === 'jour') return { start: refMs - 24 * 3600_000, end: refMs };
+  if (/7\s*jours|semaine/.test(p)) return { start: refMs - 7 * 24 * 3600_000, end: refMs };
+  if (/30\s*jours|mois/.test(p) && !MONTHS[p]) return { start: refMs - 30 * 24 * 3600_000, end: refMs };
+  if (/annee/.test(p)) return { start: Date.UTC(ref.getUTCFullYear(), 0, 1), end: refMs };
+  return null;
+}
+
+function unitOf(t: string): string | undefined {
+  if (/\beur\b|euro/.test(t)) return 'EUR';
+  if (/\busd\b|dollar/.test(t)) return 'USD';
+  if (/\bgbp\b|livre/.test(t)) return 'GBP';
+  if (/\bpct\b|pourcent/.test(t)) return '%';
+  return undefined;
+}
+
 function grainOf(t: string): string | undefined {
   if (/par jour|quotidien|journalier/.test(t)) return 'day';
   if (/par semaine|hebdo/.test(t)) return 'week';
@@ -181,7 +229,7 @@ function aggOf(t: string, view: ViewKind, measures: string[], entities: string[]
   return undefined;
 }
 
-export function clauseToReq(text: string, index: number, section?: string, design?: string): ReqTemplate | null {
+export function clauseToReq(text: string, index: number, section?: string, design?: string, parentId?: string): ReqTemplate | null {
   const t = norm(text);
   if (!analytical(t)) return null;
   const view = viewOf(t);
@@ -198,6 +246,8 @@ export function clauseToReq(text: string, index: number, section?: string, desig
   const population = populationOf(text, t);
   const limit = limitOf(t);
   const order = orderOf(t);
+  const unit = unitOf(t);
+  const sectionId = section ? `sec_${norm(section).replace(/[^a-z0-9]+/g, '_').slice(0, 20)}` : undefined;
   const dimensions = view === 'ranking' || view === 'donut' || view === 'bars' || view === 'table' ? ['nom', 'name', 'libelle', 'categorie'] : undefined;
   const columns = view === 'table' ? [...(dimensions ?? []), ...measures].slice(0, 8) : undefined;
   return {
@@ -215,12 +265,13 @@ export function clauseToReq(text: string, index: number, section?: string, desig
     denWhere: share ? [] : undefined,
     percent: share,
     entities: entities.length ? entities : undefined,
-    population, limit, period, grain, order,
-    section, design,
+    population, limit, period, grain, order, unit,
+    section, design, parentId: parentId ?? sectionId,
     acceptance: [
       view, agg ? `op:${agg}` : null, where.length ? `filtre:${where.map((w) => w.op).join(',')}` : null,
       entities.length ? `entite:${entities.join(',')}` : null, population ? `pop:${population}` : null,
-      period ? `periode:${period}` : null, grain ? `grain:${grain}` : null, limit != null ? `limit:${limit}` : null,
+      period ? `periode:${period}` : null, grain ? `grain:${grain}` : null, unit ? `unite:${unit}` : null,
+      limit != null ? `limit:${limit}` : null,
     ].filter(Boolean).join(' · ').slice(0, 300),
   };
 }
@@ -230,6 +281,12 @@ export function readContract(prompt: string): ReqTemplate[] {
   const { analytical, design, sectionOf } = clausesOf(prompt);
   const designNote = design.length ? design.join(' | ').slice(0, 200) : undefined;
   const reqs = analytical.map((text, i) => clauseToReq(text, i, sectionOf.get(text), designNote)).filter((r): r is ReqTemplate => !!r);
+  // Table → colonnes : parentId pointe vers l'exigence tableau de la même section.
+  for (const r of reqs) {
+    if (r.view === 'table' || !r.section) continue;
+    const parent = reqs.find((p) => p.view === 'table' && p.section === r.section);
+    if (parent && parent.id !== r.id) (r as { parentId?: string }).parentId = parent.id;
+  }
   return freezeReqs(capRequirements(reqs));
 }
 

@@ -48,6 +48,8 @@ export interface ReqTemplate {
   order?: OrderDir;
   design?: string;
   section?: string;
+  parentId?: string;
+  unit?: string;
 }
 
 interface Recipe { match: RegExp; reqs: ReqTemplate[]; title: string; mission: string; commands: string[] }

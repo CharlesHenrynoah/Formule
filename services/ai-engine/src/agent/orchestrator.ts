@@ -2,13 +2,14 @@ import { call } from '@formule/service-kit';
 import {
   AppSpecSchema, certify, type AppSpec, type AppDataBundle, type GateResult, type RequirementStatus, type ViewSpec, type AcquisitionEnvelope,
 } from '@formule/contracts';
-import { acquire, getCatalog, namedServerIds, namesTool, packReads, rankTools, resolveArgs, type Acquired, type CatalogServer, type ToolRef } from '../discovery/catalog.js';
+import { acquire, getCatalog, namedServerIds, resolveArgs, type Acquired, type CatalogServer, type ToolRef } from '../discovery/catalog.js';
 import { understand, type ReqTemplate, type Understanding } from '../semantic/lexicon.js';
-import { datasetOf, genericReqs, resolveRequirement, type Dataset } from '../semantic/resolve.js';
+import { datasetOf, resolveRequirement, type Dataset } from '../semantic/resolve.js';
 import { assembleSpec, bindTools, planActions, planRequirements, queryIdFor, type PlannedReq } from '../semantic/plan.js';
-import { draftAnalytical, readContract } from '../semantic/analytical.js';
+import { draftAnalytical } from '../semantic/analytical.js';
+import { planAcquisitions, type PlannedAcquisition } from '../semantic/acquire-plan.js';
 import { bindClauses } from '../semantic/points.js';
-import { isMultiSection, planSections } from '../semantic/sections.js';
+import { isMultiSection } from '../semantic/sections.js';
 import { buildWorkspace, cleanupWorkspace, createWorkspace, shadcnAdd, writeWorkspaceFile } from './workspace.js';
 import { emit, setState, type JobRef } from './events.js';
 import { matchView, parseDelta, untouchedEqual, type DeltaOp } from './delta.js';
@@ -66,11 +67,25 @@ function sourceSummary(acqs: Acquired[]) {
   });
 }
 
+async function acquireFromPlan(job: JobRef, planned: PlannedAcquisition[], projectId: string | null) {
+  const acqs: Acquired[] = [];
+  for (const p of planned) {
+    check(job);
+    const { ref, args } = p;
+    const suffix = 'code' in args ? `_${String(args.intent ?? 'gabarit').replace(/^Formule : /, '')}` : Object.keys(args).length ? `_${Object.values(args).map(String).join('_').split('/').pop()}` : '';
+    const qid = (queryIdFor(ref.serverId, ref.tool.name) + suffix).toLowerCase().replace(/[^a-z0-9_-]+/g, '_').slice(0, 40);
+    await emit(job, 'log', { text: `Lecture ${ref.serverName} · ${ref.tool.name}${'code' in args ? ` (gabarit relu : ${args.intent})` : Object.keys(args).length ? ` ${JSON.stringify(args)}` : ''}${p.forReqIds[0] !== '*' ? ` ← ${p.forReqIds.join(',')}` : ''}` });
+    const a = await acquire(ref, suffix ? qid : queryIdFor(ref.serverId, ref.tool.name), { jobId: job.id, projectId }, args);
+    acqs.push(a);
+    await emit(job, 'log', { text: `${ref.tool.name} : ${a.envelope.status}${a.envelope.error ? ` (${a.envelope.error.kind})` : ''}${a.envelope.coverage.note ? ` — ${a.envelope.coverage.note}` : ''}` });
+  }
+  return acqs;
+}
+
 async function acquireAll(job: JobRef, refs: ToolRef[], projectId: string | null, prompt = '', catalog: CatalogServer[] = []) {
   const acqs: Acquired[] = [];
   for (const ref of refs) {
     check(job);
-    // arguments synthétisés dès que l'outil en déclare (même facultatifs : tri, limite, type…)
     const needs = Object.keys(ref.tool.inputSchema?.properties ?? {}).length > 0;
     const { args, missing } = needs ? await resolveArgs(ref, prompt, catalog) : { args: {}, missing: [] as string[] };
     if (missing.length) { await emit(job, 'log', { text: `${ref.tool.name} : argument(s) obligatoire(s) inconnu(s) — ${missing.join(', ')} ; lecture non tentée` }); continue; }
@@ -84,109 +99,82 @@ async function acquireAll(job: JobRef, refs: ToolRef[], projectId: string | null
   return acqs;
 }
 
+function uniqueRefs(catalog: CatalogServer[], tools: { serverId: string; tool: string }[]): ToolRef[] {
+  const seen = new Set<string>(); const out: ToolRef[] = [];
+  for (const t of tools) {
+    const k = `${t.serverId}__${t.tool}`; if (seen.has(k)) continue; seen.add(k);
+    const srv = catalog.find((s) => s.serverId === t.serverId)!;
+    out.push({ serverId: srv.serverId, serverName: srv.name, demo: srv.demo, tool: srv.tools.find((x) => x.name === t.tool)! });
+  }
+  return out;
+}
+
 // ------------------------------------------------------------------ création
 async function create(job: JobRef, input: { prompt: string; fileIds: string[] }) {
   await setState(job, 'DISCOVERY');
   const catalog = await getCatalog();
   for (const s of catalog) if (s.status === 'error') await emit(job, 'log', { text: `Source ${s.name} indisponible : ${s.error?.kind}` });
-  // Demande structurée en sections : une requête par section, livraison de tout ce qui est disponible.
-  if (isMultiSection(input.prompt) && !input.fileIds.length) return createFromSections(job, input, catalog);
-  // Un serveur nommé dans la demande (« CoinGecko ») borne le catalogue : le modèle ne peut plus
-  // accrocher un autre MCP dont la description partage un mot (EUR, montant…).
-  const named = namedServerIds(input.prompt, catalog);
+  // Sections ou non : un seul contrat analytique, un seul planificateur d'acquisitions.
+  return runContractBuild(job, { prompt: input.prompt, fileIds: input.fileIds, catalog });
+}
+
+async function createFromSections(job: JobRef, input: { prompt: string }, catalog: CatalogServer[]) {
+  return runContractBuild(job, { prompt: input.prompt, fileIds: [], catalog });
+}
+
+/** Pipeline unique : contrat → plan d'acquisitions → liaison → certification. */
+async function runContractBuild(job: JobRef, input: { prompt: string; fileIds: string[]; catalog: CatalogServer[] }) {
+  const { prompt, fileIds, catalog } = input;
+  if (isMultiSection(prompt)) await emit(job, 'log', { text: 'Demande structurée : contrat analytique unique (sections conservées comme parenté)' });
+  const named = namedServerIds(prompt, catalog);
   const scoped = named.length ? catalog.filter((s) => named.includes(s.serverId)) : catalog;
   if (named.length) await emit(job, 'log', { text: `Périmètre : ${scoped.map((s) => s.name).join(', ')}` });
-  let u: Understanding = understand(input.prompt, scoped);
-  const contract = await draftAnalytical(input.prompt, u, scoped);
-  if (contract.reqs.length) await emit(job, 'log', { text: `Contrat analytique figé avant lecture : ${contract.reqs.map((r) => `${r.label} [${r.visualization ?? r.view}${r.operation ?? r.agg ? ` ${r.operation ?? r.agg}` : ''}]`).join(' · ')}` });
-  check(job);
 
-  let datasets = new Map<string, Dataset>();
-  let planned: PlannedReq[];
-  let acqs: Acquired[];
-  let pointsLocked = false;
-
-  // Le contrat analytique est l'unique source de vérité dès qu'il existe : aucun chemin parallèle ne le contourne.
-  if (contract.reqs.length) {
-    u = contract;
-    const packed = await packReads(scoped, input.prompt);
-    const ranked = packed.length ? packed : rankTools(scoped, input.prompt, input.fileIds);
-    const refs: ToolRef[] = []; const unresolved: string[] = [];
-    const maxAcq = Math.min(Math.max(2, Math.ceil(contract.reqs.length / 3)), input.fileIds.length ? Math.min(3, input.fileIds.length) : 3);
-    for (const r of ranked) {
-      if (refs.length >= maxAcq) break;
-      const { missing } = Object.keys(r.tool.inputSchema?.properties ?? {}).length ? await resolveArgs(r, input.prompt, scoped) : { missing: [] };
-      if (missing.length) {
-        if (unresolved.length < 3) unresolved.push(`${r.serverName} · ${r.tool.name} : ${missing.join(', ')}`);
-        if (namesTool(input.prompt, r.tool.name)) break;
-        continue;
-      }
-      refs.push(r);
-    }
-    if (!refs.length) {
-      if (unresolved.length) { await setState(job, 'BLOCKED'); await emit(job, 'answer', { text: `J’ai trouvé des outils proches, mais il manque des arguments obligatoires que je ne peux pas inventer : ${unresolved.join(' ; ')}. Précise-les dans ta demande (nom de fichier, valeur entre guillemets…).` }); return; }
-      return blocked(job, input.prompt, named.length ? scoped : catalog);
-    }
-    acqs = await acquireAll(job, refs, null, input.prompt, scoped);
-    for (const a of acqs) datasets.set(a.queryId, datasetOf(a));
-    planned = bindClauses(contract.reqs, datasets);
-    for (const p of planned) await emit(job, 'log', { text: `Lien · ${p.tpl.label} → ${p.status}${p.reason ? ` (${p.reason})` : ''} [${p.tpl.visualization ?? p.tpl.view}${p.tpl.operation ?? p.tpl.agg ? ` ${p.tpl.operation ?? p.tpl.agg}` : ''}]` });
-    pointsLocked = true;
-  } else {
-    // Sans contrat : recettes pack ou exigences déduites du brut uniquement.
-    const packed = await packReads(scoped, input.prompt);
-    let bound: ToolRef[] = [];
-    const lexical = !input.fileIds.length && (!u.generic || u.reqs.length);
-    if (lexical) {
-      const { toolFor } = bindTools(u, scoped);
-      bound = uniqueRefs(scoped, [...toolFor.values()]);
-    }
-    const usePack = packed.length > 0 && !packed.every((p) => bound.some((r) => r.serverId === p.serverId && r.tool.name === p.tool.name));
-    if (lexical && bound.length && !usePack) {
-      const { toolFor, unavailable } = bindTools(u, scoped);
-      acqs = await acquireAll(job, bound, null, input.prompt, scoped);
-      for (const a of acqs) datasets.set(a.queryId, datasetOf(a));
-      planned = planRequirements(u, datasets, toolFor, unavailable);
-    } else {
-      const ranked = usePack ? packed : rankTools(scoped, input.prompt, input.fileIds);
-      const refs: ToolRef[] = []; const unresolved: string[] = [];
-      for (const r of ranked) {
-        if (refs.length >= (input.fileIds.length ? Math.min(3, input.fileIds.length) : 1)) break;
-        const { missing } = Object.keys(r.tool.inputSchema?.properties ?? {}).length ? await resolveArgs(r, input.prompt, scoped) : { missing: [] };
-        if (missing.length) {
-          if (unresolved.length < 3) unresolved.push(`${r.serverName} · ${r.tool.name} : ${missing.join(', ')}`);
-          if (namesTool(input.prompt, r.tool.name)) break;
-          continue;
-        }
-        refs.push(r);
-      }
-      if (!refs.length) {
-        if (unresolved.length) { await setState(job, 'BLOCKED'); await emit(job, 'answer', { text: `J’ai trouvé des outils proches, mais il manque des arguments obligatoires que je ne peux pas inventer : ${unresolved.join(' ; ')}. Précise-les dans ta demande (nom de fichier, valeur entre guillemets…).` }); return; }
-        return blocked(job, input.prompt, named.length ? scoped : catalog);
-      }
-      acqs = await acquireAll(job, refs, null, input.prompt, scoped);
-      const reqs: ReqTemplate[] = [];
-      for (const a of acqs) { const ds = datasetOf(a); datasets.set(a.queryId, ds); reqs.push(...genericReqs(ds).map((r) => ({ ...r, id: `${a.queryId.slice(0, 20)}_${r.id}`.slice(0, 40) }))); }
-      u = { ...u, reqs };
-      planned = bindClauses(reqs, datasets);
-    }
+  let u: Understanding = understand(prompt, scoped);
+  const contract = await draftAnalytical(prompt, u, scoped);
+  const reqs = contract.reqs.length ? contract.reqs : u.reqs;
+  if (reqs.length) {
+    u = contract.reqs.length ? contract : { ...u, reqs };
+    await emit(job, 'log', { text: `Contrat analytique figé avant lecture : ${reqs.map((r) => `${r.label} [${r.visualization ?? r.view}${r.operation ?? r.agg ? ` ${r.operation ?? r.agg}` : ''}]`).join(' · ')}` });
   }
-  if (!u.reqs.length) return blocked(job, input.prompt, catalog);
+  check(job);
+  if (!reqs.length) return blocked(job, prompt, named.length ? scoped : catalog);
+
+  const { planned: acqPlan, unresolved } = await planAcquisitions(reqs, scoped, prompt, fileIds);
+  if (!acqPlan.length) {
+    if (unresolved.length) {
+      await setState(job, 'BLOCKED');
+      await emit(job, 'answer', { text: `Aucune lecture autorisée ne couvre le contrat : ${unresolved.join(' ; ')}. Précise les arguments obligatoires (fichier, devise, période…).` });
+      return;
+    }
+    return blocked(job, prompt, named.length ? scoped : catalog);
+  }
+
+  const acqs = await acquireFromPlan(job, acqPlan, null);
+  const datasets = new Map<string, Dataset>();
+  for (const a of acqs) datasets.set(a.queryId, datasetOf(a));
+
+  const planned: PlannedReq[] = bindClauses(reqs, datasets);
+  for (const p of planned) await emit(job, 'log', { text: `Lien · ${p.tpl.label} → ${p.status}${p.reason ? ` (${p.reason})` : ''} [${p.tpl.visualization ?? p.tpl.view}${p.tpl.operation ?? p.tpl.agg ? ` ${p.tpl.operation ?? p.tpl.agg}` : ''}]` });
 
   const covered = planned.filter((p) => p.tpl.mandatory && p.status === 'covered');
   const summary = {
     sources: sourceSummary(acqs),
-    requirements: planned.map((p) => ({ id: p.tpl.id, label: p.tpl.label, mandatory: p.tpl.mandatory, status: p.status, reason: p.reason ?? null })),
+    requirements: planned.map((p) => ({
+      id: p.tpl.id, label: p.tpl.label, mandatory: p.tpl.mandatory, status: p.status, reason: p.reason ?? null,
+      visualization: p.tpl.visualization ?? p.tpl.view, operation: p.tpl.operation ?? p.tpl.agg ?? null,
+      entities: p.tpl.entities ?? null, population: p.tpl.population ?? null, period: p.tpl.period ?? null,
+    })),
     canApprove: covered.length > 0,
     demo: acqs.some((a) => a.ref.demo),
   };
   await emit(job, 'source', summary);
   if (!summary.canApprove) {
     await setState(job, 'BLOCKED');
-    await say(job, `Je n’ai lu aucune donnée portant les mesures demandées. ${planned.map((p) => `${p.tpl.label} : ${p.reason ?? p.status}`).join(' ; ')}. Alternative : joins un fichier CSV/JSON ou connecte une source qui fournit ces mesures.`);
+    await say(job, `Je n’ai lu aucune donnée compatible avec le contrat. ${planned.map((p) => `${p.tpl.label} : ${p.reason ?? p.status}`).join(' ; ')}.`);
     return;
   }
-  // Rien n'est construit sans ce oui.
+
   await call('storage', `/jobs/${job.id}`, { method: 'PATCH', body: { awaiting: { type: 'sourcing', ...summary } } });
   const ok = await new Promise<boolean>((resolve) => {
     const c = ctxs.get(job.id)!; c.approval = resolve;
@@ -204,74 +192,14 @@ async function create(job: JobRef, input: { prompt: string; fileIds: string[] })
   job.projectId = project.id;
   await call('storage', `/jobs/${job.id}`, { method: 'PATCH', body: { projectId: project.id } });
   await call('storage', `/jobs/${job.id}/attach`, { body: { projectId: project.id } });
-  await call('storage', `/projects/${project.id}/messages`, { body: { role: 'user', content: { text: input.prompt } } });
+  await call('storage', `/projects/${project.id}/messages`, { body: { role: 'user', content: { text: prompt } } });
   await call('storage', `/projects/${project.id}/messages`, { body: { role: 'agent', content: { kind: 'sourcing', ...summary, decision: 'validé' } } });
   await emit(job, 'log', { text: 'Sources validées par l’utilisateur', projectId: project.id });
 
   await setState(job, 'CONTRACT');
   const usedServers = new Set(acqs.filter((a) => a.envelope.status !== 'error').map((a) => a.ref.serverId));
-  const spec = assembleSpec({ u, planned, datasets, actions: planActions(catalog, usedServers, datasets), demo: summary.demo, prompt: input.prompt, pointsLocked });
+  const spec = assembleSpec({ u, planned, datasets, actions: planActions(catalog, usedServers, datasets), demo: summary.demo, prompt, pointsLocked: true });
   await buildAndCertify(job, { spec, datasets, catalog, base: null, touched: new Set() });
-}
-
-async function createFromSections(job: JobRef, input: { prompt: string }, catalog: CatalogServer[]) {
-  const frozen = readContract(input.prompt);
-  if (frozen.length) await emit(job, 'log', { text: `Contrat analytique figé avant lecture : ${frozen.map((r) => `${r.label} [${r.view}${r.agg ? ` ${r.agg}` : ''}]`).join(' · ')}` });
-  const plan = await planSections(input.prompt, catalog, async (ref, qid, args) => {
-    check(job);
-    await emit(job, 'log', { text: `Lecture ${ref.serverName} · ${ref.tool.name} ${JSON.stringify(args).slice(0, 160)}` });
-    const a = await acquire(ref, qid, { jobId: job.id, projectId: null }, args);
-    await emit(job, 'log', { text: `${ref.tool.name} : ${a.envelope.status}${a.envelope.error ? ` (${a.envelope.error.kind})` : ''}${a.envelope.coverage.note ? ` — ${a.envelope.coverage.note}` : ''}` });
-    return a;
-  });
-  for (const l of plan.log) await emit(job, 'log', { text: l });
-  // Le contrat figé lie les données sans réécrire la vue, l'opération ni les filtres.
-  let spec = plan.spec;
-  if (frozen.length) {
-    const bound = bindClauses(frozen, plan.datasets);
-    for (const p of bound) await emit(job, 'log', { text: `Lien · ${p.tpl.label} → ${p.status}${p.reason ? ` (${p.reason})` : ''} [${p.tpl.view}${p.tpl.agg ? ` ${p.tpl.agg}` : ''}]` });
-    if (bound.some((p) => p.status === 'covered')) {
-      const u: Understanding = {
-        title: plan.spec.title, mission: input.prompt.slice(0, 300), reqs: frozen,
-        commands: plan.spec.commands ?? [], simulation: frozen.some((r) => r.view === 'simulation'), generic: false,
-      };
-      spec = assembleSpec({ u, planned: bound, datasets: plan.datasets, actions: plan.spec.actions, demo: plan.demo, prompt: input.prompt, pointsLocked: true });
-    }
-  }
-  const covered = spec.requirements.filter((r) => r.mandatory && r.status === 'covered');
-  const summary = {
-    sources: sourceSummary(plan.acqs),
-    requirements: spec.requirements.map((r) => ({ id: r.id, label: r.label, mandatory: r.mandatory, status: r.status, reason: r.reason ?? null })),
-    canApprove: covered.length > 0, demo: plan.demo,
-  };
-  await emit(job, 'source', summary);
-  if (!summary.canApprove) {
-    await setState(job, 'BLOCKED');
-    await say(job, `Aucune section n’a pu être lue. ${plan.log.join(' ; ')}. Vérifie les outils autorisés dans MCP ou précise les arguments.`);
-    return;
-  }
-  await call('storage', `/jobs/${job.id}`, { method: 'PATCH', body: { awaiting: { type: 'sourcing', ...summary } } });
-  const ok = await new Promise<boolean>((resolve) => { const c = ctxs.get(job.id)!; c.approval = resolve; setTimeout(() => resolve(false), 30 * 60_000).unref(); });
-  await call('storage', `/jobs/${job.id}`, { method: 'PATCH', body: { awaiting: null } });
-  if (!ok) { if (ctxs.get(job.id)?.cancelled) throw new Cancelled('annulé'); await setState(job, 'CANCELLED'); await emit(job, 'answer', { text: 'Rejeté. Rien n’a été construit.' }); return; }
-  const project = await call<{ id: string }>('storage', '/projects', { body: { title: spec.title, demo: plan.demo } });
-  job.projectId = project.id;
-  await call('storage', `/jobs/${job.id}`, { method: 'PATCH', body: { projectId: project.id } });
-  await call('storage', `/jobs/${job.id}/attach`, { body: { projectId: project.id } });
-  await call('storage', `/projects/${project.id}/messages`, { body: { role: 'user', content: { text: input.prompt } } });
-  await call('storage', `/projects/${project.id}/messages`, { body: { role: 'agent', content: { kind: 'sourcing', ...summary, decision: 'validé' } } });
-  await setState(job, 'CONTRACT');
-  await buildAndCertify(job, { spec, datasets: plan.datasets, catalog, base: null, touched: new Set() });
-}
-
-function uniqueRefs(catalog: CatalogServer[], tools: { serverId: string; tool: string }[]): ToolRef[] {
-  const seen = new Set<string>(); const out: ToolRef[] = [];
-  for (const t of tools) {
-    const k = `${t.serverId}__${t.tool}`; if (seen.has(k)) continue; seen.add(k);
-    const srv = catalog.find((s) => s.serverId === t.serverId)!;
-    out.push({ serverId: srv.serverId, serverName: srv.name, demo: srv.demo, tool: srv.tools.find((x) => x.name === t.tool)! });
-  }
-  return out;
 }
 
 async function blocked(job: JobRef, prompt: string, catalog: CatalogServer[]) {

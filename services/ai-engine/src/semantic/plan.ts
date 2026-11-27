@@ -89,11 +89,28 @@ export function assembleSpec(input: { u: Understanding; planned: PlannedReq[]; d
     }
   }
   if (!input.pointsLocked) recommend(views, datasets, [...usedQ], input.prompt ?? `${input.u.title} ${input.u.mission}`);
-  const requirements: Requirement[] = planned.map((p) => ({
-    id: p.tpl.id, label: p.tpl.label, mandatory: p.tpl.mandatory, status: p.status,
-    ...(p.reason ? { reason: p.reason } : {}),
-    evidence: p.view && p.envelopeId ? { envelopeId: p.envelopeId, path: p.evidencePath!, viewId: p.view.id } : null,
-  }));
+  const requirements: Requirement[] = planned.map((p) => {
+    const t = p.tpl;
+    return {
+      id: t.id, label: t.label, mandatory: t.mandatory, status: p.status,
+      ...(p.reason ? { reason: p.reason } : {}),
+      evidence: p.view && p.envelopeId ? { envelopeId: p.envelopeId, path: p.evidencePath!, viewId: p.view.id } : null,
+      visualization: t.visualization ?? t.view,
+      ...(t.operation ?? t.agg ? { operation: t.operation ?? t.agg } : {}),
+      ...(t.filters ?? t.where ? { filters: (t.filters ?? t.where)!.map((w) => ({ field: w.field, op: w.op, value: w.value })) } : {}),
+      ...(t.entities ? { entities: [...t.entities] } : {}),
+      ...(t.population ? { population: t.population } : {}),
+      ...(t.period ? { period: t.period } : {}),
+      ...(t.grain ? { grain: t.grain } : {}),
+      ...(t.columns ? { columns: [...t.columns] } : {}),
+      ...(t.unit ? { unit: t.unit } : {}),
+      ...(t.section ? { section: t.section } : {}),
+      ...(t.parentId ? { parentId: t.parentId } : {}),
+      ...(t.acceptance ? { acceptance: t.acceptance } : {}),
+      ...(t.order ? { order: t.order } : {}),
+      ...(t.limit != null ? { limit: t.limit } : {}),
+    };
+  });
   return {
     specVersion: 1, title: u.title.slice(0, 80), mission: u.mission.slice(0, 400), demo: input.demo,
     requirements, queries, views, actions: input.actions, commands: u.commands, style: { density: 'confortable', accent: 'bleu' },

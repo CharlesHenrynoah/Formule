@@ -5,6 +5,12 @@ import { z } from 'zod';
  * Le modèle propose une spec ; elle est validée ici, puis compilée par le runtime.
  * Aucun code arbitraire du modèle n'est injecté dans le DOM.
  */
+const FilterLite = z.object({
+  field: z.array(z.string()).optional(),
+  path: z.string().optional(),
+  op: z.string(),
+  value: z.union([z.string(), z.number(), z.array(z.union([z.string(), z.number()]))]).optional(),
+});
 export const RequirementSchema = z.object({
   id: z.string().regex(/^[a-z0-9_-]{1,40}$/),
   label: z.string().min(1).max(120),
@@ -12,6 +18,21 @@ export const RequirementSchema = z.object({
   status: z.enum(['covered', 'missing', 'unavailable']).default('missing'),
   reason: z.string().max(300).optional(),
   evidence: z.object({ envelopeId: z.string(), path: z.string(), viewId: z.string() }).nullable().optional(),
+  // Contrat analytique conservé jusqu'à la certification.
+  visualization: z.string().max(40).optional(),
+  operation: z.string().max(40).optional(),
+  filters: z.array(FilterLite).max(4).optional(),
+  entities: z.array(z.string().max(80)).max(12).optional(),
+  population: z.string().max(120).optional(),
+  period: z.string().max(40).optional(),
+  grain: z.string().max(20).optional(),
+  columns: z.array(z.string().max(40)).max(12).optional(),
+  unit: z.string().max(20).optional(),
+  section: z.string().max(40).optional(),
+  parentId: z.string().max(40).optional(),
+  acceptance: z.string().max(300).optional(),
+  order: z.enum(['asc', 'desc']).optional(),
+  limit: z.number().int().min(1).max(50).optional(),
 });
 
 export const QuerySchema = z.object({
@@ -92,7 +113,7 @@ export const NoteView = z.object({
   section: z.string().max(40).optional(),
 });
 
-const GroupBindings = z.object({ collection: Path, label: Path, metric: Path.optional(), agg: z.enum(['sum', 'count', 'avg']).default('count'), unit: z.string().max(20).nullable(), limit: z.number().int().min(2).max(24).default(8) });
+const GroupBindings = z.object({ collection: Path, label: Path, metric: Path.optional(), agg: z.enum(['sum', 'count', 'avg', 'identity']).default('count'), unit: z.string().max(20).nullable(), limit: z.number().int().min(2).max(24).default(8) });
 export const BarsView = z.object({ kind: z.literal('bars'), id: z.string(), title: z.string().max(80), queryId: z.string(), bindings: GroupBindings, requirementIds: z.array(z.string()).default([]), section: z.string().max(40).optional() });
 export const DonutView = z.object({ kind: z.literal('donut'), id: z.string(), title: z.string().max(80), queryId: z.string(), bindings: GroupBindings, requirementIds: z.array(z.string()).default([]), section: z.string().max(40).optional() });
 export const HistogramView = z.object({
