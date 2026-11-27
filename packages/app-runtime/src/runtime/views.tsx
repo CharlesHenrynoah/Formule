@@ -2,7 +2,7 @@ import { useMemo, useState, type ReactNode } from 'react';
 import { Area, CartesianGrid, ComposedChart, Line, XAxis, YAxis } from 'recharts';
 import { notify } from './bridge';
 import {
-  aggregate, getCollection, getPath, rank, toSeries, detectGaps, simulateLinear, SERIES_COLORS, classifyValue,
+  aggregate, filterRows, getCollection, getPath, rank, toSeries, detectGaps, simulateLinear, SERIES_COLORS, classifyValue,
   type ViewSpec, type Point,
 } from '@formule/contracts/browser';
 import type { QueryState } from './App';
@@ -167,7 +167,7 @@ export function TableView({ view, q, full }: { view: V<'table'>; q: QueryState; 
   const [page, setPage] = useState(0);
   const [facet, setFacet] = useState<string | null>(null);
   const size = full ? 25 : 8;
-  const allRows = useMemo(() => (q.raw == null ? undefined : getCollection(q.raw, b.collection)), [q, b]);
+  const allRows = useMemo(() => { const rows = q.raw == null ? undefined : getCollection(q.raw, b.collection); return rows ? filterRows(rows, b.where ?? [], Date.parse(q.observedAt ?? q.syncedAt)) : undefined; }, [q, b]);
   const facetOptions = useMemo(() => {
     if (!b.facets || !allRows) return [];
     if (b.facets.groups) return Object.keys(b.facets.groups).filter((g) => allRows.some((r) => b.facets!.groups![g].includes(String(getPath(r, b.facets!.path)))));

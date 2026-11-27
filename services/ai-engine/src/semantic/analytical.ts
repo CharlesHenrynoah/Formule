@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import type { CatalogServer } from '../discovery/catalog.js';
 import { llm } from '../llm.js';
 import { fenceUntrusted } from '@formule/contracts';
@@ -42,6 +43,12 @@ function analytical(t: string) {
 export function atomicSplit(text: string): string[] {
   const clean = text.replace(/\*\*/g, '').trim();
   if (!clean) return [];
+  const pair = clean.match(/^(.*?)(?:en\s+)?(hausse|baisse)\s+et\s+(?:en\s+)?(hausse|baisse)(.*)$/i);
+  if (pair && pair[2].toLowerCase() !== pair[3].toLowerCase() && /nombre|combien|effectif|compter/i.test(pair[1])) {
+    const prefix = pair[1].trim().replace(/\ben$/i, '').trim();
+    return [prefix + ' en ' + pair[2] + pair[4], prefix + ' en ' + pair[3] + pair[4]];
+  }
+  if (/\b(?:parmi|entre|exactement)\b/i.test(clean)) return [clean];
   const parts = clean.split(/\s*(?:;|\bet puis\b|\bpuis\b|\bet aussi\b|\ainsi que\b)\s+/i).map((s) => s.trim()).filter(Boolean);
   if (parts.length > 1) {
     const kept = parts.filter((p) => analytical(norm(p)) || GLOBAL_CONSTRAINT.test(norm(p)));
@@ -78,7 +85,14 @@ export function clausesOf(prompt: string): { analytical: string[]; design: strin
   const sections = localSections(prompt);
   if (sections.length >= 2) {
     for (const s of sections) {
-      const items = (s.bullets.length ? s.bullets : [s.body || s.title]).flatMap(atomicSplit).filter((x) => x.length > 2);
+      const prose = s.body.split('\n').filter((x) => x.trim() && !/^[-•*]\s+/.test(x.trim()) && !/^colonnes?\s*:/i.test(x.trim()));
+      const table = prose.find((x) => /\btableau\b/i.test(x));
+      if (s.kind === 'data' && table && s.bullets.length && /colonnes?\s*:/i.test(s.body)) {
+        analyticalClauses.push(table.trim());
+        sectionOf.set(table.trim(), s.title.slice(0, 40));
+        continue;
+      }
+      const items = [...prose, ...s.bullets].flatMap(atomicSplit).filter((x) => x.length > 2);
       if (s.kind === 'design' || s.kind === 'acquisition') {
         for (const it of items) design.push(it);
         continue;
@@ -142,8 +156,8 @@ export function filtersOf(text: string): ClauseFilter[] {
     if (values.length) out.push({ field: ['nom', 'name', 'libelle', 'categorie', 'type'], op: 'in', value: values });
   }
   const quoted = [...text.matchAll(/[«"“']([^»"”']{1,40})[»"”']/g)].map((m) => m[1].trim()).filter(Boolean);
-  const named = text.match(/part (?:de |du |d['’]|des )([A-Za-zÀ-ÿ][\wÀ-ÿ-]{1,40})/i)
-    ?? text.match(/(?:valeur|prix|montant|cours) (?:de |du |d['’]|des )([A-Za-zÀ-ÿ][\wÀ-ÿ-]{1,40})/i);
+  const named = text.match(/part (?:de |du |d['’]|des )(?:l['’])?([A-Za-zÀ-ÿ][\wÀ-ÿ-]{1,40})/i)
+    ?? text.match(/(?:valeur|prix|montant|cours) (?:de |du |d['’]|des )(?:l['’])?([A-Za-zÀ-ÿ][\wÀ-ÿ-]{1,40})/i);
   const entity = quoted[0] ?? named?.[1];
   if (entity) out.push({ field: ['nom', 'name', 'libelle', 'titre', 'title'], op: 'eq', value: entity });
   return out.slice(0, 4);
@@ -153,9 +167,18 @@ export function measureWords(t: string): string[] {
   return [...new Set(norm(t).split(/[^a-z0-9]+/).filter((w) => w.length > 3 && !STOP.has(w)))].slice(0, 4);
 }
 
+function durationOf(t: string): string | undefined {
+  const relative = t.match(/\b(\d{1,3})\s*(?:derniers?\s+)?(jours?|heures?|h\b)/);
+  return relative ? relative[1] + (relative[2].startsWith('h') ? ' heures' : ' jours') : undefined;
+}
+
 function periodOf(t: string): string | undefined {
-  const m = t.match(/(?:sur |pendant |en |du |de |pour )?(janvier|fevrier|mars|avril|mai|juin|juillet|aout|septembre|octobre|novembre|decembre|\d{4}|24\s*h|7\s*jours|30\s*jours|annee|mois|semaine|jour)/);
-  return m ? m[1] : undefined;
+  if (!/(courbe|historique|serie temporelle|evolution|depuis|pendant)/.test(t) &&
+      /(?:volume|variation|change|rendement|performance|transactions|hausse|baisse)/.test(t) && durationOf(t)) return undefined;
+  const relative = durationOf(t);
+  if (relative) return relative;
+  const m = t.match(/\b(janvier|fevrier|mars|avril|mai|juin|juillet|aout|septembre|octobre|novembre|decembre|(?:19|20)\d{2}|annee|mois|semaine|jour)\b/);
+  return m?.[1];
 }
 
 const MONTHS: Record<string, number> = { janvier: 0, fevrier: 1, mars: 2, avril: 3, mai: 4, juin: 5, juillet: 6, aout: 7, septembre: 8, octobre: 9, novembre: 10, decembre: 11 };
@@ -164,6 +187,8 @@ const MONTHS: Record<string, number> = { janvier: 0, fevrier: 1, mars: 2, avril:
 export function periodInterval(period: string, refMs = Date.now()): { start: number; end: number } | null {
   const p = norm(period).replace(/\s+/g, ' ').trim();
   const ref = new Date(refMs);
+  const duration = p.match(/^(\d{1,3})\s*(jours?|heures?)$/);
+  if (duration && Number(duration[1]) > 0) return { start: refMs - Number(duration[1]) * (duration[2].startsWith('jour') ? 86400_000 : 3600_000), end: refMs };
   if (/^\d{4}$/.test(p)) {
     const y = Number(p);
     return { start: Date.UTC(y, 0, 1), end: Date.UTC(y + 1, 0, 1) - 1 };
@@ -197,21 +222,21 @@ function grainOf(t: string): string | undefined {
   return undefined;
 }
 
-function populationOf(text: string, t: string): string | undefined {
-  const m = text.match(/(?:parmi|sur|pour|population|marche|univers)\s+([^.\n,]{3,60})/i);
-  if (m) return m[1].trim().slice(0, 80);
-  if (/top\s+\d+|marche|portefeuille|univers/.test(t)) return text.slice(0, 80);
-  return undefined;
+function populationOf(text: string, _t: string): string | undefined {
+  const explicit = text.match(/(?:\bpopulation\s*[:=]\s*|\b(?:march[eé]|univers)\s+)([^.\n,]{3,60})/i);
+  if (!explicit) return undefined;
+  const value = explicit[1].replace(/\s+(?:en|sur|pendant|depuis)\s+(?:les\s+)?(?:\d|janvier|f[eé]vrier|mars|avril|mai|juin|juillet|ao[uû]t|septembre|octobre|novembre|d[eé]cembre).*$/i, '').trim();
+  return value || undefined;
 }
 
 function limitOf(t: string): number | undefined {
-  const m = t.match(/(?:top|premier(?:s)?|limite(?:e)?\s+a)\s+(\d{1,3})/);
+  const m = t.match(/(?:top|premier(?:s)?|limite(?:e)?\s+a)\s+(\d{1,3})/) ?? t.match(/\b(\d{1,3})\s+premier(?:e)?s?\b/) ?? t.match(/\b(?:ces|des|les)\s+(\d{1,3})\s+(?:actifs?|produits?|articles?|elements?|lignes?|entites?|clients?|magasins?)\b/);
   return m ? Number(m[1]) : undefined;
 }
 
 function orderOf(t: string): OrderDir | undefined {
-  if (/croissant|ascendant|du plus petit/.test(t)) return 'asc';
-  if (/decroissant|descendant|du plus grand|top\b/.test(t)) return 'desc';
+  if (/\b(?:decroissant(?:e)?s?|descendant(?:e)?s?|top)\b|du plus grand/.test(t)) return 'desc';
+  if (/\b(?:croissant(?:e)?s?|ascendant(?:e)?s?)\b|du plus petit/.test(t)) return 'asc';
   return undefined;
 }
 
@@ -219,6 +244,9 @@ function aggOf(t: string, view: ViewKind, measures: string[], entities: string[]
   if (/(nombre|combien|effectif|\bcompte\b|compter)/.test(t)) return 'count';
   if (/(part|proportion|pourcentage|ratio|repartition)/.test(t) && view === 'kpi') return 'ratio';
   if (/moyenne|en moyenne/.test(t)) return 'avg';
+  if (view === 'line' || view === 'table') return undefined;
+  if (view === 'bars' && measures.some((m) => NON_ADDITIVE.test(m))) return 'identity';
+  if (view === 'kpi' && entities.length && /actuel/.test(t)) return 'identity';
   if (/derniere|dernier|actuel/.test(t)) return 'last';
   if (/(somme|cumul|\btotal\b)/.test(t)) return 'sum';
   // Mesure brute d'une entité nommée : identité, jamais un comptage implicite.
@@ -246,10 +274,14 @@ export function clauseToReq(text: string, index: number, section?: string, desig
   const population = populationOf(text, t);
   const limit = limitOf(t);
   const order = orderOf(t);
-  const unit = unitOf(t);
+  const inputUnit = unitOf(t);
+  const unit = share ? '%' : inputUnit;
+  const scopeSize = ['kpi','bars','donut'].includes(view) ? limit : undefined;
+  const measureWindow = !period ? durationOf(t) : undefined;
   const sectionId = section ? `sec_${norm(section).replace(/[^a-z0-9]+/g, '_').slice(0, 20)}` : undefined;
   const dimensions = view === 'ranking' || view === 'donut' || view === 'bars' || view === 'table' ? ['nom', 'name', 'libelle', 'categorie'] : undefined;
-  const columns = view === 'table' ? [...(dimensions ?? []), ...measures].slice(0, 8) : undefined;
+  // Les colonnes explicites sont extraites de la structure du document, pas des mots-clés du titre.
+  const columns = undefined;
   return {
     id, label: text.slice(0, 120), mandatory: true, tool: ['*'], title: text.slice(0, 80),
     view, visualization: view,
@@ -265,7 +297,7 @@ export function clauseToReq(text: string, index: number, section?: string, desig
     denWhere: share ? [] : undefined,
     percent: share,
     entities: entities.length ? entities : undefined,
-    population, limit, period, grain, order, unit,
+    population, limit, period, grain, order, unit, measureWindow, scopeSize, inputUnit: share && inputUnit !== '%' ? inputUnit : undefined,
     section, design, parentId: parentId ?? sectionId,
     acceptance: [
       view, agg ? `op:${agg}` : null, where.length ? `filtre:${where.map((w) => w.op).join(',')}` : null,
@@ -281,6 +313,17 @@ export function readContract(prompt: string): ReqTemplate[] {
   const { analytical, design, sectionOf } = clausesOf(prompt);
   const designNote = design.length ? design.join(' | ').slice(0, 200) : undefined;
   const reqs = analytical.map((text, i) => clauseToReq(text, i, sectionOf.get(text), designNote)).filter((r): r is ReqTemplate => !!r);
+  for (const r of reqs) {
+    if (r.view !== 'table') continue;
+    const sec = localSections(prompt).find((s) => s.title.slice(0, 40) === r.section);
+    if (!sec?.bullets.length || !/colonnes?\s*:/i.test(sec.body)) continue;
+    r.columns = sec.bullets.map((x) => x.replace(/[.]+$/, '').trim()).slice(0, 12);
+    const list = r.label.match(/(?:exactement|uniquement|seulement).*?:\s*(.+?)[.]?$/i);
+    if (list) {
+      r.entities = list[1].split(/,|\bet\b/i).map((x) => x.trim()).filter(Boolean);
+      r.filters = r.where = [{ field: ['nom', 'name', 'libelle', 'titre', 'title'], op: 'in', value: r.entities }];
+    }
+  }
   // Table → colonnes : parentId pointe vers l'exigence tableau de la même section.
   for (const r of reqs) {
     if (r.view === 'table' || !r.section) continue;
@@ -319,15 +362,16 @@ export async function draftAnalytical(prompt: string, base: Understanding, catal
 
 async function fillMeasures(prompt: string, reqs: ReqTemplate[], catalog: CatalogServer[]): Promise<ReqTemplate[]> {
   const cat = catalog.flatMap((s) => s.tools.filter((t) => t.permission === 'read').map((t) => t.name)).join(', ');
-  const out = await llm.json<{ hints?: { id?: string; measure?: unknown }[] }>([
+  const out = await llm.json<unknown>([
     { role: 'system', content: 'Tu proposes uniquement des mots de champs pour des exigences déjà figées. Tu ne changes ni la vue, ni l\'opération, ni les filtres. JSON : {"hints":[{"id":str,"measure":[str]}]}' },
     { role: 'user', content: `Consigne : ${prompt}\nOutils : ${fenceUntrusted('outils', cat)}\nExigences : ${JSON.stringify(reqs.map((r) => ({ id: r.id, label: r.label, view: r.view, agg: r.agg })))}` },
-  ]);
-  const hints = new Map((out?.hints ?? []).map((h) => [String(h.id ?? ''), Array.isArray(h.measure) ? h.measure.map((x) => norm(String(x))).filter((w) => w.length > 2).slice(0, 4) : []]));
+  ]).catch(() => null);
+  const parsed = z.object({ hints: z.array(z.object({ id: z.string(), measure: z.array(z.string().min(1).max(80)).max(8) })).max(40) }).safeParse(out);
+  const hints = new Map((parsed.success ? parsed.data.hints : []).map((h) => [h.id, h.measure.map(norm)]));
   return reqs.map((r) => {
-    if (r.measure?.length || r.view === 'note') return r;
+    if (r.view === 'note' || (r.operation ?? r.agg) === 'count') return r;
     const m = hints.get(r.id);
-    return m?.length ? { ...r, measure: m, measures: m } : r;
+    return m?.length ? { ...r, measure: [...new Set([...(r.measure ?? []), ...m])], measures: [...new Set([...(r.measures ?? []), ...m])] } : r;
   });
 }
 

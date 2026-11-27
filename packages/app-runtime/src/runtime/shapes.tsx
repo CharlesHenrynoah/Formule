@@ -18,7 +18,7 @@ const short = (s: string, n = 14) => (s.length > n ? s.slice(0, n - 1) + '…' :
 /** Barres par catégorie. Les noms longs ou nombreux passent en barres horizontales shadcn : une ligne par libellé, valeur écrite à côté. */
 export function BarsView({ view, q }: { view: V<'bars'>; q: QueryState }) {
   const b = view.bindings;
-  const r = useMemo(() => (q.raw == null ? null : groupAgg(q.raw, b)), [q, b]);
+  const r = useMemo(() => (q.raw == null ? null : groupAgg(q.raw, { ...b, refTime: Date.parse(q.observedAt ?? q.syncedAt) })), [q, b]);
   if (q.status === 'error' || !r) return <Card id={view.id} title={view.title} q={q}><ErrorState q={q} /></Card>;
   const signed = r.groups.some((g) => g.value < 0);
   const horizontal = r.groups.length > 5 || r.groups.some((g) => g.label.length > 10);
@@ -76,7 +76,7 @@ export function BarsView({ view, q }: { view: V<'bars'>; q: QueryState }) {
 /** Anneau de répartition (parts d'un total). */
 export function DonutView({ view, q }: { view: V<'donut'>; q: QueryState }) {
   const b = view.bindings;
-  const r = useMemo(() => (q.raw == null ? null : groupAgg(q.raw, b)), [q, b]);
+  const r = useMemo(() => (q.raw == null ? null : groupAgg(q.raw, { ...b, refTime: Date.parse(q.observedAt ?? q.syncedAt) })), [q, b]);
   if (q.status === 'error' || !r) return <Card id={view.id} title={view.title} q={q}><ErrorState q={q} /></Card>;
   const data = [...r.groups, ...(r.others ? [r.others] : [])].filter((g) => g.value > 0).map((g, i) => ({ ...g, fill: g.label.startsWith('Autres') ? OTHER : PALETTE[i % 12] }));
   const total = data.reduce((a, g) => a + g.value, 0);

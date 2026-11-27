@@ -79,7 +79,7 @@ export function expectations(views: ViewSpec[], raws: Record<string, unknown>, r
       const valid = rows.filter((r) => { const t = dig(r, v.bindings.t); return typeof t === 'string' && /^\d{4}-\d{2}-\d{2}/.test(t) && !isNaN(Date.parse(t)); });
       out.push({ viewId: v.id, kind: 'line', points: valid.length });
     } else if (v.kind === 'table') {
-      out.push({ viewId: v.id, kind: 'table', rows: (coll(raw, v.bindings.collection)).length });
+      out.push({ viewId: v.id, kind: 'table', rows: coll(raw, v.bindings.collection).filter((r) => (v.bindings.where ?? []).every((w) => keep(dig(r, w.path), w, new Date(refTimes[v.queryId])))).length });
     } else if (v.kind === 'ranking') {
       const b = v.bindings;
       const rows = coll(raw, b.collection);
@@ -98,7 +98,7 @@ export function expectations(views: ViewSpec[], raws: Record<string, unknown>, r
       list.sort((x, y) => (b.order === 'desc' ? y.value - x.value : x.value - y.value));
       out.push({ viewId: v.id, kind: 'ranking', first: list[0] ? `${list[0].label}=${list[0].value}` : '' });
     } else if (v.kind === 'bars' || v.kind === 'donut') {
-      const b = v.bindings; const rows = coll(raw, b.collection);
+      const b = v.bindings; const rows = coll(raw, b.collection).filter((r) => (b.where ?? []).every((w) => keep(dig(r, w.path), w, new Date(refTimes[v.queryId]))));
       const acc: Record<string, { s: number; n: number; c: number; first: number | null }> = {};
       for (const r of rows) {
         const l = dig(r, b.label); const k = l === null || l === undefined || l === '' ? '(non renseigné)' : String(l);
@@ -175,8 +175,8 @@ export function contradicts(
     kind: string;
     bindings?: Record<string, unknown> & {
       aggregate?: { agg?: string; where?: { path: string; op: string; value?: unknown }[]; percent?: boolean; unitPath?: string; measure?: string };
-      limit?: number; order?: string; population?: string; unit?: string | null; columns?: { path: string }[];
-      label?: string; metric?: string; agg?: string;
+      limit?: number; order?: string; population?: string; unit?: string | null; columns?: { path: string; label?: string }[];
+      label?: string; metric?: string; agg?: string; where?: { path: string; op: string; value?: unknown }[];
     };
   } | undefined,
 ): string | null {
@@ -190,10 +190,10 @@ export function contradicts(
   if (wantOp === 'identity' && gotOp && gotOp !== 'identity') return `identité remplacée par « ${gotOp} »`;
 
   const wantFilters = req.filters ?? req.where ?? [];
-  const gotFilters = view.bindings?.aggregate?.where ?? [];
-  if (view.kind === 'kpi') {
+  const gotFilters = view.bindings?.aggregate?.where ?? view.bindings?.where ?? [];
+  if (['kpi','table','bars','donut'].includes(view.kind)) {
     for (const w of wantFilters) {
-      const hit = gotFilters.find((g) => g.op === w.op && (w.value === undefined || sameValue(g.value, w.value)));
+      const hit = gotFilters.find((g) => g.op === w.op && (w.value === undefined || sameValue(g.value, w.value)) && (w.path ? g.path === w.path : !w.field?.length || w.field.some((f) => g.path.toLowerCase().includes(f.toLowerCase()))));
       if (!hit) return `filtre « ${w.op}${w.value !== undefined ? `=${JSON.stringify(w.value)}` : ''} » absent ou altéré`;
     }
   }
@@ -209,7 +209,7 @@ export function contradicts(
     if (!u.includes(req.unit.toLowerCase()) && !req.unit.toLowerCase().includes(u)) return `unité « ${view.bindings.unit} » au lieu de « ${req.unit} »`;
   }
   if (req.columns?.length && view.kind === 'table' && Array.isArray(view.bindings?.columns)) {
-    const paths = (view.bindings.columns as { path: string }[]).map((c) => c.path.toLowerCase());
+    const paths = view.bindings.columns.flatMap((c) => [c.path.toLowerCase(), c.label?.toLowerCase() ?? c.path.toLowerCase()]);
     for (const col of req.columns) {
       if (!paths.some((p) => p.includes(col.toLowerCase()) || col.toLowerCase().includes(p.split('.').pop() ?? ''))) {
         return `colonne « ${col} » absente`;

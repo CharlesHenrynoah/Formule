@@ -7,14 +7,14 @@ import { understand, type ReqTemplate, type Understanding } from '../semantic/le
 import { datasetOf, resolveRequirement, type Dataset } from '../semantic/resolve.js';
 import { assembleSpec, bindTools, planActions, planRequirements, queryIdFor, type PlannedReq } from '../semantic/plan.js';
 import { draftAnalytical } from '../semantic/analytical.js';
-import { planAcquisitions, type PlannedAcquisition } from '../semantic/acquire-plan.js';
+import { acquisitionKey, planAcquisitions, type PlannedAcquisition } from '../semantic/acquire-plan.js';
 import { bindClauses } from '../semantic/points.js';
 import { isMultiSection } from '../semantic/sections.js';
 import { buildWorkspace, cleanupWorkspace, createWorkspace, shadcnAdd, writeWorkspaceFile } from './workspace.js';
 import { emit, setState, type JobRef } from './events.js';
 import { matchView, parseDelta, untouchedEqual, type DeltaOp } from './delta.js';
 import { backendVsOracle, contractGate, runDomCheck, sourceGate, staticGates } from '../evaluation/gates.js';
-import { expectations } from '../evaluation/oracle.js';
+import { contradicts, expectations } from '../evaluation/oracle.js';
 import { isDemoMode } from '../llm.js';
 
 interface Ctx { cancelled: boolean; abort: AbortController; approval?: (ok: boolean) => void }
@@ -67,15 +67,18 @@ function sourceSummary(acqs: Acquired[]) {
   });
 }
 
-async function acquireFromPlan(job: JobRef, planned: PlannedAcquisition[], projectId: string | null) {
+async function acquireFromPlan(job: JobRef, planned: PlannedAcquisition[], projectId: string | null, usedIds = new Set<string>()) {
   const acqs: Acquired[] = [];
   for (const p of planned) {
     check(job);
     const { ref, args } = p;
     const suffix = 'code' in args ? `_${String(args.intent ?? 'gabarit').replace(/^Formule : /, '')}` : Object.keys(args).length ? `_${Object.values(args).map(String).join('_').split('/').pop()}` : '';
-    const qid = (queryIdFor(ref.serverId, ref.tool.name) + suffix).toLowerCase().replace(/[^a-z0-9_-]+/g, '_').slice(0, 40);
+    const baseId = (queryIdFor(ref.serverId, ref.tool.name) + suffix).toLowerCase().replace(/[^a-z0-9_-]+/g, '_').slice(0, 40);
+    let qid = baseId; let n = 2;
+    while (usedIds.has(qid)) qid = baseId.slice(0, 32) + '_' + n++;
+    usedIds.add(qid);
     await emit(job, 'log', { text: `Lecture ${ref.serverName} · ${ref.tool.name}${'code' in args ? ` (gabarit relu : ${args.intent})` : Object.keys(args).length ? ` ${JSON.stringify(args)}` : ''}${p.forReqIds[0] !== '*' ? ` ← ${p.forReqIds.join(',')}` : ''}` });
-    const a = await acquire(ref, suffix ? qid : queryIdFor(ref.serverId, ref.tool.name), { jobId: job.id, projectId }, args);
+    const a = await acquire(ref, qid, { jobId: job.id, projectId }, args);
     acqs.push(a);
     await emit(job, 'log', { text: `${ref.tool.name} : ${a.envelope.status}${a.envelope.error ? ` (${a.envelope.error.kind})` : ''}${a.envelope.coverage.note ? ` — ${a.envelope.coverage.note}` : ''}` });
   }
@@ -150,11 +153,27 @@ async function runContractBuild(job: JobRef, input: { prompt: string; fileIds: s
     return blocked(job, prompt, named.length ? scoped : catalog);
   }
 
-  const acqs = await acquireFromPlan(job, acqPlan, null);
+  const usedIds = new Set<string>();
+  const acqs = await acquireFromPlan(job, acqPlan, null, usedIds);
   const datasets = new Map<string, Dataset>();
   for (const a of acqs) datasets.set(a.queryId, datasetOf(a));
 
-  const planned: PlannedReq[] = bindClauses(reqs, datasets);
+  let planned: PlannedReq[] = bindClauses(reqs, datasets);
+  const attempted = new Set(acqPlan.map((p) => acquisitionKey(p.ref, p.args)));
+  // Une lecture techniquement réussie ne prouve pas sa couverture.
+  // Deux tours maximum, uniquement pour les exigences non couvertes, dans le périmètre autorisé.
+  for (let round = 0; round < 2; round++) {
+    check(job);
+    const missing = planned.filter((p) => p.status !== 'covered' && p.tpl.view !== 'note').map((p) => p.tpl);
+    if (!missing.length) break;
+    const next = await planAcquisitions(missing, scoped, prompt, fileIds, attempted);
+    const candidates = next.planned.slice(0, 8);
+    if (!candidates.length) break;
+    for (const p of candidates) attempted.add(acquisitionKey(p.ref, p.args));
+    const retry = await acquireFromPlan(job, candidates, null, usedIds);
+    for (const a of retry) { acqs.push(a); datasets.set(a.queryId, datasetOf(a)); }
+    planned = bindClauses(reqs, datasets);
+  }
   for (const p of planned) await emit(job, 'log', { text: `Lien · ${p.tpl.label} → ${p.status}${p.reason ? ` (${p.reason})` : ''} [${p.tpl.visualization ?? p.tpl.view}${p.tpl.operation ?? p.tpl.agg ? ` ${p.tpl.operation ?? p.tpl.agg}` : ''}]` });
 
   const covered = planned.filter((p) => p.tpl.mandatory && p.status === 'covered');
@@ -404,6 +423,10 @@ async function buildAndCertify(job: JobRef, x: { spec: AppSpec; datasets: Map<st
   const reqs: RequirementStatus[] = spec.requirements.map((r) => {
     if (r.status !== 'covered') return { id: r.id, label: r.label, mandatory: r.mandatory, status: r.status, reason: r.reason };
     const vid = r.evidence?.viewId;
+    if (r.visualization) {
+      const clash = contradicts({ ...r, view: r.visualization }, spec.views.find((v) => v.id === vid));
+      if (clash) return { id: r.id, label: r.label, mandatory: r.mandatory, status: 'missing', reason: clash };
+    }
     if (!vid || !domOk.has(vid)) {
       const diag = dom?.results.find((d) => d.viewId === vid)?.diag;
       return { id: r.id, label: r.label, mandatory: r.mandatory, status: 'missing', reason: `métrique lue mais absente du DOM${diag ? ` (${diag})` : ''}` };
