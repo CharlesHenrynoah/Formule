@@ -9,7 +9,8 @@ import { getCollection, getPath } from '@formule/contracts';
 import type { Acquired, CatalogServer, ToolRef } from '../discovery/catalog.js';
 import { rankTools, resolveArgs } from '../discovery/catalog.js';
 import { intentTokens } from '../discovery/args-synth.js';
-import { datasetOf, isSeries, NON_ADDITIVE, type Dataset } from './resolve.js';
+import { clauseToReq, filtersOf } from './analytical.js';
+import { datasetOf, isSeries, NON_ADDITIVE, resolveRequirement, type Dataset } from './resolve.js';
 import { recommend } from './charts.js';
 import { norm } from './lexicon.js';
 import { taxonomyFor } from '../packs.js';
@@ -261,9 +262,26 @@ export async function planSections(prompt: string, catalog: CatalogServer[], acq
       let view: ViewSpec | null = null;
       if (/(populaire|meilleur|le plus|top 1)/.test(nb) && measure && labelF) view = { kind: 'kpi', id: vid, title: b.slice(0, 80), queryId: qid, requirementIds: [id], section: sectionLabel, bindings: { unit: null, aggregate: { collection: coll, agg: 'top', measure: measure.rel, labelPath: labelF.rel, where: [], percent: false } } };
       else if (/(cumul|total|somme|ensemble des)/.test(nb) && measure && !NON_ADDITIVE.test(norm(measure.rel))) view = { kind: 'kpi', id: vid, title: b.slice(0, 80), queryId: qid, requirementIds: [id], section: sectionLabel, bindings: { unit: null, aggregate: { collection: coll, agg: 'sum', measure: measure.rel, where: [], percent: false } } };
-      else if (/(nombre|combien|compte|count)/.test(nb)) view = { kind: 'kpi', id: vid, title: b.slice(0, 80), queryId: qid, requirementIds: [id], section: sectionLabel, bindings: { unit: null, aggregate: { collection: coll, agg: 'count', where: [], percent: false } } };
+      else if (/(nombre|combien|compte|count)/.test(nb)) {
+        const where = [];
+        let missingFilter: string | null = null;
+        for (const w of filtersOf(b)) {
+          const f = F.find((x) => w.field.some((k) => x.key.includes(norm(k)) || norm(k).includes(x.key)));
+          if (!f) { missingFilter = w.field[0]; break; }
+          where.push({ path: f.rel, op: w.op, ...(w.value !== undefined ? { value: w.value } : {}) });
+        }
+        if (missingFilter) reqs.push({ id, label: `${sectionLabel} · ${b}`.slice(0, 120), mandatory: true, status: 'unavailable', reason: `champ de filtre « ${missingFilter} » absent des données lues`, evidence: null });
+        else view = { kind: 'kpi', id: vid, title: b.slice(0, 80), queryId: qid, requirementIds: [id], section: sectionLabel, bindings: { unit: null, aggregate: { collection: coll, agg: 'count', where, percent: false } } };
+      } else {
+        const clause = clauseToReq(b, reqs.length);
+        if (clause) {
+          const resolved = resolveRequirement({ ...clause, id, tool: [norm(ds.acq.ref.tool.name)] }, ds, vid, qid);
+          if (resolved.ok && resolved.view.kind !== 'table' && resolved.view.kind !== 'note') view = { ...resolved.view, section: sectionLabel };
+          else if (!resolved.ok) reqs.push({ id, label: `${sectionLabel} · ${b}`.slice(0, 120), mandatory: true, status: 'unavailable', reason: resolved.reason, evidence: null });
+        }
+      }
       if (view) { kpiViews.push(view); reqs.push({ id, label: `${sectionLabel} · ${b}`.slice(0, 120), mandatory: true, status: 'covered', evidence: { envelopeId: ds.acq.envelope.id, path: `${coll}[]${measure ? `.${measure.rel}` : ''}`, viewId: vid } }); }
-      else reqs.push({ id, label: `${sectionLabel} · ${b}`.slice(0, 120), mandatory: true, status: 'unavailable', reason: 'Donnée indisponible : mesure absente des données lues', evidence: null });
+      else if (!reqs.some((r) => r.id === id)) reqs.push({ id, label: `${sectionLabel} · ${b}`.slice(0, 120), mandatory: true, status: 'unavailable', reason: 'Donnée indisponible : mesure absente des données lues', evidence: null });
     }
   }
 
@@ -272,10 +290,22 @@ export async function planSections(prompt: string, catalog: CatalogServer[], acq
   const spec: AppSpec = {
     specVersion: 1, title: (P.title ?? P.sections[0]?.title ?? 'Interface').slice(0, 80),
     mission: (P.intro || prompt).replace(/\*\*/g, '').replace(/\s+/g, ' ').slice(0, 400), demo: acqs.some((a) => a.ref.demo),
-    requirements: reqs.slice(0, 40), queries, views: [...kpiViews, ...views].slice(0, 28), actions: [], commands: [],
+    requirements: capReqs(reqs), queries, views: capViews([...kpiViews, ...views]), actions: [], commands: [],
     style: { density: 'confortable', accent, font: /monospace|\bmono\b/.test(design) ? 'mono' : 'system', nav: /laterale?|sidebar|barre de navigation/.test(design) ? 'sidebar' : 'top', theme: /graphite/.test(design) ? 'graphite' : 'noir' },
   };
   return { spec, acqs, datasets, demo: spec.demo, log };
+}
+
+function capReqs(reqs: Requirement[]): Requirement[] {
+  if (reqs.length <= 40) return reqs;
+  const extra = reqs.length - 39;
+  return [...reqs.slice(0, 39), { id: 'capacite_depassee', label: 'Exigences au-delà de la capacité', mandatory: true, status: 'unavailable', reason: `${extra} exigences non affichées : capacité 40`, evidence: null }];
+}
+
+function capViews(views: ViewSpec[]): ViewSpec[] {
+  if (views.length <= 28) return views;
+  const extra = views.length - 27;
+  return [...views.slice(0, 27), { kind: 'note', id: 'vues_depassees', title: 'Capacité', text: `${extra} vues non affichées : capacité 28.`, requirementIds: [] }];
 }
 
 export function isExcluded(tool: string, x: string): boolean {

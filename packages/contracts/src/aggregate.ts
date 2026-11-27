@@ -3,19 +3,44 @@ import { getPath, getCollection, parseTime, type ValueState } from './values.js'
 
 export interface AggResult { state: ValueState | 'empty'; value: number | null; unit: string | null; count: number; skipped: number; reason?: string; label?: string }
 
+/** Mesures qu'on ne somme jamais (prix, taux, pourcentages, températures, rangs…). */
+export const NON_ADDITIVE = /(prix|price|cours|taux|rate|pct|ratio|moyenne|avg|mean|temp|variation|change|probabilit|score|rang|rank|humid|%)/;
+
 function sameMonth(t: number, ref: number) {
   const a = new Date(t), b = new Date(ref);
   return a.getUTCFullYear() === b.getUTCFullYear() && a.getUTCMonth() === b.getUTCMonth();
 }
 
+function asNumber(v: unknown): number | null {
+  if (typeof v === 'number' && Number.isFinite(v)) return v;
+  if (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v))) return Number(v);
+  return null;
+}
+
+function matches(v: unknown, w: Aggregate['where'][number], refTime: number): boolean {
+  if (w.op === 'eq') return v === w.value || (asNumber(v) !== null && asNumber(v) === asNumber(w.value));
+  if (w.op === 'neq') return v !== w.value;
+  if (w.op === 'current_month') { const t = parseTime(v); return t !== null && sameMonth(t, refTime); }
+  if (w.op === 'in') {
+    const list = Array.isArray(w.value) ? w.value : w.value === undefined ? [] : [w.value];
+    return list.some((x) => x === v || (asNumber(v) !== null && asNumber(v) === asNumber(x)));
+  }
+  if (w.op === 'between') {
+    const span = Array.isArray(w.value) ? w.value : [];
+    const n = asNumber(v), lo = asNumber(span[0]), hi = asNumber(span[1]);
+    return n !== null && lo !== null && hi !== null && n >= lo && n <= hi;
+  }
+  const n = asNumber(v), t = asNumber(w.value);
+  if (n === null || t === null) return false;
+  if (w.op === 'gt') return n > t;
+  if (w.op === 'lt') return n < t;
+  if (w.op === 'gte') return n >= t;
+  if (w.op === 'lte') return n <= t;
+  return false;
+}
+
 export function filterRows(rows: unknown[], where: Aggregate['where'], refTime: number): unknown[] {
-  return rows.filter((r) => where.every((w) => {
-    const v = getPath(r, w.path);
-    if (w.op === 'eq') return v === w.value;
-    if (w.op === 'neq') return v !== w.value;
-    const t = parseTime(v);
-    return t !== null && sameMonth(t, refTime);
-  }));
+  return rows.filter((r) => where.every((w) => matches(getPath(r, w.path), w, refTime)));
 }
 
 /**
@@ -46,12 +71,29 @@ export function aggregate(raw: unknown, a: Aggregate, unitFallback: string | nul
     const v = m[m.length - 1];
     return v === null ? { state: 'missing', value: null, unit, count: rows.length, skipped, reason: 'dernière valeur absente' } : { state: 'available', value: v, unit, count: rows.length, skipped };
   }
-  if (present.length === 0) return { state: 'missing', value: null, unit, count: rows.length, skipped, reason: 'aucune mesure présente' };
+  if (present.length === 0 && a.measure) return { state: 'missing', value: null, unit, count: rows.length, skipped, reason: 'aucune mesure présente' };
   const sum = present.reduce((x, y) => x + y, 0);
   const state: ValueState = skipped > 0 ? 'partial' : 'available';
+  if (a.agg === 'sum' && a.measure && NON_ADDITIVE.test(a.measure.toLowerCase())) {
+    return { state: 'invalid', value: null, unit, count: rows.length, skipped, reason: `somme interdite sur « ${a.measure} » : mesure non additive` };
+  }
   if (a.agg === 'sum') return { state, value: round(sum), unit, count: rows.length, skipped };
   if (a.agg === 'avg') return { state, value: round(sum / present.length), unit, count: rows.length, skipped };
-  // ratio : sommes sur les lignes où numérateur ET dénominateur sont présents
+  const denRows = a.denWhere !== undefined ? filterRows(all, a.denWhere, refTime) : rows;
+  if (!a.measure && !a.den) {
+    if (!denRows.length) return { state: 'invalid', value: null, unit, count: rows.length, skipped: 0, reason: 'population de référence vide' };
+    const ratio = rows.length / denRows.length;
+    return { state: 'available', value: round(a.percent ? ratio * 100 : ratio), unit: a.percent ? '%' : null, count: rows.length, skipped: 0 };
+  }
+  // ratio : sommes sur les lignes où numérateur ET dénominateur sont présents, ou la même mesure sur deux populations
+  if (a.measure && !a.den && a.denWhere !== undefined) {
+    const num = present.reduce((x, y) => x + y, 0);
+    const denVals = denRows.map((r) => getPath(r, a.measure!)).filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
+    const den = denVals.reduce((x, y) => x + y, 0);
+    if (!denVals.length || den === 0) return { state: 'invalid', value: null, unit, count: rows.length, skipped, reason: 'dénominateur nul ou absent' };
+    if (NON_ADDITIVE.test(a.measure.toLowerCase())) return { state: 'invalid', value: null, unit, count: rows.length, skipped, reason: `ratio de sommes interdit sur « ${a.measure} » : mesure non additive` };
+    return { state: 'available', value: round(a.percent ? (num / den) * 100 : num / den), unit: a.percent ? '%' : unit, count: rows.length, skipped };
+  }
   const d = nums(a.den);
   let n = 0, dd = 0, used = 0;
   for (let i = 0; i < m.length; i++) if (m[i] !== null && d[i] !== null) { n += m[i]!; dd += d[i]!; used++; }

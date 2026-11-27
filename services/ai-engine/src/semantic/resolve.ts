@@ -1,8 +1,10 @@
 import {
-  collectionFields, inferContract, getCollection, getPath, parseTime, type DataContract, type FieldContract, type ViewSpec,
+  collectionFields, inferContract, getCollection, getPath, parseTime, NON_ADDITIVE, type DataContract, type FieldContract, type ViewSpec,
 } from '@formule/contracts';
 import type { Acquired } from '../discovery/catalog.js';
-import { norm, type ReqTemplate } from './lexicon.js';
+import { norm, type ClauseFilter, type ReqTemplate } from './lexicon.js';
+
+export { NON_ADDITIVE };
 
 export interface Dataset { acq: Acquired; contract: DataContract; collection: string | null; fields: (FieldContract & { rel: string })[]; docOnly: boolean }
 
@@ -17,13 +19,18 @@ export function datasetOf(acq: Acquired): Dataset {
   return { acq, contract, collection, fields, docOnly };
 }
 
+const stem = (k: string) => (k.length > 4 && k.endsWith('s') ? k.slice(0, -1) : k);
+const fieldHit = (rel: string, k: string) => {
+  const head = stem(norm(rel).split('.')[0]);
+  const needle = stem(norm(k));
+  return needle.length > 2 && (head.includes(needle) || needle.includes(head) || norm(rel).includes(needle));
+};
 const matchField = (fields: Dataset['fields'], kws: string[] | undefined, roles: FieldContract['role'][]) => {
   if (!kws) return undefined;
   for (const k of kws) {
-    const f = fields.find((x) => roles.includes(x.role) && norm(x.rel).split('.')[0].includes(k));
+    const f = fields.find((x) => roles.includes(x.role) && fieldHit(x.rel, k));
     if (f) return f;
   }
-  for (const k of kws) { const f = fields.find((x) => roles.includes(x.role) && norm(x.rel).includes(k)); if (f) return f; }
   return undefined;
 };
 
@@ -56,15 +63,18 @@ export function resolveRequirement(req: ReqTemplate, ds: Dataset, viewId: string
   const need = (f: FieldContract | undefined, what: string) => (f ? null : `champ « ${what} » absent des données lues (${src})`);
 
   if (req.view === 'kpi') {
-    const measure = req.agg === 'count' ? undefined : matchField(F, req.measure, ['measure']);
+    const wantsMeasure = !!req.measure?.length && req.agg !== 'count';
+    const measure = wantsMeasure ? matchField(F, req.measure, ['measure']) : undefined;
     const den = req.den ? matchField(F, req.den, ['measure']) : undefined;
-    const miss = (req.agg !== 'count' && need(measure, req.measure![0])) || (req.den && need(den, req.den[0])) || null;
+    const miss = (wantsMeasure && need(measure, req.measure![0])) || (req.den && need(den, req.den[0])) || null;
     if (miss) return { ok: false, reason: miss };
-    const where = [];
-    for (const w of req.where ?? []) {
-      const f = matchField(F, w.field, w.op === 'current_month' ? ['time'] : ['dimension', 'state', 'text']);
-      if (!f) return { ok: false, reason: `champ de filtre « ${w.field[0]} » absent (${src})` };
-      where.push({ path: f.rel, op: w.op, ...(w.value !== undefined ? { value: w.value } : {}) });
+    const where = bindFilters(F, req.where, src);
+    if (!where.ok) return where;
+    const denWhere = req.denWhere ? bindFilters(F, req.denWhere, src) : undefined;
+    if (denWhere && !denWhere.ok) return denWhere;
+    const agg = req.agg ?? (measure && NON_ADDITIVE.test(norm(measure.rel)) ? 'last' : req.agg === undefined && !measure ? 'count' : 'sum');
+    if ((agg === 'sum' || (agg === 'ratio' && !den)) && measure && NON_ADDITIVE.test(norm(measure.rel)) && agg !== 'last') {
+      return { ok: false, reason: `somme interdite sur « ${measure.rel} » : mesure non additive (${src})` };
     }
     if (measure && (measure.units?.length ?? 0) > 1 && !unitSibling(F, measure.rel)) return { ok: false, reason: `unités multiples pour « ${measure.rel} » : pas de fusion implicite` };
     const us = measure ? unitSibling(F, measure.rel) : undefined;
@@ -73,8 +83,8 @@ export function resolveRequirement(req: ReqTemplate, ds: Dataset, viewId: string
       view: {
         kind: 'kpi', id: viewId, title: req.title, queryId, requirementIds: [req.id],
         bindings: {
-          unit: req.agg === 'count' ? null : req.percent ? '%' : req.agg === 'ratio' ? null : measure?.unit ?? null,
-          aggregate: { collection: coll, agg: req.agg ?? 'sum', measure: measure?.rel, den: den?.rel, unitPath: req.agg === 'ratio' ? undefined : us?.rel, where, percent: !!req.percent },
+          unit: agg === 'count' ? null : req.percent ? '%' : agg === 'ratio' ? null : measure?.unit ?? null,
+          aggregate: { collection: coll, agg, measure: measure?.rel, den: den?.rel, unitPath: agg === 'ratio' ? undefined : us?.rel, where: where.filters, ...(denWhere?.ok ? { denWhere: denWhere.filters } : {}), percent: !!req.percent },
         },
       },
     };
@@ -106,12 +116,50 @@ export function resolveRequirement(req: ReqTemplate, ds: Dataset, viewId: string
     const label = matchField(F, req.label_, ['dimension', 'text', 'identifier', 'state']);
     const miss = need(metric, req.measure?.[0] ?? 'mesure') || (req.den && need(den, req.den[0])) || need(label, req.label_?.[0] ?? 'libellé');
     if (miss) return { ok: false, reason: miss };
+    // Somme explicite ou regroupement : jamais sur une mesure non additive. Un classement ligne à ligne reste permis.
+    if ((req.agg === 'sum' || !!req.groupBy) && (req.agg ?? 'sum') === 'sum' && NON_ADDITIVE.test(norm(metric!.rel))) {
+      return { ok: false, reason: `somme interdite sur « ${metric!.rel} » : mesure non additive (${src})` };
+    }
     const us = unitSibling(F, metric!.rel);
+    const agg = req.agg === 'ratio' ? 'ratio' : req.agg === 'count' ? 'count' : 'sum';
     return { ok: true, evidencePath: `${coll}[].${metric!.rel}`, view: {
       kind: 'ranking', id: viewId, title: req.title, queryId, requirementIds: [req.id],
-      bindings: { collection: coll, label: label!.rel, metric: metric!.rel, den: den?.rel, groupBy: !!req.groupBy, agg: req.agg === 'ratio' ? 'ratio' : req.agg === 'count' ? 'count' : 'sum', unit: req.agg === 'ratio' ? null : metric!.unit ?? null, unitPath: us?.rel, population: `${getCollection(ds.acq.raw, coll)?.length ?? 0} lignes de ${ds.acq.ref.tool.name}`, order: 'desc', limit: 10 },
+      bindings: { collection: coll, label: label!.rel, metric: metric!.rel, den: den?.rel, groupBy: !!req.groupBy, agg, unit: agg === 'ratio' ? null : metric!.unit ?? null, unitPath: us?.rel, population: `${getCollection(ds.acq.raw, coll)?.length ?? 0} lignes de ${ds.acq.ref.tool.name}`, order: 'desc', limit: 10 },
     } };
   }
+  if (req.view === 'bars' || req.view === 'donut') {
+    const label = matchField(F, req.label_ ?? ['nom', 'name', 'libelle', 'categorie', 'famille', 'type'], ['dimension', 'text', 'identifier', 'state']);
+    const metric = req.agg === 'count' ? undefined : matchField(F, req.measure, ['measure']);
+    if (!label) return { ok: false, reason: `champ « ${req.label_?.[0] ?? 'libellé'} » absent des données lues (${src})` };
+    if (req.measure && req.agg !== 'count' && !metric) return { ok: false, reason: `champ « ${req.measure[0]} » absent des données lues (${src})` };
+    if (req.agg === 'sum' && metric && NON_ADDITIVE.test(norm(metric.rel))) return { ok: false, reason: `somme interdite sur « ${metric.rel} » : mesure non additive (${src})` };
+    const agg = req.agg === 'avg' ? 'avg' : req.agg === 'count' || !metric || NON_ADDITIVE.test(norm(metric.rel)) ? 'count' : 'sum';
+    return { ok: true, evidencePath: `${coll}[].${metric?.rel ?? label.rel}`, view: {
+      kind: req.view, id: viewId, title: req.title, queryId, requirementIds: [req.id],
+      bindings: { collection: coll, label: label.rel, ...(metric && agg !== 'count' ? { metric: metric.rel } : {}), agg, unit: metric?.unit ?? null, limit: 8 },
+    } };
+  }
+  if (req.view === 'histogram') {
+    const metric = matchField(F, req.measure, ['measure']);
+    if (!metric) return { ok: false, reason: `champ « ${req.measure?.[0] ?? 'mesure'} » absent des données lues (${src})` };
+    return { ok: true, evidencePath: `${coll}[].${metric.rel}`, view: { kind: 'histogram', id: viewId, title: req.title, queryId, requirementIds: [req.id], bindings: { collection: coll, v: metric.rel, bins: 12, unit: metric.unit ?? null } } };
+  }
+  if (req.view === 'scatter') {
+    const x = matchField(F, req.measure, ['measure']);
+    const y = matchField(F, req.den ?? req.series?.[1], ['measure']);
+    if (!x || !y || x.rel === y.rel) return { ok: false, reason: `deux mesures distinctes sont requises pour le nuage (${src})` };
+    return { ok: true, evidencePath: `${coll}[].${x.rel}`, view: { kind: 'scatter', id: viewId, title: req.title, queryId, requirementIds: [req.id], bindings: { collection: coll, x: x.rel, y: y.rel, xLabel: x.rel.split('.')[0].replace(/_/g, ' '), yLabel: y.rel.split('.')[0].replace(/_/g, ' '), xUnit: x.unit ?? null, yUnit: y.unit ?? null } } };
+  }
+  if (req.view === 'heatmap') {
+    const t = matchField(F, req.time ?? ['date', 'horodatage', 'time', 'jour'], ['time']) ?? F.find((f) => f.role === 'time');
+    const metric = matchField(F, req.measure, ['measure']);
+    if (!t || !metric) return { ok: false, reason: `horodatage ou mesure absent pour la carte (${src})` };
+    const agg = req.agg === 'sum' && !NON_ADDITIVE.test(norm(metric.rel)) ? 'sum' : 'avg';
+    if (req.agg === 'sum' && NON_ADDITIVE.test(norm(metric.rel))) return { ok: false, reason: `somme interdite sur « ${metric.rel} » : mesure non additive (${src})` };
+    return { ok: true, evidencePath: `${coll}[].${metric.rel}`, view: { kind: 'heatmap', id: viewId, title: req.title, queryId, requirementIds: [req.id], bindings: { collection: coll, t: t.rel, v: metric.rel, agg, unit: metric.unit ?? null } } };
+  }
+  if (req.view === 'note') return { ok: false, reason: req.acceptance ?? 'note sans donnée' };
+  if (req.view !== 'table') return { ok: false, reason: `visualisation « ${req.view} » non résolue (${src})` };
   // table
   const pick = [
     ...F.filter((f) => f.role === 'identifier').slice(0, 1),
@@ -126,6 +174,18 @@ export function resolveRequirement(req: ReqTemplate, ds: Dataset, viewId: string
   } };
 }
 
+function bindFilters(fields: Dataset['fields'], filters: ClauseFilter[] | undefined, src: string): { ok: true; filters: { path: string; op: ClauseFilter['op']; value?: ClauseFilter['value'] }[] } | { ok: false; reason: string } {
+  const out = [];
+  for (const w of filters ?? []) {
+    const numeric = w.op === 'gt' || w.op === 'lt' || w.op === 'gte' || w.op === 'lte' || w.op === 'between';
+    const roles: FieldContract['role'][] = w.op === 'current_month' ? ['time'] : numeric ? ['measure', 'dimension', 'state', 'text'] : ['dimension', 'state', 'text', 'identifier', 'measure'];
+    const f = matchField(fields, w.field, roles);
+    if (!f) return { ok: false, reason: `champ de filtre « ${w.field[0]} » absent (${src})` };
+    out.push({ path: f.rel, op: w.op, ...(w.value !== undefined ? { value: w.value } : {}) });
+  }
+  return { ok: true, filters: out };
+}
+
 /** Une collection n'est une SÉRIE TEMPORELLE que si son horodatage varie vraiment (pas un instantané horodaté). */
 export function isSeries(ds: Dataset): { time: Dataset['fields'][number] } | null {
   const time = ds.fields.find((f) => f.role === 'time');
@@ -138,9 +198,6 @@ export function isSeries(ds: Dataset): { time: Dataset['fields'][number] } | nul
   const median = steps[Math.floor(steps.length / 2)] ?? 0;
   return distinct / ts.length >= 0.8 && median >= 60_000 ? { time } : null;
 }
-
-/** Mesures qu'on ne somme jamais (prix, taux, pourcentages, températures…). */
-export const NON_ADDITIVE = /(prix|price|cours|taux|rate|pct|ratio|moyenne|avg|mean|temp|variation|change|probabilit|score|rang|rank|humid|%)/;
 
 /** Exigences génériques pour un MCP inédit ou un fichier joint : déduites du contrat, jamais d'un texte. */
 export function genericReqs(ds: Dataset): ReqTemplate[] {
@@ -166,7 +223,7 @@ export function genericReqs(ds: Dataset): ReqTemplate[] {
     for (const m of additive.slice(0, 2)) out.push({ id: `${slug(m.rel)}_${out.length}`, label: `total ${lbl(m)}`, mandatory: true, tool: kw, view: 'kpi', measure: [norm(m.rel)], agg: 'sum', title: `Total ${lbl(m)}` });
     const label = ds.fields.find((f) => /^(nom|name|libelle|titre|title)$/.test(norm(f.rel))) ?? ds.fields.find((f) => f.role === 'dimension' || f.role === 'identifier');
     const rankBy = additive[0] ?? measures[0];
-    if (label && rankBy) out.push({ id: `classement_${out.length}`, label: `classement par ${lbl(rankBy)}`, mandatory: true, tool: kw, view: 'ranking', measure: [norm(rankBy.rel)], label_: [norm(label.rel)], agg: 'sum', title: `Classement · ${lbl(rankBy)}` });
+    if (label && rankBy) out.push({ id: `classement_${out.length}`, label: `classement par ${lbl(rankBy)}`, mandatory: true, tool: kw, view: 'ranking', measure: [norm(rankBy.rel)], label_: [norm(label.rel)], ...(NON_ADDITIVE.test(norm(rankBy.rel)) ? {} : { agg: 'sum' as const }), title: `Classement · ${lbl(rankBy)}` });
   }
   out.push({ id: `detail_${out.length}`, label: `détail de ${tool}`, mandatory: true, tool: kw, view: 'table', title: 'Détail' });
   return out;

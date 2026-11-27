@@ -34,14 +34,7 @@ export function expectations(views: ViewSpec[], raws: Record<string, unknown>, r
       const a = v.bindings.aggregate!;
       const rows = coll(raw, a.collection);
       const ref = new Date(refTimes[v.queryId]);
-      const kept = rows.filter((r) => a.where.every((w) => {
-        const x = dig(r, w.path);
-        if (w.op === 'eq') return x === w.value;
-        if (w.op === 'neq') return x !== w.value;
-        if (typeof x !== 'string') return false;
-        const d = new Date(x);
-        return !isNaN(+d) && d.getUTCFullYear() === ref.getUTCFullYear() && d.getUTCMonth() === ref.getUTCMonth();
-      }));
+      const kept = rows.filter((r) => a.where.every((w) => keep(dig(r, w.path), w, ref)));
       let value = '';
       if (a.agg === 'top') {
         let best = -Infinity; let lab: string | null = null;
@@ -53,7 +46,20 @@ export function expectations(views: ViewSpec[], raws: Record<string, unknown>, r
         const units = new Set(a.unitPath ? kept.map((r) => dig(r, a.unitPath!)).filter((u) => typeof u === 'string') : []);
         if (units.size <= 1) {
           const num = (r: unknown, p?: string) => { const x = p ? dig(r, p) : undefined; return typeof x === 'number' && isFinite(x) ? x : null; };
-          if (a.agg === 'ratio') {
+          if (a.agg === 'sum' && a.measure && /(prix|price|cours|taux|rate|pct|ratio|moyenne|avg|mean|temp|variation|change|probabilit|score|rang|rank|humid|%)/.test(a.measure.toLowerCase())) value = '';
+          else if (a.agg === 'ratio' && !a.measure && !a.den) {
+            const denN = a.denWhere ? rows.filter((r) => a.denWhere!.every((w) => keep(dig(r, w.path), w, ref))).length : kept.length;
+            if (denN) value = String(Math.round(((a.percent ? kept.length / denN * 100 : kept.length / denN)) * 100) / 100);
+          } else if (a.agg === 'ratio' && a.measure && !a.den && a.denWhere) {
+            if (/(prix|price|cours|taux|rate|pct|ratio|moyenne|avg|mean|temp|variation|change|probabilit|score|rang|rank|humid|%)/.test(a.measure.toLowerCase())) value = '';
+            else {
+              const denRows = rows.filter((r) => a.denWhere!.every((w) => keep(dig(r, w.path), w, ref)));
+              let n = 0, d = 0;
+              for (const r of kept) { const x = num(r, a.measure); if (x !== null) n += x; }
+              for (const r of denRows) { const x = num(r, a.measure); if (x !== null) d += x; }
+              if (d) value = String(Math.round((a.percent ? (n / d) * 100 : n / d) * 100) / 100);
+            }
+          } else if (a.agg === 'ratio') {
             let n = 0, d = 0, used = 0;
             for (const r of kept) { const x = num(r, a.measure), y = num(r, a.den); if (x !== null && y !== null) { n += x; d += y; used++; } }
             if (used && d) value = String(Math.round((a.percent ? (n / d) * 100 : n / d) * 100) / 100);
@@ -114,4 +120,42 @@ export function expectations(views: ViewSpec[], raws: Record<string, unknown>, r
     } else out.push({ viewId: v.id, kind: 'present' });
   }
   return out;
+}
+
+function asNumber(v: unknown): number | null {
+  if (typeof v === 'number' && Number.isFinite(v)) return v;
+  if (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v))) return Number(v);
+  return null;
+}
+
+/** Même politique de filtre que le runtime, réécrite ici pour rester un oracle indépendant. */
+function keep(v: unknown, w: { op: string; value?: string | number | (string | number)[] }, ref: Date): boolean {
+  if (w.op === 'eq') return v === w.value || (asNumber(v) !== null && asNumber(v) === asNumber(w.value));
+  if (w.op === 'neq') return v !== w.value;
+  if (w.op === 'in') {
+    const list = Array.isArray(w.value) ? w.value : w.value === undefined ? [] : [w.value];
+    return list.some((x) => x === v || (asNumber(v) !== null && asNumber(v) === asNumber(x)));
+  }
+  if (w.op === 'between') {
+    const span = Array.isArray(w.value) ? w.value : [];
+    const n = asNumber(v), lo = asNumber(span[0]), hi = asNumber(span[1]);
+    return n !== null && lo !== null && hi !== null && n >= lo && n <= hi;
+  }
+  if (w.op === 'gt' || w.op === 'lt' || w.op === 'gte' || w.op === 'lte') {
+    const n = asNumber(v), t = asNumber(w.value);
+    if (n === null || t === null) return false;
+    return w.op === 'gt' ? n > t : w.op === 'lt' ? n < t : w.op === 'gte' ? n >= t : n <= t;
+  }
+  if (typeof v !== 'string') return false;
+  const d = new Date(v);
+  return !isNaN(+d) && d.getUTCFullYear() === ref.getUTCFullYear() && d.getUTCMonth() === ref.getUTCMonth();
+}
+
+/** L'oracle refuse une vue qui a changé la vue ou l'opération du contrat d'origine. */
+export function contradicts(req: { view: string; agg?: string }, view: { kind: string; bindings?: { aggregate?: { agg?: string } } } | undefined): string | null {
+  if (!view) return `vue « ${req.view} » absente`;
+  if (view.kind !== req.view) return `vue « ${view.kind} » au lieu de « ${req.view} »`;
+  const got = view.bindings?.aggregate?.agg;
+  if (req.agg && got && got !== req.agg) return `opération « ${got} » au lieu de « ${req.agg} »`;
+  return null;
 }

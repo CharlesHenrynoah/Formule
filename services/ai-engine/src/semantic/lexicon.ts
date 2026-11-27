@@ -1,4 +1,11 @@
 import type { Aggregate } from '@formule/contracts';
+
+/** Toutes les vues que le runtime sait afficher. Le contrat analytique n'en retire aucune. */
+export const VIEW_KINDS = ['kpi', 'line', 'table', 'ranking', 'simulation', 'bars', 'donut', 'histogram', 'scatter', 'heatmap', 'note'] as const;
+export type ViewKind = (typeof VIEW_KINDS)[number];
+export const AGGS = ['sum', 'count', 'avg', 'last', 'ratio', 'top'] as const;
+export type FilterOp = 'eq' | 'neq' | 'current_month' | 'gt' | 'lt' | 'gte' | 'lte' | 'in' | 'between';
+export interface ClauseFilter { field: string[]; op: FilterOp; value?: string | number | (string | number)[] }
 import { activePacks } from '../packs.js';
 import type { CatalogServer } from '../discovery/catalog.js';
 
@@ -11,17 +18,20 @@ export interface ReqTemplate {
   label: string;
   mandatory: boolean;
   tool: string[];           // mots-clés d'outil (nom ou description)
-  view: 'kpi' | 'line' | 'table' | 'ranking' | 'simulation';
+  view: ViewKind;
   measure?: string[];       // mots-clés du champ mesure
   den?: string[];           // dénominateur (ratio)
   time?: string[];
   label_?: string[];        // champ libellé (classement)
   agg?: Aggregate['agg'];
-  where?: { field: string[]; op: 'eq' | 'neq' | 'current_month'; value?: string }[];
+  where?: ClauseFilter[];
+  denWhere?: ClauseFilter[];
   groupBy?: boolean;
   percent?: boolean;
   series?: string[][];      // courbes multiples
   title: string;
+  /** Ce que la demande exige, figé avant toute lecture. La liaison ne le réécrit pas. */
+  acceptance?: string;
 }
 
 interface Recipe { match: RegExp; reqs: ReqTemplate[]; title: string; mission: string; commands: string[] }

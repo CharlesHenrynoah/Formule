@@ -6,8 +6,8 @@ import { acquire, getCatalog, namedServerIds, namesTool, packReads, rankTools, r
 import { understand, type ReqTemplate, type Understanding } from '../semantic/lexicon.js';
 import { datasetOf, genericReqs, resolveRequirement, type Dataset } from '../semantic/resolve.js';
 import { assembleSpec, bindTools, planActions, planRequirements, queryIdFor, type PlannedReq } from '../semantic/plan.js';
-import { refineUnderstanding } from '../semantic/llm-understand.js';
-import { linkPrompt } from '../semantic/points.js';
+import { draftAnalytical, readContract } from '../semantic/analytical.js';
+import { bindClauses } from '../semantic/points.js';
 import { isMultiSection, planSections } from '../semantic/sections.js';
 import { buildWorkspace, cleanupWorkspace, createWorkspace, shadcnAdd, writeWorkspaceFile } from './workspace.js';
 import { emit, setState, type JobRef } from './events.js';
@@ -97,7 +97,8 @@ async function create(job: JobRef, input: { prompt: string; fileIds: string[] })
   const scoped = named.length ? catalog.filter((s) => named.includes(s.serverId)) : catalog;
   if (named.length) await emit(job, 'log', { text: `Périmètre : ${scoped.map((s) => s.name).join(', ')}` });
   let u: Understanding = understand(input.prompt, scoped);
-  u = await refineUnderstanding(input.prompt, u, scoped);
+  const contract = await draftAnalytical(input.prompt, u, scoped);
+  if (u.generic && contract.reqs.length) await emit(job, 'log', { text: `Contrat analytique figé avant lecture : ${contract.reqs.map((r) => `${r.label} [${r.view}${r.agg ? ` ${r.agg}` : ''}]`).join(' · ')}` });
   check(job);
 
   let datasets = new Map<string, Dataset>();
@@ -148,8 +149,13 @@ async function create(job: JobRef, input: { prompt: string; fileIds: string[] })
     });
   }
   let pointsLocked = false;
-  const linked = await applyPoints(job, input.prompt, datasets);
-  if (linked) { u = linked.u; planned = linked.planned; pointsLocked = true; }
+  if (u.generic && contract.reqs.length) {
+    const bound = bindClauses(contract.reqs, datasets);
+    for (const p of bound) await emit(job, 'log', { text: `Lien · ${p.tpl.label} → ${p.status}${p.reason ? ` (${p.reason})` : ''} [${p.tpl.view}${p.tpl.agg ? ` ${p.tpl.agg}` : ''}]` });
+    u = contract;
+    planned = bound;
+    pointsLocked = true;
+  }
   if (!u.reqs.length) return blocked(job, input.prompt, catalog);
 
   const covered = planned.filter((p) => p.tpl.mandatory && p.status === 'covered');
@@ -194,6 +200,8 @@ async function create(job: JobRef, input: { prompt: string; fileIds: string[] })
 }
 
 async function createFromSections(job: JobRef, input: { prompt: string }, catalog: CatalogServer[]) {
+  const frozen = readContract(input.prompt);
+  if (frozen.length) await emit(job, 'log', { text: `Contrat analytique figé avant lecture : ${frozen.map((r) => `${r.label} [${r.view}${r.agg ? ` ${r.agg}` : ''}]`).join(' · ')}` });
   const plan = await planSections(input.prompt, catalog, async (ref, qid, args) => {
     check(job);
     await emit(job, 'log', { text: `Lecture ${ref.serverName} · ${ref.tool.name} ${JSON.stringify(args).slice(0, 160)}` });
@@ -202,10 +210,19 @@ async function createFromSections(job: JobRef, input: { prompt: string }, catalo
     return a;
   });
   for (const l of plan.log) await emit(job, 'log', { text: l });
-  const linked = await applyPoints(job, input.prompt, plan.datasets);
-  const spec = linked
-    ? assembleSpec({ u: linked.u, planned: linked.planned, datasets: plan.datasets, actions: plan.spec.actions, demo: plan.demo, prompt: input.prompt, pointsLocked: true })
-    : plan.spec;
+  // Le contrat figé lie les données sans réécrire la vue, l'opération ni les filtres.
+  let spec = plan.spec;
+  if (frozen.length) {
+    const bound = bindClauses(frozen, plan.datasets);
+    for (const p of bound) await emit(job, 'log', { text: `Lien · ${p.tpl.label} → ${p.status}${p.reason ? ` (${p.reason})` : ''} [${p.tpl.view}${p.tpl.agg ? ` ${p.tpl.agg}` : ''}]` });
+    if (bound.some((p) => p.status === 'covered')) {
+      const u: Understanding = {
+        title: plan.spec.title, mission: input.prompt.slice(0, 300), reqs: frozen,
+        commands: plan.spec.commands ?? [], simulation: frozen.some((r) => r.view === 'simulation'), generic: false,
+      };
+      spec = assembleSpec({ u, planned: bound, datasets: plan.datasets, actions: plan.spec.actions, demo: plan.demo, prompt: input.prompt, pointsLocked: true });
+    }
+  }
   const covered = spec.requirements.filter((r) => r.mandatory && r.status === 'covered');
   const summary = {
     sources: sourceSummary(plan.acqs),
@@ -230,14 +247,6 @@ async function createFromSections(job: JobRef, input: { prompt: string }, catalo
   await call('storage', `/projects/${project.id}/messages`, { body: { role: 'agent', content: { kind: 'sourcing', ...summary, decision: 'validé' } } });
   await setState(job, 'CONTRACT');
   await buildAndCertify(job, { spec, datasets: plan.datasets, catalog, base: null, touched: new Set() });
-}
-
-async function applyPoints(job: JobRef, prompt: string, datasets: Map<string, Dataset>) {
-  const linked = await linkPrompt(prompt, datasets);
-  if (!linked || !linked.planned.some((p) => p.status === 'covered')) return null;
-  await emit(job, 'log', { text: 'Consigne lue en points : chaque point n’est lié que s’il rencontre une donnée MCP' });
-  for (const p of linked.planned) await emit(job, 'log', { text: `Point · ${p.tpl.label} → ${p.status}${p.reason ? ` (${p.reason})` : ''}` });
-  return linked;
 }
 
 function uniqueRefs(catalog: CatalogServer[], tools: { serverId: string; tool: string }[]): ToolRef[] {

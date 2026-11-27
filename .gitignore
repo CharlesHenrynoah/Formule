@@ -4,3 +4,6 @@ dist
 .env
 *.log
 es-logs/
+.pnpm-store/
+pnpm-lock.yaml
+pnpm-workspace.yaml

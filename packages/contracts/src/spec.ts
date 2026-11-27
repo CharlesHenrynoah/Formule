@@ -27,11 +27,17 @@ export const QuerySchema = z.object({
 // Les colonnes réelles contiennent des espaces, parenthèses, % ou / (« adjusted CO2 »). Pas de chevrons ni guillemets.
 const Path = z.string().max(200).regex(/^[A-Za-z0-9_$\[\]. ()%/À-ſ-]*$/);
 
-const Where = z.object({ path: Path, op: z.enum(['eq', 'neq', 'current_month']), value: z.union([z.string(), z.number()]).optional() });
+const Scalar = z.union([z.string().max(80), z.number()]);
+const Where = z.object({
+  path: Path,
+  op: z.enum(['eq', 'neq', 'current_month', 'gt', 'lt', 'gte', 'lte', 'in', 'between']),
+  value: z.union([Scalar, z.array(Scalar).min(1).max(12)]).optional(),
+});
 export const AggregateSchema = z.object({
   collection: Path, agg: z.enum(['sum', 'count', 'avg', 'last', 'ratio', 'top']),
   labelPath: Path.optional(), // agg « top » : libellé de l'élément au maximum de la mesure
-  measure: Path.optional(), den: Path.optional(), unitPath: Path.optional(), where: z.array(Where).max(3).default([]),
+  measure: Path.optional(), den: Path.optional(), unitPath: Path.optional(), where: z.array(Where).max(4).default([]),
+  denWhere: z.array(Where).max(4).optional(), // population du dénominateur, distincte du filtre du numérateur
   percent: z.boolean().default(false),
 });
 export type Aggregate = z.infer<typeof AggregateSchema>;

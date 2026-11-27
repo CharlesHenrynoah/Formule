@@ -57,7 +57,7 @@ export type Intent = 'trend' | 'share' | 'rank' | 'distribution' | 'correlation'
 export function intents(text: string): Set<Intent> {
   const t = norm(text); const s = new Set<Intent>();
   if (/(evolution|tendance|historique|au fil|dans le temps|trend|courbe|progression|jour|semaine|mois)/.test(t)) s.add('trend');
-  if (/(part|repartition|proportion|mix|composition|pourcentage du total|share|camembert|donut)/.test(t)) s.add('share');
+  if (/(part|repartition|proportion|mix|composition|pourcentage du total|share|camembert|donut|circulaire)/.test(t)) s.add('share');
   if (/(top|classement|meilleur|plus (grand|gros|eleve|populaire)|rank|leader|premiers)/.test(t)) s.add('rank');
   if (/(distribution|dispersion|histogramme|ecart|frequence|spread)/.test(t)) s.add('distribution');
   if (/(correlation|relation|lien entre|versus|\bvs\b|en fonction de|nuage|scatter)/.test(t)) s.add('correlation');
@@ -117,7 +117,7 @@ export function recommend(views: ViewSpec[], datasets: Map<string, Dataset>, que
     if (!ds?.collection || ds.acq.envelope.status === 'error') continue;
     const p = profile(ds, text); if (!p || p.rows < 3) continue;
     // mini-courbe sur les KPI quand le temps existe
-    if (p.series && p.time) for (const v of views) if (v.kind === 'kpi' && v.queryId === qid && v.bindings.aggregate?.measure && !v.bindings.spark && v.bindings.aggregate.agg !== 'ratio')
+    if (want.has('trend') && p.series && p.time) for (const v of views) if (v.kind === 'kpi' && v.queryId === qid && v.bindings.aggregate?.measure && !v.bindings.spark && v.bindings.aggregate.agg !== 'ratio')
       v.bindings.spark = { collection: ds.collection, t: p.time.rel, v: v.bindings.aggregate.measure };
     const existingKinds = new Set(views.filter((v) => (v as { queryId?: string }).queryId === qid).map((v) => v.kind));
     // La demande est la source de vérité : une forme non citée n'est pas substituée par un graphique générique.
