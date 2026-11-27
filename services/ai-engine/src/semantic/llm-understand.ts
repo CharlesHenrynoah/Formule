@@ -3,9 +3,9 @@ import { draftAnalytical } from './analytical.js';
 import type { Understanding } from './lexicon.js';
 
 /**
- * Le modèle ne remplace plus le contrat. Il peut seulement compléter des mots de mesure vides.
- * Toutes les vues du runtime restent admissibles, et aucune exigence n'est coupée en silence.
+ * Appel 1 hybride : interprétation sémantique + plan. Repli déterministe si mock / JSON invalide.
  */
 export async function refineUnderstanding(prompt: string, base: Understanding, catalog: CatalogServer[]): Promise<Understanding> {
-  return draftAnalytical(prompt, base, catalog);
+  const draft = await draftAnalytical(prompt, base, catalog);
+  return draft.u;
 }

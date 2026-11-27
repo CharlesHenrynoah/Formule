@@ -121,7 +121,13 @@ export function resolveRequirement(req: ReqTemplate, ds: Dataset, viewId: string
         ], assumptions: ['scénario calculé localement, distinct des données observées'] },
       } };
     }
-    return { ok: true, evidencePath: `${coll}[].${series[0].path}`, view: { kind: 'line', id: viewId, title: req.title, queryId, requirementIds: [req.id], bindings: { collection: coll, t: t.rel, series } } };
+    return {
+      ok: true, evidencePath: `${coll}[].${series[0].path}`,
+      view: {
+        kind: 'line', id: viewId, title: req.title, queryId, requirementIds: [req.id],
+        bindings: { collection: coll, t: t.rel, series, normalize: req.transform === 'base100' ? 'base100' as const : 'none' as const },
+      },
+    };
   }
   if (req.view === 'ranking') {
     const measureKws = req.measures ?? req.measure;
@@ -196,8 +202,9 @@ export function resolveRequirement(req: ReqTemplate, ds: Dataset, viewId: string
   }
   if (req.view === 'note') return { ok: false, reason: req.acceptance ?? 'note sans donnée' };
   if (req.view !== 'table') return { ok: false, reason: `visualisation « ${req.view} » non résolue (${src})` };
-  // table
-  const where = bindFilters(F, req.filters ?? req.where, src);
+  // table — si le contrat liste des entités sans filtre, on les matérialise (pas de top silencieux).
+  const tableFilters = ensureEntityFilter(req.filters ?? req.where, req.entities);
+  const where = bindFilters(F, tableFilters, src);
   if (!where.ok) return where;
   const explicit = req.columns?.length ? req.columns.map((col) => {
     const words = norm(col).split(/[^a-z0-9]+/).filter((w) => w.length > 2 && !['actuel','actuelle','sur','des','les','eur','euros'].includes(w));
@@ -218,6 +225,14 @@ export function resolveRequirement(req: ReqTemplate, ds: Dataset, viewId: string
     kind: 'table', id: viewId, title: req.title, queryId, requirementIds: [req.id],
     bindings: { collection: coll, where: where.filters, columns: pick.map((f, i) => ({ path: f.rel, label: req.columns?.[i]?.slice(0, 40) ?? f.rel.split('.')[0].replace(/_/g, ' '), unit: f.unit ?? null, type: f.type === 'time' ? 'time' : f.type === 'number' ? 'number' : f.type === 'boolean' ? 'boolean' : 'string' })) },
   } };
+}
+
+/** Matérialise entities → filtre `in` si le contrat n'en a pas déjà un. */
+function ensureEntityFilter(filters: ClauseFilter[] | undefined, entities: string[] | undefined): ClauseFilter[] | undefined {
+  if (!entities?.length) return filters;
+  const hasEntity = (filters ?? []).some((f) => (f.op === 'eq' || f.op === 'in') && f.field.some((x) => /nom|name|libelle|titre|title|symbol|id/.test(norm(x))));
+  if (hasEntity) return filters;
+  return [...(filters ?? []), { field: ['nom', 'name', 'libelle', 'titre', 'title', 'symbol'], op: 'in', value: entities }];
 }
 
 function bindFilters(fields: Dataset['fields'], filters: ClauseFilter[] | undefined, src: string): { ok: true; filters: { path: string; op: ClauseFilter['op']; value?: ClauseFilter['value'] }[] } | { ok: false; reason: string } {

@@ -78,7 +78,12 @@ export const KpiView = z.object({
 });
 export const LineView = z.object({
   kind: z.literal('line'), id: z.string(), title: z.string().max(80), queryId: z.string(),
-  bindings: z.object({ collection: Path, t: Path, series: z.array(z.object({ path: Path, label: z.string().max(40), unit: z.string().max(20).nullable() })).min(1).max(4) }),
+  bindings: z.object({
+    collection: Path, t: Path,
+    series: z.array(z.object({ path: Path, label: z.string().max(40), unit: z.string().max(20).nullable() })).min(1).max(4),
+    /** Transformation déclarative appliquée au rendu (jamais une substitution de mesure). */
+    normalize: z.enum(['none', 'base100']).default('none'),
+  }),
   requirementIds: z.array(z.string()).default([]),
   section: z.string().max(40).optional(),
 });

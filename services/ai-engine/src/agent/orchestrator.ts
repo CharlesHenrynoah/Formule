@@ -9,6 +9,7 @@ import { assembleSpec, bindTools, planActions, planRequirements, queryIdFor, typ
 import { draftAnalytical } from '../semantic/analytical.js';
 import { acquisitionKey, planAcquisitions, type PlannedAcquisition } from '../semantic/acquire-plan.js';
 import { bindClauses } from '../semantic/points.js';
+import { applyCorrection, bindAndCompose, diagnoseCorrection } from '../semantic/hybrid.js';
 import { isMultiSection } from '../semantic/sections.js';
 import { buildWorkspace, cleanupWorkspace, createWorkspace, shadcnAdd, writeWorkspaceFile } from './workspace.js';
 import { emit, setState, type JobRef } from './events.js';
@@ -136,16 +137,17 @@ async function runContractBuild(job: JobRef, input: { prompt: string; fileIds: s
   if (named.length) await emit(job, 'log', { text: `Périmètre : ${scoped.map((s) => s.name).join(', ')}` });
 
   let u: Understanding = understand(prompt, scoped);
-  const contract = await draftAnalytical(prompt, u, scoped);
-  const reqs = contract.reqs.length ? contract.reqs : u.reqs;
+  const draft = await draftAnalytical(prompt, u, scoped);
+  let reqs = draft.u.reqs.length ? draft.u.reqs : u.reqs;
   if (reqs.length) {
-    u = contract.reqs.length ? contract : { ...u, reqs };
-    await emit(job, 'log', { text: `Contrat analytique figé avant lecture : ${reqs.map((r) => `${r.label} [${r.visualization ?? r.view}${r.operation ?? r.agg ? ` ${r.operation ?? r.agg}` : ''}]`).join(' · ')}` });
+    u = draft.u.reqs.length ? draft.u : { ...u, reqs };
+    await emit(job, 'log', { text: `Contrat analytique figé (${draft.source}) : ${reqs.map((r) => `${r.label} [${r.visualization ?? r.view}${r.operation ?? r.agg ? ` ${r.operation ?? r.agg}` : ''}]`).join(' · ')}` });
   }
   check(job);
   if (!reqs.length) return blocked(job, prompt, named.length ? scoped : catalog);
 
-  const { planned: acqPlan, unresolved } = await planAcquisitions(reqs, scoped, prompt, fileIds);
+  const acqHints = { toolHints: draft.toolHints, argHints: draft.argHints };
+  const { planned: acqPlan, unresolved } = await planAcquisitions(reqs, scoped, prompt, fileIds, new Set(), acqHints);
   if (!acqPlan.length) {
     if (unresolved.length) {
       await setState(job, 'BLOCKED');
@@ -161,6 +163,14 @@ async function runContractBuild(job: JobRef, input: { prompt: string; fileIds: s
   const datasets = new Map<string, Dataset>();
   for (const a of acqs) datasets.set(a.queryId, datasetOf(a));
 
+  // Appel 2 : compréhension des données + liaison proposée + composition. Le moteur vérifie ensuite.
+  const composed = await bindAndCompose(prompt, reqs, datasets);
+  if (composed.source === 'llm') {
+    reqs = composed.reqs;
+    u = { ...u, reqs };
+    await emit(job, 'log', { text: 'Liaison sémantique proposée par l’IA (vérification déterministe)' });
+  }
+
   let planned: PlannedReq[] = bindClauses(reqs, datasets);
   const attempted = new Set(acqPlan.map((p) => acquisitionKey(p.ref, p.args)));
   // Une lecture techniquement réussie ne prouve pas sa couverture.
@@ -171,13 +181,32 @@ async function runContractBuild(job: JobRef, input: { prompt: string; fileIds: s
     if (!missing.length) break;
     const available = scoped.filter((s) => !limitedServers.has(s.serverId));
     if (!available.length) break;
-    const next = await planAcquisitions(missing, available, prompt, fileIds, attempted);
+    const next = await planAcquisitions(missing, available, prompt, fileIds, attempted, acqHints);
     const candidates = next.planned.slice(0, 8);
     if (!candidates.length) break;
     for (const p of candidates) attempted.add(acquisitionKey(p.ref, p.args));
     const retry = await acquireFromPlan(job, candidates, null, usedIds, limitedServers);
     for (const a of retry) { acqs.push(a); datasets.set(a.queryId, datasetOf(a)); }
     planned = bindClauses(reqs, datasets);
+  }
+
+  // Appel 3 (optionnel, une fois) : divergence après liaison, sans relancer un serveur limité.
+  const gaps = planned.filter((p) => p.tpl.mandatory && p.status !== 'covered' && p.tpl.view !== 'note');
+  if (gaps.length && datasets.size) {
+    const correction = await diagnoseCorrection(prompt, planned, gaps.map((g) => `${g.tpl.id}: ${g.reason ?? g.status}`));
+    if (correction) {
+      const allowedQ = new Set([...datasets.keys()].filter((qid) => {
+        const ds = datasets.get(qid);
+        return ds && ds.acq.envelope.status !== 'error' && !limitedServers.has(ds.acq.ref.serverId);
+      }));
+      const corrected = applyCorrection(reqs, correction, allowedQ);
+      if (corrected.length !== reqs.length || correction.rebind?.length) {
+        reqs = corrected;
+        u = { ...u, reqs };
+        planned = bindClauses(reqs, datasets);
+        await emit(job, 'log', { text: `Correction ciblée appliquée${correction.note ? ` : ${correction.note}` : ''}` });
+      }
+    }
   }
   for (const p of planned) await emit(job, 'log', { text: `Lien · ${p.tpl.label} → ${p.status}${p.reason ? ` (${p.reason})` : ''} [${p.tpl.visualization ?? p.tpl.view}${p.tpl.operation ?? p.tpl.agg ? ` ${p.tpl.operation ?? p.tpl.agg}` : ''}]` });
 
@@ -455,14 +484,38 @@ async function buildAndCertify(job: JobRef, x: { spec: AppSpec; datasets: Map<st
   const report = certify(gates, reqs, lastRead, { repairable: attempt === 0 });
   for (const g of report.gates) await emit(job, 'log', { text: `${g.gate} ${g.passed ? '✓' : '✗'} ${g.details.slice(0, 3).join(' · ')}`, gate: g.gate, passed: g.passed });
 
-  // Réparation bornée (1 tentative) : on retire les vues dont la liaison échoue ; leurs exigences deviennent manquantes.
+  // Réparation bornée (1 tentative) : diagnostic IA optionnel puis retrait déterministe des vues cassées.
+  // Pas de nouvel appel MCP ici — les serveurs limités (PR#5) restent hors reprise.
   if (report.outcome === 'REPAIR' && attempt === 0) {
     const broken = new Set(dom?.results.filter((r) => !r.ok).map((r) => r.viewId) ?? []);
     const fixable = broken.size > 0 && report.blockingGates.every((g) => g === 'G5' || g === 'G6');
     if (fixable) {
       await setState(job, 'REPAIR');
+      const divergences = [
+        ...reqs.filter((r) => r.status !== 'covered').map((r) => `${r.id}: ${r.reason ?? r.status}`),
+        ...[...broken].map((id) => `vue ${id}: liaison DOM échouée`),
+      ];
+      const plannedLike: PlannedReq[] = reqs.map((r) => ({
+        tpl: { id: r.id, label: r.label, mandatory: r.mandatory, tool: ['*'], view: r.visualization ?? 'kpi', title: r.label, visualization: r.visualization ?? 'kpi' },
+        status: r.status,
+        reason: r.reason,
+      }));
+      const correction = await diagnoseCorrection(spec.mission, plannedLike, divergences);
+      if (correction?.dropRequirementIds?.length) {
+        await emit(job, 'log', { text: `Correction : retrait proposé de ${correction.dropRequirementIds.length} exigence(s)` });
+      }
       await emit(job, 'log', { text: `Réparation : retrait de ${broken.size} vue(s) mal liée(s)` });
-      const repaired: AppSpec = { ...spec, views: spec.views.filter((v) => !broken.has(v.id)), requirements: spec.requirements.map((r) => (r.evidence && broken.has(r.evidence.viewId) ? { ...r, status: 'missing' as const, reason: reqs.find((q) => q.id === r.id)?.reason, evidence: null } : r)) };
+      const drop = new Set(correction?.dropRequirementIds ?? []);
+      const repaired: AppSpec = {
+        ...spec,
+        views: spec.views.filter((v) => !broken.has(v.id)),
+        requirements: spec.requirements.map((r) => {
+          if (drop.has(r.id) || (r.evidence && broken.has(r.evidence.viewId))) {
+            return { ...r, status: 'missing' as const, reason: reqs.find((q) => q.id === r.id)?.reason ?? correction?.note, evidence: null };
+          }
+          return r;
+        }),
+      };
       const touched = new Set([...x.touched, ...broken]);
       return buildAndCertify(job, { ...x, spec: repaired, touched }, 1);
     }

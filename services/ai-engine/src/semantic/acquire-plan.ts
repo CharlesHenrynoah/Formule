@@ -1,13 +1,18 @@
 import { canonicalJson } from '@formule/contracts';
 import { packReads, rankTools, resolveArgs, type CatalogServer, type ToolRef } from '../discovery/catalog.js';
-import type { ReqTemplate } from './lexicon.js';
+import { norm, type ReqTemplate } from './lexicon.js';
 
 export interface PlannedAcquisition { ref: ToolRef; args: Record<string, unknown>; forReqIds: string[] }
 export const acquisitionKey = (ref: ToolRef, args: Record<string, unknown>) => `${ref.serverId}__${ref.tool.name}__${canonicalJson(args)}`;
 
+export type AcquisitionHints = {
+  toolHints?: Map<string, string[]>;
+  argHints?: Map<string, Record<string, unknown>>;
+};
+
 /**
  * Planifie les lectures MCP par exigence et combinaison d'arguments.
- * Si aucune acquisition existante ne convient, tente une autre lecture autorisée.
+ * Les hints IA (outils / arguments) priorisent le classement ; permissions, schéma et quotas restent déterministes.
  */
 export async function planAcquisitions(
   reqs: ReqTemplate[],
@@ -15,6 +20,7 @@ export async function planAcquisitions(
   prompt: string,
   fileIds: string[] = [],
   excluded: ReadonlySet<string> = new Set(),
+  hints: AcquisitionHints = {},
 ): Promise<{ planned: PlannedAcquisition[]; unresolved: string[] }> {
   const preamble = prompt.split(/\n\s*(?:#{1,4}\s*)?(?:\*\*)?(?:\d{1,2}[.)]\s+|[-•*]\s+)/)[0].trim();
   const global = preamble.length < 500 && preamble !== prompt ? preamble : '';
@@ -42,22 +48,39 @@ export async function planAcquisitions(
       ? (req.entities ?? []).reduce((str, e) => str.replaceAll(e, '').replaceAll(e.toLowerCase(), ''), text)
       : text;
     const local = [scopeText, req.scopeSize != null ? 'top ' + req.scopeSize : undefined, req.period, req.measureWindow, req.inputUnit ?? (req.unit === '%' ? undefined : req.unit), global].filter(Boolean).join('\n');
+    const hintNames = (hints.toolHints?.get(req.id) ?? req.tool.filter((t) => t !== '*')).map(norm);
+    const hinted = hintNames.length
+      ? catalog.flatMap((s) => s.tools.filter((t) => t.permission === 'read' && hintNames.some((h) => norm(t.name) === h || norm(t.name).includes(h) || h.includes(norm(t.name)))).map((tool) => ({ serverId: s.serverId, serverName: s.name, demo: s.demo, tool })))
+      : [];
+    const isDocs = (name: string) => /search_docs|documentation|readme|^docs?$/i.test(name);
     const ranked = [
-      ...rankTools(catalog, local || prompt, fileIds),
-      ...packed,
-      ...rankTools(catalog, prompt, fileIds),
+      ...hinted.filter((r) => !isDocs(r.tool.name)),
+      ...rankTools(catalog, local || prompt, fileIds).filter((r) => !isDocs(r.tool.name)),
+      ...packed.filter((r) => !isDocs(r.tool.name)),
+      ...rankTools(catalog, prompt, fileIds).filter((r) => !isDocs(r.tool.name)),
+      // Documentation en dernier recours uniquement.
+      ...hinted.filter((r) => isDocs(r.tool.name)),
+      ...rankTools(catalog, local || prompt, fileIds).filter((r) => isDocs(r.tool.name)),
     ];
     const tried = new Set<string>();
     let ok = false;
+    const seedArgs = hints.argHints?.get(req.id) ?? {};
     for (const ref of ranked) {
       const id = `${ref.serverId}__${ref.tool.name}`;
       if (tried.has(id) || ref.tool.permission !== 'read') continue;
       tried.add(id);
-      const { args, missing } = Object.keys(ref.tool.inputSchema?.properties ?? {}).length
+      const props = ref.tool.inputSchema?.properties ?? {};
+      const { args: resolved, missing } = Object.keys(props).length
         ? await resolveArgs(ref, local || prompt, catalog)
         : { args: {}, missing: [] as string[] };
-      if (missing.length) {
-        if (unresolved.length < 6) unresolved.push(`${req.id} · ${ref.serverName} · ${ref.tool.name} : ${missing.join(', ')}`);
+      // Hints IA : uniquement les clés du schéma, jamais d'override hors schéma.
+      const args = { ...resolved };
+      for (const [k, v] of Object.entries(seedArgs)) {
+        if (k in props && args[k] === undefined) args[k] = v;
+      }
+      const stillMissing = (ref.tool.inputSchema?.required ?? []).filter((r) => args[r] === undefined);
+      if (stillMissing.length) {
+        if (unresolved.length < 6) unresolved.push(`${req.id} · ${ref.serverName} · ${ref.tool.name} : ${(stillMissing.length ? stillMissing : missing).join(', ')}`);
         continue;
       }
       if (!add(ref, args, req.id)) continue;

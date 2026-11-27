@@ -2,7 +2,7 @@ import { useMemo, useState, type ReactNode } from 'react';
 import { Area, CartesianGrid, ComposedChart, Line, XAxis, YAxis } from 'recharts';
 import { notify } from './bridge';
 import {
-  aggregate, filterRows, getCollection, getPath, rank, toSeries, detectGaps, simulateLinear, SERIES_COLORS, classifyValue,
+  aggregate, filterRows, getCollection, getPath, rank, toSeries, toBase100, detectGaps, simulateLinear, SERIES_COLORS, classifyValue,
   type ViewSpec, type Point,
 } from '@formule/contracts/browser';
 import type { QueryState } from './App';
@@ -144,7 +144,13 @@ export function LineView({ view, q }: { view: V<'line'>; q: QueryState }) {
   const data = useMemo(() => {
     const rows = q.raw == null ? undefined : getCollection(q.raw, b.collection);
     if (!rows) return null;
-    return b.series.map((s, i) => { const r = toSeries(rows, b.t, s.path, getPath); return { name: `${s.label}${s.unit ? ` (${s.unit})` : ''}`, points: r.points, rejected: r.rejected, color: seriesColor(i), area: i === 0 }; });
+    const base100 = b.normalize === 'base100';
+    return b.series.map((s, i) => {
+      const r = toSeries(rows, b.t, s.path, getPath);
+      const points = base100 ? (toBase100(r.points) ?? r.points) : r.points;
+      const unit = base100 ? 'base 100' : s.unit;
+      return { name: `${s.label}${unit ? ` (${unit})` : ''}`, points, rejected: r.rejected, color: seriesColor(i), area: i === 0 };
+    });
   }, [q, b]);
   if (q.status === 'error' || !data) return <Card id={view.id} title={view.title} q={q}><ErrorState q={q} /></Card>;
   const n = data[0]?.points.length ?? 0;

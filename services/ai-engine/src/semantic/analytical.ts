@@ -1,7 +1,4 @@
-import { z } from 'zod';
 import type { CatalogServer } from '../discovery/catalog.js';
-import { llm } from '../llm.js';
-import { fenceUntrusted } from '@formule/contracts';
 import { NON_ADDITIVE } from './resolve.js';
 import { norm, VIEW_KINDS, type ClauseFilter, type OrderDir, type ReqTemplate, type Understanding, type ViewKind } from './lexicon.js';
 
@@ -31,7 +28,7 @@ function localSections(prompt: string): { title: string; kind: 'kpi' | 'data' | 
 /** Plafond du contrat d'application. Au-delà, l'excédent est une exigence explicite, jamais un oubli. */
 export const REQ_CAP = 40;
 
-const STOP = new Set(['avec', 'dans', 'pour', 'dans', 'les', 'des', 'une', 'sur', 'par', 'aux', 'que', 'qui', 'est', 'sont', 'cette', 'cette', 'tout', 'tous', 'toute', 'toutes', 'plus', 'moins', 'entre', 'comme', 'depuis', 'vers', 'alors', 'ainsi', 'donc', 'mais', 'dont', 'leur', 'leurs', 'nous', 'vous', 'elle', 'elles', 'ils', 'application', 'interface', 'graphique', 'graphiques', 'section', 'sections', 'demande', 'montre', 'afficher', 'affiche', 'creer', 'cree', 'construis', 'element', 'elements', 'objet', 'objets', 'ligne', 'lignes', 'donnee', 'donnees', 'actif', 'actifs', 'nombre', 'total', 'somme', 'moyenne', 'part', 'parts', 'ratio', 'classement', 'courbe', 'evolution', 'historique', 'liste', 'tableau', 'detail', 'circulaire', 'camembert', 'donut', 'histogramme', 'barres', 'barre', 'nuage', 'correlation', 'calendrier', 'hausse', 'baisse', 'positif', 'positive', 'negatif', 'negative', 'valeur', 'identite']);
+const STOP = new Set(['avec', 'dans', 'pour', 'dans', 'les', 'des', 'une', 'sur', 'par', 'aux', 'que', 'qui', 'est', 'sont', 'cette', 'cette', 'tout', 'tous', 'toute', 'toutes', 'plus', 'moins', 'entre', 'comme', 'depuis', 'vers', 'alors', 'ainsi', 'donc', 'mais', 'dont', 'leur', 'leurs', 'nous', 'vous', 'elle', 'elles', 'ils', 'application', 'interface', 'graphique', 'graphiques', 'section', 'sections', 'demande', 'montre', 'afficher', 'affiche', 'creer', 'cree', 'construis', 'element', 'elements', 'objet', 'objets', 'ligne', 'lignes', 'donnee', 'donnees', 'actif', 'actifs', 'nombre', 'total', 'somme', 'moyenne', 'part', 'parts', 'ratio', 'classement', 'courbe', 'evolution', 'historique', 'liste', 'tableau', 'detail', 'circulaire', 'camembert', 'donut', 'histogramme', 'barres', 'barre', 'nuage', 'correlation', 'calendrier', 'hausse', 'baisse', 'positif', 'positive', 'negatif', 'negative', 'valeur', 'identite', 'permet', 'permets', 'permettre', 'veut', 'veux', 'voudrais', 'besoin', 'aussi', 'encore', 'apres', 'avant', 'selon', 'contre', 'trois', 'deux', 'quatre', 'cinq', 'cryptomonnaie', 'cryptomonnaies', 'crypto', 'cryptos', 'intelligence', 'market', 'compare', 'comparaison', 'base']);
 
 const GLOBAL_CONSTRAINT = /(onglet|tab\b|curseur|slider|portefeuille|virtual|virtuel|capital de|acheter|vendre|rafraich|refresh|reset|bouton|couleur|theme|style|layout|responsive|mobile)/;
 
@@ -152,14 +149,14 @@ export function filtersOf(text: string): ClauseFilter[] {
   if (!out.length && /baisse|negatif/.test(t)) out.push({ field: ['variation', 'change', 'delta', 'ecart'], op: 'lt', value: 0 });
   const among = text.match(/parmi\s+([^.\n]+)/i);
   if (among) {
-    const values = among[1].split(/,|\bet\b/i).map((x) => x.trim()).filter((x) => x.length > 1).slice(0, 12);
-    if (values.length) out.push({ field: ['nom', 'name', 'libelle', 'categorie', 'type'], op: 'in', value: values });
+    const values = among[1].split(/,|\bet\b/i).map((x) => x.trim()).filter((x) => x.length > 1 && x.length <= 40 && x.split(/\s+/).length <= 3).slice(0, 12);
+    if (values.length) out.push({ field: ['nom', 'name', 'libelle', 'categorie', 'type', 'symbol'], op: 'in', value: values });
   }
-  const quoted = [...text.matchAll(/[«"“']([^»"”']{1,40})[»"”']/g)].map((m) => m[1].trim()).filter(Boolean);
+  const quoted = [...text.matchAll(/[«"“']([^»"”']{1,40})[»"”']/g)].map((m) => m[1].trim()).filter((x) => x.split(/\s+/).length <= 3);
   const named = text.match(/part (?:de |du |d['’]|des )(?:l['’])?([A-Za-zÀ-ÿ][\wÀ-ÿ-]{1,40})/i)
     ?? text.match(/(?:valeur|prix|montant|cours) (?:de |du |d['’]|des )(?:l['’])?([A-Za-zÀ-ÿ][\wÀ-ÿ-]{1,40})/i);
   const entity = quoted[0] ?? named?.[1];
-  if (entity) out.push({ field: ['nom', 'name', 'libelle', 'titre', 'title'], op: 'eq', value: entity });
+  if (entity && entity.length <= 40) out.push({ field: ['nom', 'name', 'libelle', 'titre', 'title', 'symbol'], op: 'eq', value: entity });
   return out.slice(0, 4);
 }
 
@@ -229,9 +226,17 @@ function populationOf(text: string, _t: string): string | undefined {
   return value || undefined;
 }
 
+const WORD_NUM: Record<string, number> = { un: 1, une: 1, deux: 2, trois: 3, quatre: 4, cinq: 5, six: 6, sept: 7, huit: 8, neuf: 9, dix: 10 };
+
 function limitOf(t: string): number | undefined {
-  const m = t.match(/(?:top|premier(?:s)?|limite(?:e)?\s+a)\s+(\d{1,3})/) ?? t.match(/\b(\d{1,3})\s+premier(?:e)?s?\b/) ?? t.match(/\b(?:ces|des|les)\s+(\d{1,3})\s+(?:actifs?|produits?|articles?|elements?|lignes?|entites?|clients?|magasins?)\b/);
-  return m ? Number(m[1]) : undefined;
+  const m = t.match(/(?:top|premier(?:s)?|limite(?:e)?\s+a)\s+(\d{1,3})/)
+    ?? t.match(/\b(\d{1,3})\s+premier(?:e)?s?\b/)
+    ?? t.match(/\b(?:ces|des|les|de)\s+(\d{1,3})\s+(?:actifs?|produits?|articles?|elements?|lignes?|entites?|clients?|magasins?|cryptos?|cryptomonnaies?|tokens?|coins?)\b/)
+    ?? t.match(/\btableau\s+(?:de|des)\s+(\d{1,3})\b/);
+  if (m) return Number(m[1]);
+  const w = t.match(/\b(?:ces|des|les|de|un\s+tableau\s+de)\s+(un|une|deux|trois|quatre|cinq|six|sept|huit|neuf|dix)\s+(?:actifs?|cryptos?|cryptomonnaies?|tokens?|coins?|elements?)\b/);
+  if (w && WORD_NUM[w[1]]) return WORD_NUM[w[1]];
+  return undefined;
 }
 
 function orderOf(t: string): OrderDir | undefined {
@@ -276,6 +281,7 @@ export function clauseToReq(text: string, index: number, section?: string, desig
   const order = orderOf(t);
   const inputUnit = unitOf(t);
   const unit = share ? '%' : inputUnit;
+  const transform = /(base\s*100|rebase|index[eé]|normalis[eé]e?\s+a\s+100)/.test(t) && view === 'line' ? 'base100' as const : undefined;
   const scopeSize = ['kpi','bars','donut'].includes(view) ? limit : undefined;
   const measureWindow = !period ? durationOf(t) : undefined;
   const sectionId = section ? `sec_${norm(section).replace(/[^a-z0-9]+/g, '_').slice(0, 20)}` : undefined;
@@ -297,10 +303,11 @@ export function clauseToReq(text: string, index: number, section?: string, desig
     denWhere: share ? [] : undefined,
     percent: share,
     entities: entities.length ? entities : undefined,
-    population, limit, period, grain, order, unit, measureWindow, scopeSize, inputUnit: share && inputUnit !== '%' ? inputUnit : undefined,
+    population, limit, period, grain, order, unit, transform, measureWindow, scopeSize, inputUnit: share && inputUnit !== '%' ? inputUnit : undefined,
     section, design, parentId: parentId ?? sectionId,
     acceptance: [
-      view, agg ? `op:${agg}` : null, where.length ? `filtre:${where.map((w) => w.op).join(',')}` : null,
+      view, agg ? `op:${agg}` : null, transform ? `transform:${transform}` : null,
+      where.length ? `filtre:${where.map((w) => w.op).join(',')}` : null,
       entities.length ? `entite:${entities.join(',')}` : null, population ? `pop:${population}` : null,
       period ? `periode:${period}` : null, grain ? `grain:${grain}` : null, unit ? `unite:${unit}` : null,
       limit != null ? `limit:${limit}` : null,
@@ -344,35 +351,29 @@ export function capRequirements(reqs: ReqTemplate[]): ReqTemplate[] {
   return kept;
 }
 
-function freezeReqs(reqs: ReqTemplate[]): ReqTemplate[] {
+export function freezeReqs(reqs: ReqTemplate[]): ReqTemplate[] {
   return reqs.map((r) => Object.freeze({ ...r, where: r.where ? Object.freeze([...r.where]) : undefined, filters: r.filters ? Object.freeze([...r.filters]) : undefined, measure: r.measure ? Object.freeze([...r.measure]) : undefined, measures: r.measures ? Object.freeze([...r.measures]) : undefined, entities: r.entities ? Object.freeze([...r.entities]) : undefined }));
 }
 
+export type AnalyticalDraft = {
+  u: Understanding;
+  toolHints: Map<string, string[]>;
+  argHints: Map<string, Record<string, unknown>>;
+  source: 'llm' | 'deterministic';
+};
+
 /**
  * Fige le contrat avant la lecture MCP.
- * Une recette déjà nommée reste telle quelle. Sinon la consigne décide de la vue, de l'opération et des filtres.
+ * L'IA construit le contrat intégral lorsqu'elle est disponible — y compris si une recette pack
+ * a déjà proposé des exigences. Le déterministe (packs / readContract) n'est qu'un repli.
  */
-export async function draftAnalytical(prompt: string, base: Understanding, catalog: CatalogServer[]): Promise<Understanding> {
-  if (!base.generic && base.reqs.length) return { ...base, reqs: freezeReqs(capRequirements(base.reqs)) };
-  let reqs = readContract(prompt);
-  if (!reqs.length) return base;
-  if (llm.name !== 'mock') reqs = freezeReqs(await fillMeasures(prompt, [...reqs], catalog));
-  return { ...base, mission: prompt.slice(0, 300), reqs, generic: false, simulation: reqs.some((r) => r.view === 'simulation') || base.simulation };
-}
-
-async function fillMeasures(prompt: string, reqs: ReqTemplate[], catalog: CatalogServer[]): Promise<ReqTemplate[]> {
-  const cat = catalog.flatMap((s) => s.tools.filter((t) => t.permission === 'read').map((t) => t.name)).join(', ');
-  const out = await llm.json<unknown>([
-    { role: 'system', content: 'Tu proposes uniquement des mots de champs pour des exigences déjà figées. Tu ne changes ni la vue, ni l\'opération, ni les filtres. JSON : {"hints":[{"id":str,"measure":[str]}]}' },
-    { role: 'user', content: `Consigne : ${prompt}\nOutils : ${fenceUntrusted('outils', cat)}\nExigences : ${JSON.stringify(reqs.map((r) => ({ id: r.id, label: r.label, view: r.view, agg: r.agg })))}` },
-  ]).catch(() => null);
-  const parsed = z.object({ hints: z.array(z.object({ id: z.string(), measure: z.array(z.string().min(1).max(80)).max(8) })).max(40) }).safeParse(out);
-  const hints = new Map((parsed.success ? parsed.data.hints : []).map((h) => [h.id, h.measure.map(norm)]));
-  return reqs.map((r) => {
-    if (r.view === 'note' || (r.operation ?? r.agg) === 'count') return r;
-    const m = hints.get(r.id);
-    return m?.length ? { ...r, measure: [...new Set([...(r.measure ?? []), ...m])], measures: [...new Set([...(r.measures ?? []), ...m])] } : r;
-  });
+export async function draftAnalytical(prompt: string, base: Understanding, catalog: CatalogServer[]): Promise<AnalyticalDraft> {
+  const { interpretAndPlan } = await import('./hybrid.js');
+  const { llm } = await import('../llm.js');
+  if (llm.name === 'mock' && !base.generic && base.reqs.length) {
+    return { u: { ...base, reqs: freezeReqs(capRequirements(base.reqs)) }, toolHints: new Map(), argHints: new Map(), source: 'deterministic' };
+  }
+  return interpretAndPlan(prompt, catalog, base);
 }
 
 export { VIEW_KINDS };

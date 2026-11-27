@@ -31,6 +31,16 @@ export function joinByTimestamp(series: Record<string, Point[]>): JoinedRow[] {
   return [...byT.values()].sort((a, b) => a.t - b.t);
 }
 
+/**
+ * Rebase déterministe : premier point non nul → 100, les suivants en proportion.
+ * Les trous (null) restent des trous. Base absente ou nulle → série inchangée côté appelant (retourne null).
+ */
+export function toBase100(points: Point[]): Point[] | null {
+  const base = points.find((p) => p.v !== null && p.v !== 0)?.v;
+  if (base == null || !Number.isFinite(base) || base === 0) return null;
+  return points.map((p) => ({ t: p.t, v: p.v === null ? null : (p.v / base) * 100 }));
+}
+
 /** Détecte les intervalles anormalement longs (série irrégulière) sans rien combler. */
 export function detectGaps(points: Point[], factor = 2.5): { from: number; to: number }[] {
   if (points.length < 3) return [];
