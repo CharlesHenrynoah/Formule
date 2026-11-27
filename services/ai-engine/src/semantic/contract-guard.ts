@@ -26,9 +26,35 @@ export type SealedContract = {
   intentLock: Map<string, string>;
 };
 
-const DESIGN_RE = /(design|theme|th[eè]me|couleur|color|sombre|dark|clair|layout|typograph|police|font|style|minimaliste|professionnel|vert pour|rouge pour)/i;
-const INTERACT_RE = /(onglet|tab\b|curseur|slider|bouton|button|rafra[iî]ch|refresh|reset|clic|hover|drag)/i;
-const TECH_RE = /(optimise|mcp|quota|cache|latence|budget|appel|rate.?limit|permission|s[eé]curit)/i;
+const DESIGN_RE = /(design|theme|th[eè]me|couleur|color|sombre|dark|clair|layout|typograph|police|font|style|minimaliste|professionnel|vert pour|rouge pour|en haut|au milieu|en bas|indicateurs en|graphiques? au|tableau en bas|interface sombre|dashboard)/i;
+const INTERACT_RE = /(onglet|tab\b|curseur|slider|bouton|button|rafra[iî]ch|actualis|refresh|reset|clic|hover|drag)/i;
+const TECH_RE = /(optimise|mcp|quota|cache|latence|budget|appel|rate.?limit|permission|s[eé]curit|mutualis|minimise les appels|provenance|fra[iî]cheur)/i;
+/** Titre / branding / consigne méta — jamais une lecture MCP. */
+const META_RE = /(intitul[eé]|titr[eé]\s*[:=«"]|dashboard intitul|cr[eé]e[rz]?\s+(une?\s+)?(interface|dashboard|console|application)|nomm[eé]e?\s*[:=«"])/i;
+
+export type CoverageKind = 'analytical' | 'design' | 'interaction' | 'reliability' | 'meta';
+
+/** Classe un point de coverage : chrome UI / titre → hors checklist analytique. */
+export function classifyCoveragePoint(text: string): CoverageKind {
+  // Bouton / refresh : prioritaire même si le texte mentionne un graphique à mettre à jour.
+  if (/(bouton|button|rafra[iî]ch|actualis|refresh)/i.test(text) && INTERACT_RE.test(text)) {
+    return 'interaction';
+  }
+  // Titre / branding dashboard : pas une acquisition.
+  if (META_RE.test(text) && !/(capitalisation|volume|prix|classement|tableau de|graphique en|courbe|barres|donut|kpi)/i.test(text)) {
+    return 'meta';
+  }
+  // Layout / thème sans mesure à lire.
+  if (DESIGN_RE.test(text) && !/(capitalisation|volume|prix|classement|courbe|tableau contenant|graphique en|barres|donut|ratio|somme|nombre|part\b|kpi)/i.test(text)) {
+    return 'design';
+  }
+  if (TECH_RE.test(text) && !hasAnalyticSignal(text)) return 'reliability';
+  if (hasAnalyticSignal(text)) return 'analytical';
+  if (INTERACT_RE.test(text)) return 'interaction';
+  if (DESIGN_RE.test(text)) return 'design';
+  if (META_RE.test(text)) return 'meta';
+  return 'analytical';
+}
 
 export function promptHash(prompt: string): string {
   return createHash('sha256').update(prompt).digest('hex').slice(0, 16);
@@ -98,42 +124,83 @@ export function sealContract(
 ): SealedContract {
   const cleaned = stripUngroundedEntities(prompt, stripUngroundedUnits(prompt, reqs));
   const analytical = separateNonAnalytical(cleaned, constraints);
-  const intentLock = new Map(analytical.reqs.map((r) => [r.id, intentKey(r)]));
-  const fingerprint = createHash('sha256')
-    .update(analytical.reqs.map((r) => `${r.id}:${intentLock.get(r.id)}`).join(';'))
-    .digest('hex')
-    .slice(0, 16);
   const mergedConstraints = {
     global: [...constraints.global],
     design: [...new Set([...constraints.design, ...analytical.movedDesign])],
     interactions: [...new Set([...constraints.interactions, ...analytical.movedInteractions])],
     reliability: [...new Set([...constraints.reliability, ...analytical.movedTech])],
   };
-  // Les points de coverage design/interactions/tech sont portés par constraints, pas par reqs.
-  const constraintBlob = norm([
-    ...mergedConstraints.global, ...mergedConstraints.design,
-    ...mergedConstraints.interactions, ...mergedConstraints.reliability,
-  ].join(' '));
-  const keptCoverage = coverage.filter((c) => {
-    const n = norm(c);
-    if ((DESIGN_RE.test(c) || INTERACT_RE.test(c) || TECH_RE.test(c)) && !hasAnalyticSignal(c)) {
-      return constraintBlob.includes(n) || n.split(/[^a-z0-9]+/).filter((w) => w.length > 2).some((w) => constraintBlob.includes(w));
+
+  // Coverage LLM : chrome (titre/layout/bouton) → constraints ; data → checklist analytique.
+  const analyticalCoverage: string[] = [];
+  for (const c of coverage) {
+    const kind = classifyCoveragePoint(c);
+    if (kind === 'meta') {
+      if (!mergedConstraints.global.some((x) => norm(x) === norm(c))) mergedConstraints.global.push(c);
+      continue;
     }
-    return true;
-  });
-  // Si un point design est dans coverage mais déjà dans constraints, on le retire de la checklist analytique.
-  const analyticalCoverage = keptCoverage.filter((c) => {
-    if ((DESIGN_RE.test(c) || INTERACT_RE.test(c) || TECH_RE.test(c)) && !hasAnalyticSignal(c)) return false;
-    return true;
-  });
+    if (kind === 'design') {
+      if (!mergedConstraints.design.some((x) => norm(x) === norm(c))) mergedConstraints.design.push(c);
+      continue;
+    }
+    if (kind === 'interaction') {
+      if (!mergedConstraints.interactions.some((x) => norm(x) === norm(c))) mergedConstraints.interactions.push(c);
+      continue;
+    }
+    if (kind === 'reliability') {
+      if (!mergedConstraints.reliability.some((x) => norm(x) === norm(c))) mergedConstraints.reliability.push(c);
+      continue;
+    }
+    analyticalCoverage.push(c);
+  }
+
+  // Relie les points analytiques orphelins aux exigences (covers[]) par signaux structurés.
+  const reqsWithCovers = attachOrphanCoverage(analytical.reqs, analyticalCoverage);
+
+  const intentLock = new Map(reqsWithCovers.map((r) => [r.id, intentKey(r)]));
+  const fingerprint = createHash('sha256')
+    .update(reqsWithCovers.map((r) => `${r.id}:${intentLock.get(r.id)}`).join(';'))
+    .digest('hex')
+    .slice(0, 16);
+
   return {
     fingerprint,
     promptHash: promptHash(prompt),
-    reqs: analytical.reqs,
-    coverage: analyticalCoverage.length ? analyticalCoverage : keptCoverage,
+    reqs: reqsWithCovers,
+    coverage: analyticalCoverage.length ? analyticalCoverage : analytical.reqs.map((r) => r.label),
     constraints: mergedConstraints,
     intentLock,
   };
+}
+
+/** Attache un point de coverage sans covers[] à l'exigence structurée correspondante. */
+function attachOrphanCoverage(reqs: ReqTemplate[], coverage: string[]): ReqTemplate[] {
+  return reqs.map((r) => {
+    const existing = new Set((r.covers ?? []).map(norm));
+    const view = r.visualization ?? r.view;
+    const ents = (r.entities ?? []).map(norm).filter(Boolean);
+    const added: string[] = [];
+    for (const c of coverage) {
+      const n = norm(c);
+      if (existing.has(n) || norm(r.label) === n || norm(r.title) === n) continue;
+      const viewHit =
+        (view === 'table' && /tableau|table\b/.test(n))
+        || (view === 'bars' && /barres|bar\b|performances?/.test(n))
+        || (view === 'donut' && /circulaire|donut|r[eé]partition|camembert/.test(n))
+        || (view === 'line' && /courbe|comparatif|base\s*100|30\s*jours|historique/.test(n))
+        || (view === 'kpi' && /(capitalisation|volume|part|pourcentage|hausse|baisse|indicateur|kpi)/.test(n) && !/tableau|barres|circulaire|courbe/.test(n));
+      if (!viewHit) continue;
+      if (ents.length && !ents.every((e) => n.includes(e))) {
+        // Exigence multi-entités stricte : toutes les entités doivent apparaître dans le point.
+        // KPI sans entité : OK si viewHit.
+        if ((r.entities?.length ?? 0) >= 2) continue;
+      }
+      added.push(c);
+      existing.add(n);
+    }
+    if (!added.length) return r;
+    return { ...r, covers: [...(r.covers ?? []), ...added] };
+  });
 }
 
 /** Exigences design/interactions/tech → contraintes ; pas de visualisation. */
@@ -219,7 +286,7 @@ function constraintPtsHas(constraints: ContractConstraints, c: string): boolean 
     .some((x) => norm(x) === n);
 }
 
-/** Couverture structurée : chaque point de coverage doit être référencé par covers[] (égalité normalisée). */
+/** Couverture structurée : chaque point analytique doit être référencé par covers[] (égalité normalisée). */
 export function structuredCoverageGaps(coverage: string[], reqs: ReqTemplate[], constraints?: ContractConstraints): string[] {
   if (!coverage.length) return ['coverage vide : le contrat ne déclare aucune intention à couvrir'];
   const constraintPts = new Set([
@@ -229,6 +296,8 @@ export function structuredCoverageGaps(coverage: string[], reqs: ReqTemplate[], 
     ...(constraints?.reliability ?? []),
   ].map(norm));
   return coverage.filter((c) => {
+    // Titre / layout / bouton / fiabilité : pas des gaps d'acquisition MCP.
+    if (classifyCoveragePoint(c) !== 'analytical') return false;
     const n = norm(c);
     if (constraintPts.has(n)) return false;
     return !reqs.some((r) => {
@@ -271,7 +340,7 @@ export function styleFromConstraints(constraints: ContractConstraints): { theme:
 
 /** Signal analytique dans un libellé / point de coverage (évite de classer un KPI comme « design seul »). */
 function hasAnalyticSignal(text: string): boolean {
-  return /(kpi|capitalisation|volume|prix|classement|courbe|tableau|graphique|ratio|somme|nombre|part\b|donut|histogram)/i.test(text);
+  return /(kpi|capitalisation|volume|prix|classement|courbe|tableau|graphique|ratio|somme|nombre|part\b|donut|histogram|barres|performance|variation|hausse|baisse)/i.test(text);
 }
 
 /** Champ exact : path égal ou suffixe `.field` — pas d'includes flou. */

@@ -170,6 +170,37 @@ describe('consolidation · planAcquisitions hors docs', () => {
   });
 });
 
+describe('consolidation · chrome UI hors gaps d’acquisition', () => {
+  it('sealContract déplace titre, layout et refresh hors coverage analytique', () => {
+    const sealed = sealContract(
+      'Dashboard « Crypto Pulse » sombre avec bouton actualiser',
+      [
+        req({
+          id: 't1', label: 'Tableau BTC ETH SOL', view: 'table', visualization: 'table',
+          entities: ['Bitcoin', 'Ethereum', 'Solana'], measures: ['price'],
+        }),
+        req({
+          id: 'k1', label: 'Capitalisation cumulée', view: 'kpi', measures: ['market_cap'],
+        }),
+      ],
+      [
+        'Créer un dashboard intitulé « Crypto Pulse »',
+        'Tableau contenant exclusivement Bitcoin, Ethereum et Solana avec nom, symbole, prix actuel, capitalisation, volume 24 h, variation 24 h et variation 7 j',
+        'Indicateurs en haut, graphiques au milieu et tableau en bas',
+        'Ajouter un bouton d\'actualisation fonctionnel qui met également à jour le graphique comparatif',
+        'Capitalisation cumulée des 20 actifs',
+      ],
+      { global: [], design: ['thème sombre'], interactions: [], reliability: [] },
+    );
+    expect(sealed.coverage.some((c) => /intitul|Crypto Pulse/i.test(c))).toBe(false);
+    expect(sealed.coverage.some((c) => /bouton|actualisation/i.test(c))).toBe(false);
+    expect(sealed.coverage.some((c) => /en haut|au milieu/i.test(c))).toBe(false);
+    expect(sealed.constraints.global.length + sealed.constraints.design.length + sealed.constraints.interactions.length).toBeGreaterThan(0);
+    const gaps = structuredCoverageGaps(sealed.coverage, sealed.reqs, sealed.constraints);
+    expect(gaps.filter((g) => /intitul|bouton|en haut/i.test(g))).toEqual([]);
+  });
+});
+
 describe('consolidation · seal verrouille les exigences validées', () => {
   it('fingerprint stable et intentLock complet', () => {
     const sealed = sealContract(

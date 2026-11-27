@@ -230,24 +230,25 @@ const CALL_A_SYSTEM = `Tu es le moteur d'interprétation Formule (AI-first). Tu 
 Tu es la seule source d'intentions. Aucune regex ne t'a précédé.
 
 Distingue clairement :
-- requirements (analytiques / note)
-- constraints.global (périmètre, population partagée, période globale)
-- constraints.design (couleurs, layout, thème)
-- constraints.interactions (onglets, curseurs, boutons)
-- constraints.reliability (rafraîchissement, sources, avertissements)
-- coverage : chaque intention du prompt (une ligne courte), y compris apostrophes et demandes composées
+- requirements (analytiques / note) — KPI, tableaux, graphiques, mesures, entités
+- constraints.global (périmètre MCP, population partagée, période globale, titre déjà dans title)
+- constraints.design (couleurs, layout haut/milieu/bas, thème sombre, accents vert/rouge)
+- constraints.interactions (onglets, curseurs, boutons, actualisation)
+- constraints.reliability (provenance, fraîcheur, mutualisation, pas d'invention)
+- coverage : UNIQUEMENT les intentions ANALYTIQUES (données / vues). Jamais le titre, le layout, ni un bouton.
 - acquisitions : groupes mutualisés ; décompose multi-entités si un outil ne prend qu'une entité à la fois ; dataNotDocs=true pour les données
 
 Règles :
-1. title = marque / titre explicite (guillemets, Title:, markdown). Pas la première phrase tronquée.
+1. title = marque / titre explicite (guillemets, Title:, markdown). Ne le répète PAS dans coverage.
 2. Une exigence atomique = une visualisation + une opération. Ne fusionne pas classements distincts.
 3. entities = noms propres courts. Jamais une phrase.
 4. measures = concepts métier, jamais des mots grammaticaux.
 5. Populations partagées → constraints.global + population sur chaque exigence concernée.
 6. Comparaison multi-entités : entities listées, acquisitions décomposées si besoin. transform=base100 uniquement si la normalisation en base 100 est demandée ; sinon omets transform.
 7. toolHints = outils de DONNÉES. search_docs / documentation uniquement si demandé.
-8. covers[] sur chaque exigence pointe vers des entrées de coverage.
-9. JSON uniquement. Tu n'exécutes rien. Omettre les propriétés facultatives non pertinentes ; ne pas émettre null, des objets fictifs ou des valeurs hors enum.`;
+8. covers[] sur chaque exigence = copie exacte d'une entrée de coverage analytique.
+9. Layout / refresh / design → constraints, pas requirements ni coverage.
+10. JSON uniquement. Tu n'exécutes rien. Omettre les propriétés facultatives non pertinentes ; ne pas émettre null, des objets fictifs ou des valeurs hors enum.`;
 
 // Schéma de communication concret : les champs facultatifs de cet exemple ne doivent
 // être émis que lorsqu'ils correspondent au prompt. Les exemples ne sont pas des données.
