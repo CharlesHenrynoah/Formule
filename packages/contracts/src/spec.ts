@@ -34,7 +34,7 @@ const Where = z.object({
   value: z.union([Scalar, z.array(Scalar).min(1).max(12)]).optional(),
 });
 export const AggregateSchema = z.object({
-  collection: Path, agg: z.enum(['sum', 'count', 'avg', 'last', 'ratio', 'top']),
+  collection: Path, agg: z.enum(['sum', 'count', 'avg', 'last', 'ratio', 'top', 'identity']),
   labelPath: Path.optional(), // agg « top » : libellé de l'élément au maximum de la mesure
   measure: Path.optional(), den: Path.optional(), unitPath: Path.optional(), where: z.array(Where).max(4).default([]),
   denWhere: z.array(Where).max(4).optional(), // population du dénominateur, distincte du filtre du numérateur

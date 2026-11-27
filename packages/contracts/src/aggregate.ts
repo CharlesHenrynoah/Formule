@@ -71,6 +71,13 @@ export function aggregate(raw: unknown, a: Aggregate, unitFallback: string | nul
     const v = m[m.length - 1];
     return v === null ? { state: 'missing', value: null, unit, count: rows.length, skipped, reason: 'dernière valeur absente' } : { state: 'available', value: v, unit, count: rows.length, skipped };
   }
+  if (a.agg === 'identity') {
+    if (!a.measure) return { state: 'invalid', value: null, unit, count: rows.length, skipped: 0, reason: 'identité sans mesure' };
+    if (rows.length === 0) return { state: 'empty', value: null, unit, count: 0, skipped: 0, reason: 'aucune ligne' };
+    if (rows.length > 1) return { state: 'invalid', value: null, unit, count: rows.length, skipped: 0, reason: 'identité ambiguë : plusieurs entités, filtre requis' };
+    const v = m[0];
+    return v === null ? { state: 'missing', value: null, unit, count: 1, skipped: 1, reason: 'mesure absente' } : { state: 'available', value: v, unit, count: 1, skipped: 0 };
+  }
   if (present.length === 0 && a.measure) return { state: 'missing', value: null, unit, count: rows.length, skipped, reason: 'aucune mesure présente' };
   const sum = present.reduce((x, y) => x + y, 0);
   const state: ValueState = skipped > 0 ? 'partial' : 'available';

@@ -21,4 +21,11 @@ describe('filtres et agrégations', () => {
     const r = aggregate({ rows }, { collection: 'rows', agg: 'ratio', where: [{ path: 'nom', op: 'eq', value: 'Alpha' }], denWhere: [], percent: true }, null, 0);
     expect(r.value).toBeCloseTo(33.33, 1);
   });
+
+  it('identité : mesure brute d’une seule entité, refus si ambiguë', () => {
+    const one = aggregate({ rows }, { collection: 'rows', agg: 'identity', measure: 'montant', where: [{ path: 'nom', op: 'eq', value: 'Alpha' }], percent: false }, null, 0);
+    expect(one).toMatchObject({ state: 'available', value: 30 });
+    const many = aggregate({ rows }, { collection: 'rows', agg: 'identity', measure: 'montant', where: [], percent: false }, null, 0);
+    expect(many.state).toBe('invalid');
+  });
 });

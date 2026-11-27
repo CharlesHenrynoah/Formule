@@ -2,23 +2,86 @@ import type { CatalogServer } from '../discovery/catalog.js';
 import { llm } from '../llm.js';
 import { fenceUntrusted } from '@formule/contracts';
 import { NON_ADDITIVE } from './resolve.js';
-import { norm, VIEW_KINDS, type ClauseFilter, type ReqTemplate, type Understanding, type ViewKind } from './lexicon.js';
+import { norm, VIEW_KINDS, type ClauseFilter, type OrderDir, type ReqTemplate, type Understanding, type ViewKind } from './lexicon.js';
+
+/** Parse local des sections — évite la dépendance circulaire avec sections.ts. */
+function localSections(prompt: string): { title: string; kind: 'kpi' | 'data' | 'acquisition' | 'design' | 'other'; bullets: string[]; body: string }[] {
+  const lines = prompt.replace(/\r/g, '').split('\n');
+  const sections: { title: string; kind: 'kpi' | 'data' | 'acquisition' | 'design' | 'other'; bullets: string[]; body: string }[] = [];
+  let cur: (typeof sections)[number] | null = null;
+  for (const raw of lines) {
+    const l = raw.trim();
+    const h = l.match(/^(?:#{1,4}\s*)?(?:\*\*)?\s*(\d{1,2})\s*[.)]\s*(.+?)\s*(?:\*\*)?\s*$/);
+    if (h && !/^[-•*]\s/.test(l)) {
+      const title = h[2].replace(/\*\*/g, '').trim();
+      const t = norm(title);
+      const kind = /indicateurs?|kpi|chiffres? cles?|synthese/.test(t) ? 'kpi' as const
+        : /acquisition|sources?|outils?|connexion/.test(t) ? 'acquisition' as const
+          : /design|style|apparence|theme|charte/.test(t) ? 'design' as const : 'data' as const;
+      cur = { title, kind, bullets: [], body: '' }; sections.push(cur); continue;
+    }
+    if (!cur) continue;
+    if (/^[-•*]\s+/.test(l)) cur.bullets.push(l.replace(/^[-•*]\s+/, '').trim());
+    if (l) cur.body += `${l}\n`;
+  }
+  return sections;
+}
 
 /** Plafond du contrat d'application. Au-delà, l'excédent est une exigence explicite, jamais un oubli. */
 export const REQ_CAP = 40;
 
-const STOP = new Set(['avec', 'dans', 'pour', 'dans', 'les', 'des', 'une', 'sur', 'par', 'aux', 'que', 'qui', 'est', 'sont', 'cette', 'cette', 'tout', 'tous', 'toute', 'toutes', 'plus', 'moins', 'entre', 'comme', 'depuis', 'vers', 'alors', 'ainsi', 'donc', 'mais', 'dont', 'leur', 'leurs', 'nous', 'vous', 'elle', 'elles', 'ils', 'application', 'interface', 'graphique', 'graphiques', 'section', 'sections', 'demande', 'montre', 'afficher', 'affiche', 'creer', 'cree', 'construis', 'element', 'elements', 'objet', 'objets', 'ligne', 'lignes', 'donnee', 'donnees', 'actif', 'actifs', 'nombre', 'total', 'somme', 'moyenne', 'part', 'parts', 'ratio', 'classement', 'courbe', 'evolution', 'historique', 'liste', 'tableau', 'detail', 'circulaire', 'camembert', 'donut', 'histogramme', 'barres', 'barre', 'nuage', 'correlation', 'calendrier', 'hausse', 'baisse', 'positif', 'positive', 'negatif', 'negative']);
+const STOP = new Set(['avec', 'dans', 'pour', 'dans', 'les', 'des', 'une', 'sur', 'par', 'aux', 'que', 'qui', 'est', 'sont', 'cette', 'cette', 'tout', 'tous', 'toute', 'toutes', 'plus', 'moins', 'entre', 'comme', 'depuis', 'vers', 'alors', 'ainsi', 'donc', 'mais', 'dont', 'leur', 'leurs', 'nous', 'vous', 'elle', 'elles', 'ils', 'application', 'interface', 'graphique', 'graphiques', 'section', 'sections', 'demande', 'montre', 'afficher', 'affiche', 'creer', 'cree', 'construis', 'element', 'elements', 'objet', 'objets', 'ligne', 'lignes', 'donnee', 'donnees', 'actif', 'actifs', 'nombre', 'total', 'somme', 'moyenne', 'part', 'parts', 'ratio', 'classement', 'courbe', 'evolution', 'historique', 'liste', 'tableau', 'detail', 'circulaire', 'camembert', 'donut', 'histogramme', 'barres', 'barre', 'nuage', 'correlation', 'calendrier', 'hausse', 'baisse', 'positif', 'positive', 'negatif', 'negative', 'valeur', 'identite']);
 
-/** Découpe la consigne en clauses. Les puces et les phrases comptent toutes : rien n'est écarté ici. */
-export function clausesOf(prompt: string): string[] {
-  const lines = prompt.replace(/\r/g, '').split('\n').map((l) => l.trim()).filter(Boolean);
-  const items = lines.filter((l) => /^(?:[-•*]|\d{1,2}[.)])\s+\S/.test(l)).map((l) => l.replace(/^(?:[-•*]|\d{1,2}[.)])\s+/, '').replace(/\*\*/g, '').trim());
-  if (items.length >= 2) return items;
-  return prompt.replace(/\*\*/g, '').split(/[\n.!?]+/).map((s) => s.trim()).filter((s) => s.length > 8);
-}
+const GLOBAL_CONSTRAINT = /(onglet|tab\b|curseur|slider|portefeuille|virtual|virtuel|capital de|acheter|vendre|rafraich|refresh|reset|bouton|couleur|theme|style|layout|responsive|mobile)/;
 
 function analytical(t: string) {
-  return /(nombre|combien|effectif|compte|total|somme|cumul|moyenne|part|proportion|pourcentage|ratio|repartition|classement|top\b|courbe|evolution|historique|serie|circulaire|camembert|donut|histogramme|distribution|barres|nuage|correlation|heatmap|chaleur|calendrier|tableau|liste|detail|simulation|scenario|prix|quantite|montant|variation|hausse|baisse)/.test(t);
+  return /(nombre|combien|effectif|compte|total|somme|cumul|moyenne|part|proportion|pourcentage|ratio|repartition|classement|top\b|courbe|evolution|historique|serie|circulaire|camembert|donut|histogramme|distribution|barres|nuage|correlation|heatmap|chaleur|calendrier|tableau|liste|detail|simulation|scenario|prix|quantite|montant|variation|hausse|baisse|valeur (?:de|du|des)|identit)/.test(t);
+}
+
+/** Découpe atomique : une exigence = une opération + une visualisation. */
+export function atomicSplit(text: string): string[] {
+  const clean = text.replace(/\*\*/g, '').trim();
+  if (!clean) return [];
+  const parts = clean.split(/\s*(?:;|\bet puis\b|\bpuis\b|\bet aussi\b|\ainsi que\b)\s+/i).map((s) => s.trim()).filter(Boolean);
+  if (parts.length > 1 && parts.every((p) => analytical(norm(p)) || GLOBAL_CONSTRAINT.test(norm(p)))) return parts;
+  const andSplit = clean.split(/\s+\bet\b\s+/i).map((s) => s.trim()).filter(Boolean);
+  if (andSplit.length > 1 && andSplit.filter((p) => analytical(norm(p))).length >= 2) return andSplit;
+  return [clean];
+}
+
+/**
+ * Analyse l'intégralité du prompt. Conserve la hiérarchie des sections.
+ * Les sections design / acquisition deviennent des contraintes globales, pas des exigences analytiques.
+ */
+export function clausesOf(prompt: string): { analytical: string[]; design: string[]; sectionOf: Map<string, string> } {
+  const sectionOf = new Map<string, string>();
+  const design: string[] = [];
+  const analyticalClauses: string[] = [];
+  const sections = localSections(prompt);
+  if (sections.length >= 2) {
+    for (const s of sections) {
+      const items = (s.bullets.length ? s.bullets : [s.body || s.title]).flatMap(atomicSplit).filter((x) => x.length > 2);
+      if (s.kind === 'design' || s.kind === 'acquisition') {
+        for (const it of items) design.push(it);
+        continue;
+      }
+      for (const it of items) {
+        if (GLOBAL_CONSTRAINT.test(norm(it)) && !analytical(norm(it))) { design.push(it); continue; }
+        if (!analytical(norm(it))) continue;
+        analyticalClauses.push(it);
+        sectionOf.set(it, s.title.slice(0, 40));
+      }
+    }
+    if (analyticalClauses.length) return { analytical: analyticalClauses, design, sectionOf };
+  }
+  const lines = prompt.replace(/\r/g, '').split('\n').map((l) => l.trim()).filter(Boolean);
+  const items = lines.filter((l) => /^(?:[-•*]|\d{1,2}[.)])\s+\S/.test(l)).map((l) => l.replace(/^(?:[-•*]|\d{1,2}[.)])\s+/, '').replace(/\*\*/g, '').trim());
+  const base = (items.length >= 2 ? items : prompt.replace(/\*\*/g, '').split(/[\n.!?]+/).map((s) => s.trim()).filter((s) => s.length > 8)).flatMap(atomicSplit);
+  for (const it of base) {
+    if (GLOBAL_CONSTRAINT.test(norm(it)) && !analytical(norm(it))) design.push(it);
+    else if (analytical(norm(it))) analyticalClauses.push(it);
+  }
+  return { analytical: analyticalClauses, design, sectionOf };
 }
 
 export function viewOf(t: string): ViewKind {
@@ -39,7 +102,6 @@ function num(s: string) {
   return Number.isFinite(n) ? n : undefined;
 }
 
-/** Filtres nommés par la clause. Ils font partie du contrat, pas d'un choix fait après la lecture. */
 export function filtersOf(text: string): ClauseFilter[] {
   const t = norm(text);
   const out: ClauseFilter[] = [];
@@ -62,7 +124,8 @@ export function filtersOf(text: string): ClauseFilter[] {
     if (values.length) out.push({ field: ['nom', 'name', 'libelle', 'categorie', 'type'], op: 'in', value: values });
   }
   const quoted = [...text.matchAll(/[«"“']([^»"”']{1,40})[»"”']/g)].map((m) => m[1].trim()).filter(Boolean);
-  const named = text.match(/part (?:de |du |d['’]|des )([A-Za-zÀ-ÿ][\wÀ-ÿ-]{1,40})/i);
+  const named = text.match(/part (?:de |du |d['’]|des )([A-Za-zÀ-ÿ][\wÀ-ÿ-]{1,40})/i)
+    ?? text.match(/(?:valeur|prix|montant|cours) (?:de |du |d['’]|des )([A-Za-zÀ-ÿ][\wÀ-ÿ-]{1,40})/i);
   const entity = quoted[0] ?? named?.[1];
   if (entity) out.push({ field: ['nom', 'name', 'libelle', 'titre', 'title'], op: 'eq', value: entity });
   return out.slice(0, 4);
@@ -72,44 +135,102 @@ export function measureWords(t: string): string[] {
   return [...new Set(norm(t).split(/[^a-z0-9]+/).filter((w) => w.length > 3 && !STOP.has(w)))].slice(0, 4);
 }
 
-function aggOf(t: string, view: ViewKind, measures: string[]): ReqTemplate['agg'] {
+function periodOf(t: string): string | undefined {
+  const m = t.match(/(?:sur |pendant |en |du |de |pour )?(janvier|fevrier|mars|avril|mai|juin|juillet|aout|septembre|octobre|novembre|decembre|\d{4}|24\s*h|7\s*jours|30\s*jours|annee|mois|semaine|jour)/);
+  return m ? m[1] : undefined;
+}
+
+function grainOf(t: string): string | undefined {
+  if (/par jour|quotidien|journalier/.test(t)) return 'day';
+  if (/par semaine|hebdo/.test(t)) return 'week';
+  if (/par mois|mensuel/.test(t)) return 'month';
+  if (/par an|annuel/.test(t)) return 'year';
+  if (/horaire|par heure/.test(t)) return 'hour';
+  return undefined;
+}
+
+function populationOf(text: string, t: string): string | undefined {
+  const m = text.match(/(?:parmi|sur|pour|population|marche|univers)\s+([^.\n,]{3,60})/i);
+  if (m) return m[1].trim().slice(0, 80);
+  if (/top\s+\d+|marche|portefeuille|univers/.test(t)) return text.slice(0, 80);
+  return undefined;
+}
+
+function limitOf(t: string): number | undefined {
+  const m = t.match(/(?:top|premier(?:s)?|limite(?:e)?\s+a)\s+(\d{1,3})/);
+  return m ? Number(m[1]) : undefined;
+}
+
+function orderOf(t: string): OrderDir | undefined {
+  if (/croissant|ascendant|du plus petit/.test(t)) return 'asc';
+  if (/decroissant|descendant|du plus grand|top\b/.test(t)) return 'desc';
+  return undefined;
+}
+
+function aggOf(t: string, view: ViewKind, measures: string[], entities: string[]): ReqTemplate['agg'] {
   if (/(nombre|combien|effectif|\bcompte\b|compter)/.test(t)) return 'count';
-  if (/(part|proportion|pourcentage|ratio|repartition)/.test(t)) return 'ratio';
+  if (/(part|proportion|pourcentage|ratio|repartition)/.test(t) && view === 'kpi') return 'ratio';
   if (/moyenne|en moyenne/.test(t)) return 'avg';
   if (/derniere|dernier|actuel/.test(t)) return 'last';
   if (/(somme|cumul|\btotal\b)/.test(t)) return 'sum';
+  // Mesure brute d'une entité nommée : identité, jamais un comptage implicite.
+  if (entities.length && measures.length && /(valeur|prix|montant|cours)/.test(t) && !/(nombre|somme|total|moyenne|part)/.test(t)) return 'identity';
+  if (view === 'kpi' && entities.length && measures.length && !/(nombre|somme|total|moyenne|part|classement)/.test(t)) return 'identity';
   if (view === 'kpi' && measures.some((m) => NON_ADDITIVE.test(m))) return 'last';
   if (view === 'kpi' && !measures.length) return 'count';
   return undefined;
 }
 
-export function clauseToReq(text: string, index: number): ReqTemplate | null {
+export function clauseToReq(text: string, index: number, section?: string, design?: string): ReqTemplate | null {
   const t = norm(text);
   if (!analytical(t)) return null;
   const view = viewOf(t);
   const where = filtersOf(text);
-  const entity = where.find((w) => w.op === 'eq' && typeof w.value === 'string');
-  const measures = measureWords(t).filter((w) => w !== norm(String(entity?.value ?? '')) && !/^(hausse|baisse|positif|negatif|superieur|inferieur)$/.test(w));
-  const agg = aggOf(t, view, measures);
+  const entityFilters = where.filter((w) => (w.op === 'eq' || w.op === 'in') && ['nom', 'name', 'libelle', 'titre', 'title'].some((f) => w.field.includes(f)));
+  const entities = entityFilters.flatMap((w) => Array.isArray(w.value) ? w.value.map(String) : w.value !== undefined ? [String(w.value)] : []);
+  const measures = measureWords(t).filter((w) => !entities.some((e) => norm(e) === w) && !/^(hausse|baisse|positif|negatif|superieur|inferieur)$/.test(w));
+  const agg = aggOf(t, view, measures, entities);
   const id = `${t.replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 28) || 'clause'}_${index + 1}`.slice(0, 40);
   const share = agg === 'ratio';
   const two = measures.length >= 2 ? measures : undefined;
+  const period = periodOf(t);
+  const grain = grainOf(t);
+  const population = populationOf(text, t);
+  const limit = limitOf(t);
+  const order = orderOf(t);
+  const dimensions = view === 'ranking' || view === 'donut' || view === 'bars' || view === 'table' ? ['nom', 'name', 'libelle', 'categorie'] : undefined;
+  const columns = view === 'table' ? [...(dimensions ?? []), ...measures].slice(0, 8) : undefined;
   return {
-    id, label: text.slice(0, 120), mandatory: true, tool: ['*'], title: text.slice(0, 80), view,
+    id, label: text.slice(0, 120), mandatory: true, tool: ['*'], title: text.slice(0, 80),
+    view, visualization: view,
     measure: measures.length ? (view === 'scatter' ? [measures[0]] : measures) : undefined,
+    measures: measures.length ? measures : undefined,
     den: view === 'scatter' && two ? [two[1]] : undefined,
-    label_: view === 'ranking' || view === 'donut' || view === 'bars' ? ['nom', 'name', 'libelle', 'categorie', 'famille'] : undefined,
-    agg, where: where.length ? where : undefined,
+    label_: dimensions,
+    dimensions,
+    columns,
+    agg, operation: agg,
+    where: where.length ? where : undefined,
+    filters: where.length ? where : undefined,
     denWhere: share ? [] : undefined,
     percent: share,
-    acceptance: `${view}${agg ? ` · ${agg}` : ''}${where.length ? ` · filtre ${where.map((w) => w.op).join(',')}` : ''}`,
+    entities: entities.length ? entities : undefined,
+    population, limit, period, grain, order,
+    section, design,
+    acceptance: [
+      view, agg ? `op:${agg}` : null, where.length ? `filtre:${where.map((w) => w.op).join(',')}` : null,
+      entities.length ? `entite:${entities.join(',')}` : null, population ? `pop:${population}` : null,
+      period ? `periode:${period}` : null, grain ? `grain:${grain}` : null, limit != null ? `limit:${limit}` : null,
+    ].filter(Boolean).join(' · ').slice(0, 300),
   };
 }
 
-/** Contrat lu sur la consigne entière, avant toute acquisition. L'excédent est signalé, pas jeté en silence. */
+/** Contrat lu sur la consigne entière, avant toute acquisition. */
 export function readContract(prompt: string): ReqTemplate[] {
-  const reqs = clausesOf(prompt).map(clauseToReq).filter((r): r is ReqTemplate => !!r);
-  return capRequirements(reqs);
+  const { analytical, design, sectionOf } = clausesOf(prompt);
+  const designNote = design.length ? design.join(' | ').slice(0, 200) : undefined;
+  const reqs = analytical.map((text, i) => clauseToReq(text, i, sectionOf.get(text), designNote)).filter((r): r is ReqTemplate => !!r);
+  return freezeReqs(capRequirements(reqs));
 }
 
 export function capRequirements(reqs: ReqTemplate[]): ReqTemplate[] {
@@ -117,22 +238,25 @@ export function capRequirements(reqs: ReqTemplate[]): ReqTemplate[] {
   const dropped = reqs.slice(REQ_CAP - 1);
   const kept = reqs.slice(0, REQ_CAP - 1);
   kept.push({
-    id: 'capacite_depassee', label: 'Exigences au-delà de la capacité', mandatory: true, tool: ['*'], view: 'note', title: 'Capacité',
+    id: 'capacite_depassee', label: 'Exigences au-delà de la capacité', mandatory: true, tool: ['*'], view: 'note', visualization: 'note', title: 'Capacité',
     acceptance: `${dropped.length} exigences non analysées (capacité ${REQ_CAP}) : ${dropped.map((r) => r.label).join(' | ').slice(0, 180)}`,
   });
   return kept;
 }
 
+function freezeReqs(reqs: ReqTemplate[]): ReqTemplate[] {
+  return reqs.map((r) => Object.freeze({ ...r, where: r.where ? Object.freeze([...r.where]) : undefined, filters: r.filters ? Object.freeze([...r.filters]) : undefined, measure: r.measure ? Object.freeze([...r.measure]) : undefined, measures: r.measures ? Object.freeze([...r.measures]) : undefined, entities: r.entities ? Object.freeze([...r.entities]) : undefined }));
+}
+
 /**
  * Fige le contrat avant la lecture MCP.
  * Une recette déjà nommée reste telle quelle. Sinon la consigne décide de la vue, de l'opération et des filtres.
- * Le modèle peut seulement proposer des mots de mesure encore vides : il ne change ni la vue, ni l'agrégation, ni les filtres.
  */
 export async function draftAnalytical(prompt: string, base: Understanding, catalog: CatalogServer[]): Promise<Understanding> {
-  if (!base.generic && base.reqs.length) return { ...base, reqs: capRequirements(base.reqs) };
+  if (!base.generic && base.reqs.length) return { ...base, reqs: freezeReqs(capRequirements(base.reqs)) };
   let reqs = readContract(prompt);
   if (!reqs.length) return base;
-  if (llm.name !== 'mock') reqs = await fillMeasures(prompt, reqs, catalog);
+  if (llm.name !== 'mock') reqs = freezeReqs(await fillMeasures(prompt, [...reqs], catalog));
   return { ...base, mission: prompt.slice(0, 300), reqs, generic: false, simulation: reqs.some((r) => r.view === 'simulation') || base.simulation };
 }
 
@@ -143,5 +267,11 @@ async function fillMeasures(prompt: string, reqs: ReqTemplate[], catalog: Catalo
     { role: 'user', content: `Consigne : ${prompt}\nOutils : ${fenceUntrusted('outils', cat)}\nExigences : ${JSON.stringify(reqs.map((r) => ({ id: r.id, label: r.label, view: r.view, agg: r.agg })))}` },
   ]);
   const hints = new Map((out?.hints ?? []).map((h) => [String(h.id ?? ''), Array.isArray(h.measure) ? h.measure.map((x) => norm(String(x))).filter((w) => w.length > 2).slice(0, 4) : []]));
-  return reqs.map((r) => r.measure?.length || r.view === 'note' ? r : { ...r, measure: hints.get(r.id)?.length ? hints.get(r.id) : r.measure });
+  return reqs.map((r) => {
+    if (r.measure?.length || r.view === 'note') return r;
+    const m = hints.get(r.id);
+    return m?.length ? { ...r, measure: m, measures: m } : r;
+  });
 }
+
+export { VIEW_KINDS };

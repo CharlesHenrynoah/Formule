@@ -3,9 +3,10 @@ import type { Aggregate } from '@formule/contracts';
 /** Toutes les vues que le runtime sait afficher. Le contrat analytique n'en retire aucune. */
 export const VIEW_KINDS = ['kpi', 'line', 'table', 'ranking', 'simulation', 'bars', 'donut', 'histogram', 'scatter', 'heatmap', 'note'] as const;
 export type ViewKind = (typeof VIEW_KINDS)[number];
-export const AGGS = ['sum', 'count', 'avg', 'last', 'ratio', 'top'] as const;
+export const AGGS = ['sum', 'count', 'avg', 'last', 'ratio', 'top', 'identity'] as const;
 export type FilterOp = 'eq' | 'neq' | 'current_month' | 'gt' | 'lt' | 'gte' | 'lte' | 'in' | 'between';
 export interface ClauseFilter { field: string[]; op: FilterOp; value?: string | number | (string | number)[] }
+export type OrderDir = 'asc' | 'desc';
 import { activePacks } from '../packs.js';
 import type { CatalogServer } from '../discovery/catalog.js';
 
@@ -17,21 +18,36 @@ export interface ReqTemplate {
   id: string;
   label: string;
   mandatory: boolean;
-  tool: string[];           // mots-clés d'outil (nom ou description)
+  tool: string[];
+  /** Visualisation demandée (alias explicite : visualization). */
   view: ViewKind;
-  measure?: string[];       // mots-clés du champ mesure
-  den?: string[];           // dénominateur (ratio)
+  visualization?: ViewKind;
+  measure?: string[];
+  measures?: string[];
+  den?: string[];
   time?: string[];
-  label_?: string[];        // champ libellé (classement)
+  label_?: string[];
+  /** Opération demandée (alias explicite : operation). */
   agg?: Aggregate['agg'];
+  operation?: Aggregate['agg'];
   where?: ClauseFilter[];
+  filters?: ClauseFilter[];
   denWhere?: ClauseFilter[];
   groupBy?: boolean;
   percent?: boolean;
-  series?: string[][];      // courbes multiples
+  series?: string[][];
   title: string;
-  /** Ce que la demande exige, figé avant toute lecture. La liaison ne le réécrit pas. */
   acceptance?: string;
+  entities?: string[];
+  population?: string;
+  limit?: number;
+  period?: string;
+  grain?: string;
+  dimensions?: string[];
+  columns?: string[];
+  order?: OrderDir;
+  design?: string;
+  section?: string;
 }
 
 interface Recipe { match: RegExp; reqs: ReqTemplate[]; title: string; mission: string; commands: string[] }

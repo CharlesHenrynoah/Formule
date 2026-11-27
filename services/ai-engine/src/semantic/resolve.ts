@@ -63,19 +63,24 @@ export function resolveRequirement(req: ReqTemplate, ds: Dataset, viewId: string
   const need = (f: FieldContract | undefined, what: string) => (f ? null : `champ « ${what} » absent des données lues (${src})`);
 
   if (req.view === 'kpi') {
-    const wantsMeasure = !!req.measure?.length && req.agg !== 'count';
-    const measure = wantsMeasure ? matchField(F, req.measure, ['measure']) : undefined;
+    const op = req.operation ?? req.agg;
+    const measureKws = req.measures ?? req.measure;
+    const wantsMeasure = !!measureKws?.length && op !== 'count';
+    const measure = wantsMeasure ? matchField(F, measureKws, ['measure']) : undefined;
     const den = req.den ? matchField(F, req.den, ['measure']) : undefined;
-    const miss = (wantsMeasure && need(measure, req.measure![0])) || (req.den && need(den, req.den[0])) || null;
+    const miss = (wantsMeasure && need(measure, measureKws![0])) || (req.den && need(den, req.den[0])) || null;
     if (miss) return { ok: false, reason: miss };
-    const where = bindFilters(F, req.where, src);
+    // Une mesure demandée absente ne devient jamais un comptage silencieux.
+    if (wantsMeasure && !measure) return { ok: false, reason: `mesure « ${measureKws![0]} » absente — pas de substitution par un comptage (${src})` };
+    const where = bindFilters(F, req.filters ?? req.where, src);
     if (!where.ok) return where;
     const denWhere = req.denWhere ? bindFilters(F, req.denWhere, src) : undefined;
     if (denWhere && !denWhere.ok) return denWhere;
-    const agg = req.agg ?? (measure && NON_ADDITIVE.test(norm(measure.rel)) ? 'last' : req.agg === undefined && !measure ? 'count' : 'sum');
-    if ((agg === 'sum' || (agg === 'ratio' && !den)) && measure && NON_ADDITIVE.test(norm(measure.rel)) && agg !== 'last') {
+    const agg = op ?? (measure && NON_ADDITIVE.test(norm(measure.rel)) ? 'last' : !measure ? 'count' : 'sum');
+    if ((agg === 'sum' || (agg === 'ratio' && !den && req.denWhere === undefined)) && measure && NON_ADDITIVE.test(norm(measure.rel)) && agg !== 'last' && agg !== 'identity') {
       return { ok: false, reason: `somme interdite sur « ${measure.rel} » : mesure non additive (${src})` };
     }
+    if (agg === 'identity' && !measure) return { ok: false, reason: `identité sans mesure (${src})` };
     if (measure && (measure.units?.length ?? 0) > 1 && !unitSibling(F, measure.rel)) return { ok: false, reason: `unités multiples pour « ${measure.rel} » : pas de fusion implicite` };
     const us = measure ? unitSibling(F, measure.rel) : undefined;
     return {
@@ -93,7 +98,7 @@ export function resolveRequirement(req: ReqTemplate, ds: Dataset, viewId: string
     const t = matchField(F, req.time ?? ['date', 'horodatage', 'time', 'jour'], ['time']) ?? F.find((f) => f.role === 'time');
     if (!t) return { ok: false, reason: `aucun horodatage dans les données lues (${src})` };
     const series = [];
-    for (const kws of req.series ?? [req.measure ?? []]) {
+    for (const kws of req.series ?? [req.measures ?? req.measure ?? []]) {
       const m = matchField(F, kws, ['measure']);
       if (!m) return { ok: false, reason: `série « ${kws[0]} » absente des données lues (${src})` };
       series.push({ path: m.rel, label: m.rel.split('.')[0].replace(/_/g, ' '), unit: m.unit ?? null });
@@ -111,32 +116,43 @@ export function resolveRequirement(req: ReqTemplate, ds: Dataset, viewId: string
     return { ok: true, evidencePath: `${coll}[].${series[0].path}`, view: { kind: 'line', id: viewId, title: req.title, queryId, requirementIds: [req.id], bindings: { collection: coll, t: t.rel, series } } };
   }
   if (req.view === 'ranking') {
-    const metric = matchField(F, req.measure, ['measure']);
+    const measureKws = req.measures ?? req.measure;
+    const op = req.operation ?? req.agg;
+    const metric = matchField(F, measureKws, ['measure']);
     const den = req.den ? matchField(F, req.den, ['measure']) : undefined;
-    const label = matchField(F, req.label_, ['dimension', 'text', 'identifier', 'state']);
-    const miss = need(metric, req.measure?.[0] ?? 'mesure') || (req.den && need(den, req.den[0])) || need(label, req.label_?.[0] ?? 'libellé');
+    const label = matchField(F, req.label_ ?? req.dimensions, ['dimension', 'text', 'identifier', 'state']);
+    const miss = need(metric, measureKws?.[0] ?? 'mesure') || (req.den && need(den, req.den[0])) || need(label, req.label_?.[0] ?? 'libellé');
     if (miss) return { ok: false, reason: miss };
     // Somme explicite ou regroupement : jamais sur une mesure non additive. Un classement ligne à ligne reste permis.
-    if ((req.agg === 'sum' || !!req.groupBy) && (req.agg ?? 'sum') === 'sum' && NON_ADDITIVE.test(norm(metric!.rel))) {
+    if ((op === 'sum' || !!req.groupBy) && (op ?? 'sum') === 'sum' && NON_ADDITIVE.test(norm(metric!.rel))) {
       return { ok: false, reason: `somme interdite sur « ${metric!.rel} » : mesure non additive (${src})` };
     }
     const us = unitSibling(F, metric!.rel);
-    const agg = req.agg === 'ratio' ? 'ratio' : req.agg === 'count' ? 'count' : 'sum';
+    const agg = op === 'ratio' ? 'ratio' : op === 'count' ? 'count' : 'sum';
     return { ok: true, evidencePath: `${coll}[].${metric!.rel}`, view: {
       kind: 'ranking', id: viewId, title: req.title, queryId, requirementIds: [req.id],
-      bindings: { collection: coll, label: label!.rel, metric: metric!.rel, den: den?.rel, groupBy: !!req.groupBy, agg, unit: agg === 'ratio' ? null : metric!.unit ?? null, unitPath: us?.rel, population: `${getCollection(ds.acq.raw, coll)?.length ?? 0} lignes de ${ds.acq.ref.tool.name}`, order: 'desc', limit: 10 },
+      bindings: {
+        collection: coll, label: label!.rel, metric: metric!.rel, den: den?.rel, groupBy: !!req.groupBy, agg,
+        unit: agg === 'ratio' ? null : metric!.unit ?? null, unitPath: us?.rel,
+        population: req.population ?? `${getCollection(ds.acq.raw, coll)?.length ?? 0} lignes de ${ds.acq.ref.tool.name}`,
+        order: req.order ?? 'desc', limit: req.limit ?? 10,
+      },
     } };
   }
   if (req.view === 'bars' || req.view === 'donut') {
-    const label = matchField(F, req.label_ ?? ['nom', 'name', 'libelle', 'categorie', 'famille', 'type'], ['dimension', 'text', 'identifier', 'state']);
-    const metric = req.agg === 'count' ? undefined : matchField(F, req.measure, ['measure']);
+    const label = matchField(F, req.label_ ?? req.dimensions ?? ['nom', 'name', 'libelle', 'categorie', 'famille', 'type'], ['dimension', 'text', 'identifier', 'state']);
+    const measureKws = req.measures ?? req.measure;
+    const op = req.operation ?? req.agg;
+    const metric = op === 'count' ? undefined : matchField(F, measureKws, ['measure']);
     if (!label) return { ok: false, reason: `champ « ${req.label_?.[0] ?? 'libellé'} » absent des données lues (${src})` };
-    if (req.measure && req.agg !== 'count' && !metric) return { ok: false, reason: `champ « ${req.measure[0]} » absent des données lues (${src})` };
-    if (req.agg === 'sum' && metric && NON_ADDITIVE.test(norm(metric.rel))) return { ok: false, reason: `somme interdite sur « ${metric.rel} » : mesure non additive (${src})` };
-    const agg = req.agg === 'avg' ? 'avg' : req.agg === 'count' || !metric || NON_ADDITIVE.test(norm(metric.rel)) ? 'count' : 'sum';
+    if (measureKws?.length && op !== 'count' && !metric) return { ok: false, reason: `champ « ${measureKws[0]} » absent — pas de substitution par un comptage (${src})` };
+    if (metric && (op === 'sum' || op === undefined) && NON_ADDITIVE.test(norm(metric.rel))) {
+      return { ok: false, reason: `somme interdite sur « ${metric.rel} » : mesure non additive (${src})` };
+    }
+    const agg = op === 'avg' ? 'avg' : op === 'count' || !metric ? 'count' : 'sum';
     return { ok: true, evidencePath: `${coll}[].${metric?.rel ?? label.rel}`, view: {
       kind: req.view, id: viewId, title: req.title, queryId, requirementIds: [req.id],
-      bindings: { collection: coll, label: label.rel, ...(metric && agg !== 'count' ? { metric: metric.rel } : {}), agg, unit: metric?.unit ?? null, limit: 8 },
+      bindings: { collection: coll, label: label.rel, ...(metric && agg !== 'count' ? { metric: metric.rel } : {}), agg, unit: metric?.unit ?? null, limit: req.limit ?? 8 },
     } };
   }
   if (req.view === 'histogram') {

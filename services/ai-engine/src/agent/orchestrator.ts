@@ -98,37 +98,26 @@ async function create(job: JobRef, input: { prompt: string; fileIds: string[] })
   if (named.length) await emit(job, 'log', { text: `Périmètre : ${scoped.map((s) => s.name).join(', ')}` });
   let u: Understanding = understand(input.prompt, scoped);
   const contract = await draftAnalytical(input.prompt, u, scoped);
-  if (u.generic && contract.reqs.length) await emit(job, 'log', { text: `Contrat analytique figé avant lecture : ${contract.reqs.map((r) => `${r.label} [${r.view}${r.agg ? ` ${r.agg}` : ''}]`).join(' · ')}` });
+  if (contract.reqs.length) await emit(job, 'log', { text: `Contrat analytique figé avant lecture : ${contract.reqs.map((r) => `${r.label} [${r.visualization ?? r.view}${r.operation ?? r.agg ? ` ${r.operation ?? r.agg}` : ''}]`).join(' · ')}` });
   check(job);
 
   let datasets = new Map<string, Dataset>();
   let planned: PlannedReq[];
   let acqs: Acquired[];
-  const explicit = /[\w.-]+\.(csv|json|tsv)\b/i.test(input.prompt) || scoped.some((srv) => srv.tools.some((t) => t.permission === 'read' && t.name.length > 6 && namesTool(input.prompt, t.name)));
-  const packed = await packReads(scoped, input.prompt);
-  let bound: ToolRef[] = [];
-  const lexical = !input.fileIds.length && !explicit && (!u.generic || u.reqs.length);
-  if (lexical) {
-    const { toolFor } = bindTools(u, scoped);
-    bound = uniqueRefs(scoped, [...toolFor.values()]);
-  }
-  // Le gabarit relu prime dès qu'il sait lire ce serveur et que l'appariement par mots-clés ne l'a pas choisi.
-  const usePack = packed.length > 0 && !packed.every((p) => bound.some((r) => r.serverId === p.serverId && r.tool.name === p.tool.name));
-  if (lexical && bound.length && !usePack) {
-    const { toolFor, unavailable } = bindTools(u, scoped);
-    acqs = await acquireAll(job, bound, null, input.prompt, scoped);
-    for (const a of acqs) datasets.set(a.queryId, datasetOf(a));
-    planned = planRequirements(u, datasets, toolFor, unavailable);
-  } else {
-    // MCP inédit, fichier joint, ou serveur « code mode » (execute) : gabarit relu, pas la description.
-    const ranked = usePack ? packed : rankTools(scoped, input.prompt, input.fileIds);
+  let pointsLocked = false;
+
+  // Le contrat analytique est l'unique source de vérité dès qu'il existe : aucun chemin parallèle ne le contourne.
+  if (contract.reqs.length) {
+    u = contract;
+    const packed = await packReads(scoped, input.prompt);
+    const ranked = packed.length ? packed : rankTools(scoped, input.prompt, input.fileIds);
     const refs: ToolRef[] = []; const unresolved: string[] = [];
+    const maxAcq = Math.min(Math.max(2, Math.ceil(contract.reqs.length / 3)), input.fileIds.length ? Math.min(3, input.fileIds.length) : 3);
     for (const r of ranked) {
-      if (refs.length >= (input.fileIds.length ? Math.min(3, input.fileIds.length) : 1)) break;
+      if (refs.length >= maxAcq) break;
       const { missing } = Object.keys(r.tool.inputSchema?.properties ?? {}).length ? await resolveArgs(r, input.prompt, scoped) : { missing: [] };
       if (missing.length) {
         if (unresolved.length < 3) unresolved.push(`${r.serverName} · ${r.tool.name} : ${missing.join(', ')}`);
-        // l'outil nommé explicitement n'est jamais remplacé par un autre
         if (namesTool(input.prompt, r.tool.name)) break;
         continue;
       }
@@ -139,22 +128,48 @@ async function create(job: JobRef, input: { prompt: string; fileIds: string[] })
       return blocked(job, input.prompt, named.length ? scoped : catalog);
     }
     acqs = await acquireAll(job, refs, null, input.prompt, scoped);
-    const reqs: ReqTemplate[] = [];
-    for (const a of acqs) { const ds = datasetOf(a); datasets.set(a.queryId, ds); reqs.push(...genericReqs(ds).map((r) => ({ ...r, id: `${a.queryId.slice(0, 20)}_${r.id}`.slice(0, 40) }))); }
-    u = { ...u, reqs };
-    planned = reqs.map((tpl, i) => {
-      const ds = [...datasets.values()].find((d) => tpl.tool.includes(d.acq.ref.tool.name.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, ''))) ?? [...datasets.values()][0];
-      const r = resolveRequirement(tpl, ds, `v${i + 1}_${tpl.view}`, ds.acq.queryId);
-      return r.ok ? { tpl, status: 'covered' as const, queryId: ds.acq.queryId, view: r.view, evidencePath: r.evidencePath, envelopeId: ds.acq.envelope.id } : { tpl, status: (ds.acq.envelope.status === 'error' ? 'unavailable' : 'missing') as 'missing', reason: r.reason };
-    });
-  }
-  let pointsLocked = false;
-  if (u.generic && contract.reqs.length) {
-    const bound = bindClauses(contract.reqs, datasets);
-    for (const p of bound) await emit(job, 'log', { text: `Lien · ${p.tpl.label} → ${p.status}${p.reason ? ` (${p.reason})` : ''} [${p.tpl.view}${p.tpl.agg ? ` ${p.tpl.agg}` : ''}]` });
-    u = contract;
-    planned = bound;
+    for (const a of acqs) datasets.set(a.queryId, datasetOf(a));
+    planned = bindClauses(contract.reqs, datasets);
+    for (const p of planned) await emit(job, 'log', { text: `Lien · ${p.tpl.label} → ${p.status}${p.reason ? ` (${p.reason})` : ''} [${p.tpl.visualization ?? p.tpl.view}${p.tpl.operation ?? p.tpl.agg ? ` ${p.tpl.operation ?? p.tpl.agg}` : ''}]` });
     pointsLocked = true;
+  } else {
+    // Sans contrat : recettes pack ou exigences déduites du brut uniquement.
+    const packed = await packReads(scoped, input.prompt);
+    let bound: ToolRef[] = [];
+    const lexical = !input.fileIds.length && (!u.generic || u.reqs.length);
+    if (lexical) {
+      const { toolFor } = bindTools(u, scoped);
+      bound = uniqueRefs(scoped, [...toolFor.values()]);
+    }
+    const usePack = packed.length > 0 && !packed.every((p) => bound.some((r) => r.serverId === p.serverId && r.tool.name === p.tool.name));
+    if (lexical && bound.length && !usePack) {
+      const { toolFor, unavailable } = bindTools(u, scoped);
+      acqs = await acquireAll(job, bound, null, input.prompt, scoped);
+      for (const a of acqs) datasets.set(a.queryId, datasetOf(a));
+      planned = planRequirements(u, datasets, toolFor, unavailable);
+    } else {
+      const ranked = usePack ? packed : rankTools(scoped, input.prompt, input.fileIds);
+      const refs: ToolRef[] = []; const unresolved: string[] = [];
+      for (const r of ranked) {
+        if (refs.length >= (input.fileIds.length ? Math.min(3, input.fileIds.length) : 1)) break;
+        const { missing } = Object.keys(r.tool.inputSchema?.properties ?? {}).length ? await resolveArgs(r, input.prompt, scoped) : { missing: [] };
+        if (missing.length) {
+          if (unresolved.length < 3) unresolved.push(`${r.serverName} · ${r.tool.name} : ${missing.join(', ')}`);
+          if (namesTool(input.prompt, r.tool.name)) break;
+          continue;
+        }
+        refs.push(r);
+      }
+      if (!refs.length) {
+        if (unresolved.length) { await setState(job, 'BLOCKED'); await emit(job, 'answer', { text: `J’ai trouvé des outils proches, mais il manque des arguments obligatoires que je ne peux pas inventer : ${unresolved.join(' ; ')}. Précise-les dans ta demande (nom de fichier, valeur entre guillemets…).` }); return; }
+        return blocked(job, input.prompt, named.length ? scoped : catalog);
+      }
+      acqs = await acquireAll(job, refs, null, input.prompt, scoped);
+      const reqs: ReqTemplate[] = [];
+      for (const a of acqs) { const ds = datasetOf(a); datasets.set(a.queryId, ds); reqs.push(...genericReqs(ds).map((r) => ({ ...r, id: `${a.queryId.slice(0, 20)}_${r.id}`.slice(0, 40) }))); }
+      u = { ...u, reqs };
+      planned = bindClauses(reqs, datasets);
+    }
   }
   if (!u.reqs.length) return blocked(job, input.prompt, catalog);
 

@@ -63,8 +63,11 @@ export function expectations(views: ViewSpec[], raws: Record<string, unknown>, r
             let n = 0, d = 0, used = 0;
             for (const r of kept) { const x = num(r, a.measure), y = num(r, a.den); if (x !== null && y !== null) { n += x; d += y; used++; } }
             if (used && d) value = String(Math.round((a.percent ? (n / d) * 100 : n / d) * 100) / 100);
-          } else if (a.agg === 'last') { const x = num(kept[kept.length - 1], a.measure); value = x === null ? '' : String(x); }
-          else {
+          }           else if (a.agg === 'last') { const x = num(kept[kept.length - 1], a.measure); value = x === null ? '' : String(x); }
+          else if (a.agg === 'identity') {
+            if (kept.length === 1) { const x = num(kept[0], a.measure); value = x === null ? '' : String(x); }
+            else value = '';
+          } else {
             const xs = kept.map((r) => num(r, a.measure)).filter((x): x is number => x !== null);
             if (xs.length) { let s = 0; for (const x of xs) s += x; value = String(Math.round((a.agg === 'avg' ? s / xs.length : s) * 100) / 100); }
           }
@@ -151,11 +154,36 @@ function keep(v: unknown, w: { op: string; value?: string | number | (string | n
   return !isNaN(+d) && d.getUTCFullYear() === ref.getUTCFullYear() && d.getUTCMonth() === ref.getUTCMonth();
 }
 
-/** L'oracle refuse une vue qui a changé la vue ou l'opération du contrat d'origine. */
-export function contradicts(req: { view: string; agg?: string }, view: { kind: string; bindings?: { aggregate?: { agg?: string } } } | undefined): string | null {
-  if (!view) return `vue « ${req.view} » absente`;
-  if (view.kind !== req.view) return `vue « ${view.kind} » au lieu de « ${req.view} »`;
+/** L'oracle refuse toute divergence avec le contrat d'origine jusqu'à la certification. */
+export function contradicts(
+  req: {
+    view: string; visualization?: string; agg?: string; operation?: string;
+    where?: { path?: string; op: string; value?: unknown }[]; filters?: { path?: string; op: string; value?: unknown }[];
+    percent?: boolean; limit?: number; order?: string; entities?: string[]; population?: string; period?: string; grain?: string;
+  },
+  view: {
+    kind: string;
+    bindings?: {
+      aggregate?: { agg?: string; where?: { path: string; op: string; value?: unknown }[]; percent?: boolean };
+      limit?: number; order?: string; population?: string;
+    };
+  } | undefined,
+): string | null {
+  if (!view) return `vue « ${req.visualization ?? req.view} » absente`;
+  const wantView = req.visualization ?? req.view;
+  if (view.kind !== wantView) return `vue « ${view.kind} » au lieu de « ${wantView} »`;
+  const wantOp = req.operation ?? req.agg;
   const got = view.bindings?.aggregate?.agg;
-  if (req.agg && got && got !== req.agg) return `opération « ${got} » au lieu de « ${req.agg} »`;
+  if (wantOp && got && got !== wantOp) return `opération « ${got} » au lieu de « ${wantOp} »`;
+  if (wantOp === 'identity' && got && got !== 'identity') return `identité remplacée par « ${got} »`;
+  const wantFilters = req.filters ?? req.where ?? [];
+  const gotFilters = view.bindings?.aggregate?.where ?? [];
+  for (const w of wantFilters) {
+    const hit = gotFilters.find((g) => g.op === w.op && (w.path ? g.path === w.path || g.path.endsWith(w.path) : true));
+    if (!hit && view.kind === 'kpi') return `filtre « ${w.op} » absent de la vue certifiée`;
+  }
+  if (req.percent && view.bindings?.aggregate && view.bindings.aggregate.percent !== true) return 'pourcentage exigé absent';
+  if (req.limit != null && view.bindings?.limit != null && view.bindings.limit !== req.limit) return `limite ${view.bindings.limit} au lieu de ${req.limit}`;
+  if (req.order && view.bindings?.order && view.bindings.order !== req.order) return `ordre « ${view.bindings.order} » au lieu de « ${req.order} »`;
   return null;
 }
