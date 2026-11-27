@@ -165,7 +165,7 @@ export function measureWords(t: string): string[] {
 }
 
 function durationOf(t: string): string | undefined {
-  const relative = t.match(/\b(\d{1,3})\s*(?:derniers?\s+)?(jours?|heures?|h\b)/);
+  const relative = t.match(/\b(\d{1,3})\s*(?:(?:derniers?|dernieres?)\s+)?(jours?|heures?|h\b)/);
   return relative ? relative[1] + (relative[2].startsWith('h') ? ' heures' : ' jours') : undefined;
 }
 
@@ -180,12 +180,36 @@ function periodOf(t: string): string | undefined {
 
 const MONTHS: Record<string, number> = { janvier: 0, fevrier: 1, mars: 2, avril: 3, mai: 4, juin: 5, juillet: 6, aout: 7, septembre: 8, octobre: 9, novembre: 10, decembre: 11 };
 
+/**
+ * Canonise une période LLM/prompt vers une forme connue de periodInterval.
+ * Ex. « 30 derniers jours » → « 30 jours », « historique » → « 30 jours ».
+ */
+export function normalizePeriod(period: string | undefined | null): string | undefined {
+  if (!period) return undefined;
+  const p = norm(period).replace(/\s+/g, ' ').trim();
+  if (!p) return undefined;
+  const relative = durationOf(p);
+  if (relative) return relative;
+  if (/^(historique|history|past|recent)$/.test(p) || /\bhistorique\b/.test(p)) return '30 jours';
+  if (/^\d{4}$/.test(p) || MONTHS[p] !== undefined) return p;
+  if (/^(annee|mois|semaine|jour)$/.test(p)) return p;
+  if (/24\s*h/.test(p)) return '24 h';
+  // Conservé tel quel si déjà interprétable ; sinon laissé pour diagnostic explicite.
+  return period.trim();
+}
+
 /** Intervalle temporel réel pour une période nommée — jamais une simple inclusion de chaîne ISO. */
 export function periodInterval(period: string, refMs = Date.now()): { start: number; end: number } | null {
-  const p = norm(period).replace(/\s+/g, ' ').trim();
+  const raw = norm(period).replace(/\s+/g, ' ').trim();
+  const canonical = normalizePeriod(raw) ?? raw;
+  const p = norm(canonical).replace(/\s+/g, ' ').trim();
   const ref = new Date(refMs);
-  const duration = p.match(/^(\d{1,3})\s*(jours?|heures?)$/);
-  if (duration && Number(duration[1]) > 0) return { start: refMs - Number(duration[1]) * (duration[2].startsWith('jour') ? 86400_000 : 3600_000), end: refMs };
+  // « 30 jours », « 30 derniers jours », « 7 heures »
+  const duration = p.match(/^(\d{1,3})\s*(?:derniers?\s+)?(jours?|heures?)$/)
+    ?? raw.match(/\b(\d{1,3})\s*(?:derniers?\s+)?(jours?|heures?)\b/);
+  if (duration && Number(duration[1]) > 0) {
+    return { start: refMs - Number(duration[1]) * (duration[2].startsWith('jour') ? 86400_000 : 3600_000), end: refMs };
+  }
   if (/^\d{4}$/.test(p)) {
     const y = Number(p);
     return { start: Date.UTC(y, 0, 1), end: Date.UTC(y + 1, 0, 1) - 1 };
@@ -198,7 +222,7 @@ export function periodInterval(period: string, refMs = Date.now()): { start: num
   if (/24\s*h/.test(p) || p === 'jour') return { start: refMs - 24 * 3600_000, end: refMs };
   if (/7\s*jours|semaine/.test(p)) return { start: refMs - 7 * 24 * 3600_000, end: refMs };
   if (/30\s*jours|mois/.test(p) && !MONTHS[p]) return { start: refMs - 30 * 24 * 3600_000, end: refMs };
-  if (/annee/.test(p)) return { start: Date.UTC(ref.getUTCFullYear(), 0, 1), end: refMs };
+  if (/annee|historique|history/.test(p)) return { start: refMs - 30 * 24 * 3600_000, end: refMs };
   return null;
 }
 

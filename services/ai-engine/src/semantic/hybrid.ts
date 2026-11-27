@@ -8,7 +8,7 @@ import { z } from 'zod';
 import { llm } from '../llm.js';
 import type { CatalogServer } from '../discovery/catalog.js';
 import { AGGS, VIEW_KINDS, norm, type ClauseFilter, type ReqTemplate, type Understanding, type ViewKind } from './lexicon.js';
-import { capRequirements, freezeReqs } from './analytical.js';
+import { capRequirements, freezeReqs, normalizePeriod } from './analytical.js';
 import {
   exactFieldMatch, filterForbiddenDrops, LlmBudget, sealContract, separateNonAnalytical,
   structuredCoverageGaps,
@@ -432,7 +432,7 @@ function aiReqToTpl(r: z.infer<typeof ReqSchema>, index: number, design?: string
     where: filters, filters,
     denWhere: agg === 'ratio' ? [] : undefined,
     percent: agg === 'ratio',
-    entities, population: r.population, period: r.period, grain: r.grain, unit: r.unit,
+    entities, population: r.population, period: normalizePeriod(r.period) ?? r.period, grain: r.grain, unit: r.unit,
     transform: r.transform, limit: r.limit, order: r.order, section: r.section, design, covers,
     label_: view === 'ranking' || view === 'donut' || view === 'bars' || view === 'table' ? ['nom', 'name', 'libelle', 'categorie', 'symbol', 'id'] : undefined,
     dimensions: view === 'ranking' || view === 'donut' || view === 'bars' || view === 'table' ? ['nom', 'name', 'libelle', 'categorie', 'symbol'] : undefined,

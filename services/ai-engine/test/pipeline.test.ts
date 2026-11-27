@@ -77,6 +77,18 @@ describe('pipeline de génération (contrat → liaison → AppSpec → certific
     expect(eliminate(req, datasets.get('futures')!)).toBeNull();
   });
 
+  it('accepte les périodes LLM « N derniers jours » et historique', () => {
+    const ref = Date.UTC(2026, 0, 31);
+    const a = periodInterval('30 derniers jours', ref)!;
+    expect(a.end).toBe(ref);
+    expect(a.start).toBe(ref - 30 * 86400_000);
+    const b = periodInterval('les 7 derniers jours', ref)!;
+    expect(b.start).toBe(ref - 7 * 86400_000);
+    const c = periodInterval('historique', ref)!;
+    expect(c.start).toBe(ref - 30 * 86400_000);
+    expect(periodInterval('30 jours', ref)?.start).toBe(a.start);
+  });
+
   it('atomicSplit conserve sujet et opération', () => {
     const parts = atomicSplit('Somme des montants et classement par montant');
     expect(parts.length).toBeGreaterThanOrEqual(2);
