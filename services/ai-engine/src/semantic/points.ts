@@ -69,11 +69,26 @@ export function eliminate(req: ReqTemplate, ds: Dataset): string | null {
     }
   }
 
+  // Population structurée : égalité sur un champ population/marché (pas un includes de mots dans un blob).
   if (req.population) {
     const pop = norm(req.population);
-    const words = pop.split(/[^a-z0-9]+/).filter((w) => w.length > 3);
-    const blob = norm(`${ds.acq.ref.serverName} ${ds.acq.ref.tool.name} ${ds.acq.ref.tool.description ?? ''} ${JSON.stringify(ds.acq.args ?? {})} ${rows.slice(0, 5).map((r) => JSON.stringify(r)).join(' ')}`);
-    if (words.length && !words.some((w) => blob.includes(w))) return `population « ${req.population} » absente`;
+    const popFields = ds.fields.filter((f) => /^(.*\.)?(population|marche|market|segment|universe|scope)$/.test(norm(f.rel)));
+    if (popFields.length && rows.length) {
+      const tokens = pop.split(/[^a-z0-9]+/).filter((w) => w.length > 2);
+      const hit = rows.some((r) => popFields.some((f) => {
+        const v = norm(String(getPath(r, f.rel) ?? ''));
+        return v.length > 0 && tokens.some((t) => v === t || t === v);
+      }));
+      const argVals = Object.values(ds.acq.args ?? {}).map((v) => norm(String(v)));
+      const argsHit = tokens.some((t) => argVals.some((a) => a === t));
+      if (!hit && !argsHit) return `population « ${req.population} » absente`;
+    } else if (req.scopeSize == null) {
+      const sizeHint = pop.match(/\b(?:top|premier[s]?|first)\s*(\d+)\b/) ?? pop.match(/\btop\s*(\d+)\b/);
+      const n = sizeHint ? Number(sizeHint[1]) : NaN;
+      if (Number.isFinite(n) && n > 0 && rows.length > 0 && rows.length < n) {
+        return `population « ${req.population} » : ${rows.length} lignes < ${n}`;
+      }
+    }
   }
 
   const time = ds.fields.find((f) => f.role === 'time');

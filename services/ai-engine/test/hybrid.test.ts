@@ -106,16 +106,17 @@ describe('coverageGaps', () => {
     mandatory: true, tool: ['*'], view: 'kpi', title: partial.label, ...partial,
   });
 
-  it('détecte une intention absente du contrat', () => {
+  it('détecte une intention absente du contrat (pas de matching lexical)', () => {
     const gaps = coverageGaps(
       ['Taille du marché', 'Classement des performances', 'Base 100'],
       [req({ id: 'a', label: 'Capitalisation totale du marché', acceptance: 'kpi' })],
     );
-    expect(gaps.some((g) => /classement/i.test(g))).toBe(true);
-    expect(gaps.some((g) => /base 100/i.test(g))).toBe(true);
+    expect(gaps).toContain('Taille du marché');
+    expect(gaps).toContain('Classement des performances');
+    expect(gaps).toContain('Base 100');
   });
 
-  it('passe quand les intentions sont couvertes (apostrophes incluses)', () => {
+  it('passe quand covers[] ou label exact portent le coverage', () => {
     const gaps = coverageGaps(
       ["Nombre d'éléments en hausse", 'Part de marché'],
       [
@@ -126,21 +127,22 @@ describe('coverageGaps', () => {
     expect(gaps).toEqual([]);
   });
 
-  it('couvre population partagée et comparaison multi-entités', () => {
+  it('couvre via covers[] explicites (population / multi-entités)', () => {
     const gaps = coverageGaps(
       ['Population top 100', 'Bitcoin vs Ethereum base 100'],
       [
-        req({ id: 'a', label: 'Répartition', population: 'top 100 cryptomonnaies', view: 'donut' }),
-        req({ id: 'b', label: 'BTC vs ETH', view: 'line', entities: ['Bitcoin', 'Ethereum'], transform: 'base100', acceptance: 'transform:base100' }),
+        req({ id: 'a', label: 'Répartition', population: 'top 100 cryptomonnaies', view: 'donut', covers: ['Population top 100'] }),
+        req({ id: 'b', label: 'BTC vs ETH', view: 'line', entities: ['Bitcoin', 'Ethereum'], transform: 'base100', covers: ['Bitcoin vs Ethereum base 100'] }),
       ],
     );
     expect(gaps).toEqual([]);
   });
 
-  it('exige la couverture design comme intention si déclarée', () => {
+  it('porte le design via constraints, pas via matching de mots sur l’exigence', () => {
     const gaps = coverageGaps(
       ['Thème sombre et accent bleu'],
-      [req({ id: 'a', label: 'KPI prix', design: 'thème sombre accent bleu' })],
+      [req({ id: 'a', label: 'KPI prix' })],
+      { global: [], design: ['Thème sombre et accent bleu'], interactions: [], reliability: [] },
     );
     expect(gaps).toEqual([]);
   });

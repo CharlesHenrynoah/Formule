@@ -77,19 +77,19 @@ describe('PR6 · 2 interdiction de supprimer les exigences obligatoires', () => 
   });
 });
 
-describe('PR6 · 3 couverture sémantique indépendante', () => {
-  it('signale un design promu en vue et une intention analytique absente', () => {
+describe('PR6 · 3 couverture structurée (pas de matching lexical)', () => {
+  it('signale une exigence sans mesure portant uniquement des contraintes', () => {
     const gaps = independentPromptAudit(
-      'Adopte un thème sombre. Montre le classement et la capitalisation.',
-      [req({ id: 'd', label: 'Thème sombre professionnel', view: 'table' })],
-      { global: [], design: [], interactions: [], reliability: [] },
+      'Adopte un thème sombre.',
+      [req({ id: 'd', label: 'Style', view: 'kpi', covers: ['Thème sombre'] })],
+      { global: [], design: ['Thème sombre'], interactions: [], reliability: [] },
     );
-    expect(gaps.some((g) => /design promu/i.test(g))).toBe(true);
-    expect(gaps.some((g) => /classement|capitalisation/i.test(g))).toBe(true);
+    expect(gaps.some((g) => /sans mesure|contraintes/i.test(g))).toBe(true);
   });
 
-  it('coverageGaps reste orthogonal (checklist LLM)', () => {
+  it('coverageGaps exige covers[] ou label exact', () => {
     expect(coverageGaps(['Classement'], [req({ id: 'a', label: 'KPI prix' })]).length).toBeGreaterThan(0);
+    expect(coverageGaps(['Classement'], [req({ id: 'a', label: 'KPI', covers: ['Classement'] })])).toEqual([]);
   });
 });
 

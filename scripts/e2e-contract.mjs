@@ -36,7 +36,7 @@ const evs = await follow(c.jobId, async (s) => {
   if (s.canApprove) await j(`/api/jobs/${c.jobId}/approve`, {});
 });
 const logs = evs.filter((e) => e.type === 'log').map((e) => e.payload.text ?? '');
-expect(logs.some((t) => /Contrat analytique figé/.test(t)), 'contrat figé avant lecture');
+expect(logs.some((t) => /Contrat analytique (figé|scellé)/.test(t)), 'contrat scellé avant lecture');
 expect(logs.some((t) => /Lien ·/.test(t)), 'liaison point par point');
 const cert = evs.find((e) => e.type === 'certification');
 expect(!!cert, `certification émise (${cert?.payload?.message ?? '∅'})`);

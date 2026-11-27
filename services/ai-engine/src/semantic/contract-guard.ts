@@ -1,10 +1,13 @@
 /**
- * Garde-fous déterministes du contrat sémantique (PR #6).
- * L'IA propose ; ce module valide l'immuabilité, la couverture et la séparation des intentions.
+ * Garde-fous déterministes du contrat sémantique (PR #6 / consolidation).
+ * L'IA propose ; ce module valide l'immuabilité, la couverture structurée et la séparation des intentions.
  */
 import { createHash } from 'node:crypto';
 import { norm, type ReqTemplate, type ViewKind } from './lexicon.js';
 import type { PlannedReq } from './plan.js';
+import { LlmBudget } from './budgets.js';
+
+export { LlmBudget } from './budgets.js';
 
 export type ContractConstraints = {
   global: string[];
@@ -19,7 +22,7 @@ export type SealedContract = {
   reqs: ReqTemplate[];
   coverage: string[];
   constraints: ContractConstraints;
-  /** Empreinte des intentions analytiques (ids + view + op + entities + period + population). */
+  /** Empreinte des intentions analytiques (propriétés complètes). */
   intentLock: Map<string, string>;
 };
 
@@ -31,16 +34,28 @@ export function promptHash(prompt: string): string {
   return createHash('sha256').update(prompt).digest('hex').slice(0, 16);
 }
 
-function intentKey(r: ReqTemplate): string {
+function filtersKey(r: ReqTemplate): string {
+  return JSON.stringify((r.filters ?? r.where ?? []).map((f) => ({
+    field: [...f.field].map(norm).sort(), op: f.op, value: f.value ?? null,
+  })));
+}
+
+/** Empreinte intégrale des propriétés analytiques (prompt → certification). */
+export function intentKey(r: ReqTemplate): string {
   return [
     r.visualization ?? r.view,
     r.operation ?? r.agg ?? '',
+    (r.measures ?? r.measure ?? []).map(norm).sort().join(','),
     (r.entities ?? []).map(norm).sort().join(','),
     r.population ?? '',
     r.period ?? '',
+    r.grain ?? '',
     r.transform ?? '',
     r.limit ?? '',
-    r.unit ?? '',
+    r.unit ?? r.inputUnit ?? '',
+    r.order ?? '',
+    filtersKey(r),
+    (r.covers ?? []).map(norm).sort().join(','),
   ].join('|');
 }
 
@@ -178,58 +193,51 @@ export function filterForbiddenDrops(reqs: ReqTemplate[], dropIds: string[] | un
 }
 
 /**
- * Couverture sémantique indépendante du tableau `coverage` LLM.
- * Détecte : design devenu vue analytique ; intentions analytiques du prompt absentes.
+ * Audit structurel (pas lexical) :
+ * - une exigence « design/interaction/tech » ne peut pas être une vue data ;
+ * - chaque point de coverage doit être porté par covers[] ou constraints ;
+ * - transform/base100 uniquement si une exigence le déclare.
  */
-export function independentPromptAudit(prompt: string, reqs: ReqTemplate[], constraints: ContractConstraints): string[] {
+export function independentPromptAudit(_prompt: string, reqs: ReqTemplate[], constraints: ContractConstraints): string[] {
   const gaps: string[] = [];
-  const p = norm(prompt);
   const analyticalReqs = reqs.filter((r) => r.view !== 'note');
 
-  // Design / interactions / tech ne doivent pas être des vues data.
+  // Les promotions design→vue sont déjà filtrées par separateNonAnalytical au scellement.
+  // Ici : cohérence structurelle covers ↔ constraints uniquement.
   for (const r of analyticalReqs) {
-    const text = `${r.label} ${r.title}`;
-    if (DESIGN_RE.test(text) && !hasAnalyticSignal(text)) gaps.push(`design promu en vue : « ${r.label} »`);
-    if (INTERACT_RE.test(text) && !hasAnalyticSignal(text)) gaps.push(`interaction promue en vue : « ${r.label} »`);
-    if (TECH_RE.test(text) && !hasAnalyticSignal(text)) gaps.push(`contrainte technique promue en vue : « ${r.label} »`);
-  }
-
-  // Signaux analytiques explicites du prompt doivent avoir une exigence.
-  const checks: { re: RegExp; label: string }[] = [
-    { re: /base\s*100|rebase|normalis/, label: 'comparaison base 100' },
-    { re: /classement|palmares|top\s*\d|meilleur|pire/, label: 'classement' },
-    { re: /tableau/, label: 'tableau' },
-    { re: /courbe|evolution|historique/, label: 'série temporelle' },
-    { re: /capitalisation|market\s*cap|taille.*(march|market)/, label: 'capitalisation / taille de marché' },
-  ];
-  const blob = analyticalReqs.map((r) => norm([
-    r.label, r.acceptance ?? '', r.transform ?? '', r.view,
-    ...(r.measures ?? r.measure ?? []), ...(r.entities ?? []),
-  ].join(' '))).join(' ');
-  for (const c of checks) {
-    if (!c.re.test(p)) continue;
-    const covered = c.re.test(blob)
-      || (c.label.includes('base') && analyticalReqs.some((r) => r.transform === 'base100'))
-      || (c.label.includes('capitalisation') && analyticalReqs.some((r) => (r.measures ?? r.measure ?? []).some((m) => /market_?cap|capitalisation|total_market/i.test(m))))
-      || (c.label.includes('série') && analyticalReqs.some((r) => (r.visualization ?? r.view) === 'line'))
-      || (c.label.includes('classement') && analyticalReqs.some((r) => (r.visualization ?? r.view) === 'ranking'))
-      || (c.label.includes('tableau') && analyticalReqs.some((r) => (r.visualization ?? r.view) === 'table'));
-    if (!covered) gaps.push(`intention « ${c.label} » absente du contrat`);
-  }
-
-  // Contraintes design présentes dans le prompt doivent être capturées.
-  if (DESIGN_RE.test(prompt) && !constraints.design.length && !analyticalReqs.some((r) => DESIGN_RE.test(r.label))) {
-    // soft: only if prompt clearly asks design
-    if (/(adopte|utilise|applique).{0,40}(design|th[eè]me|sombre)/i.test(prompt)) {
-      gaps.push('contrainte de design absente des constraints.design');
+    if ((r.visualization ?? r.view) === 'note') continue;
+    if (r.covers?.length && r.covers.every((c) => constraintPtsHas(constraints, c)) && !(r.measures?.length || r.measure?.length)) {
+      gaps.push(`exigence sans mesure portant uniquement des contraintes : « ${r.label} »`);
     }
   }
-
   return gaps;
 }
 
-function hasAnalyticSignal(text: string): boolean {
-  return /(kpi|capitalisation|volume|prix|classement|courbe|tableau|graphique|ratio|somme|nombre|part\b|donut|histogram)/i.test(text);
+function constraintPtsHas(constraints: ContractConstraints, c: string): boolean {
+  const n = norm(c);
+  return [...constraints.global, ...constraints.design, ...constraints.interactions, ...constraints.reliability]
+    .some((x) => norm(x) === n);
+}
+
+/** Couverture structurée : chaque point de coverage doit être référencé par covers[] (égalité normalisée). */
+export function structuredCoverageGaps(coverage: string[], reqs: ReqTemplate[], constraints?: ContractConstraints): string[] {
+  if (!coverage.length) return ['coverage vide : le contrat ne déclare aucune intention à couvrir'];
+  const constraintPts = new Set([
+    ...(constraints?.global ?? []),
+    ...(constraints?.design ?? []),
+    ...(constraints?.interactions ?? []),
+    ...(constraints?.reliability ?? []),
+  ].map(norm));
+  return coverage.filter((c) => {
+    const n = norm(c);
+    if (constraintPts.has(n)) return false;
+    return !reqs.some((r) => {
+      const covers = (r.covers ?? []).map(norm);
+      if (covers.includes(n)) return true;
+      // Identité stricte label ≡ coverage (pas un includes de mots).
+      return norm(r.label) === n || norm(r.title) === n;
+    });
+  });
 }
 
 /** Fidélité post-liaison : exigences obligatoires non couvertes = manques vs prompt. */
@@ -259,17 +267,6 @@ export function styleFromConstraints(constraints: ContractConstraints): { theme:
       : /rouge/.test(d) ? 'rouge' as const
         : 'mono' as const;
   return { theme, accent };
-}
-
-/** Budget LLM : 2 appels principaux + 1 correction max. */
-export class LlmBudget {
-  constructor(public readonly max = 3, public used = 0) {}
-  take(n = 1): boolean {
-    if (this.used + n > this.max) return false;
-    this.used += n;
-    return true;
-  }
-  get remaining() { return this.max - this.used; }
 }
 
 /** Champ exact : path égal ou suffixe `.field` — pas d'includes flou. */

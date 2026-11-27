@@ -13,13 +13,13 @@ const acq = (raw: unknown, qid: string, tool: string) => ({
 }) as never;
 
 const spot = { rows: [
-  { nom: 'Alpha', montant: 30, prix_eur: 12, date: '2026-01-15T00:00:00.000Z' },
-  { nom: 'Beta', montant: 10, prix_eur: 5, date: '2026-01-16T00:00:00.000Z' },
+  { nom: 'Alpha', montant: 30, prix_eur: 12, population: 'spot', date: '2026-01-15T00:00:00.000Z' },
+  { nom: 'Beta', montant: 10, prix_eur: 5, population: 'spot', date: '2026-01-16T00:00:00.000Z' },
 ] };
 const futures = { rows: [
-  { nom: 'Alpha', montant: 90, prix_eur: 40, date: '2025-06-01T00:00:00.000Z' },
-  { nom: 'Beta', montant: 70, prix_eur: 35, date: '2025-06-02T00:00:00.000Z' },
-  { nom: 'Gamma', montant: 50, prix_eur: 20, date: '2025-06-03T00:00:00.000Z' },
+  { nom: 'Alpha', montant: 90, prix_eur: 40, population: 'futures', date: '2025-06-01T00:00:00.000Z' },
+  { nom: 'Beta', montant: 70, prix_eur: 35, population: 'futures', date: '2025-06-02T00:00:00.000Z' },
+  { nom: 'Gamma', montant: 50, prix_eur: 20, population: 'futures', date: '2025-06-03T00:00:00.000Z' },
 ] };
 
 describe('pipeline de génération (contrat → liaison → AppSpec → certification)', () => {

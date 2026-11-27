@@ -9,10 +9,12 @@ import { assembleSpec, bindTools, planActions, planRequirements, queryIdFor, typ
 import { draftAnalytical } from '../semantic/analytical.js';
 import { acquisitionKey, planAcquisitions, type PlannedAcquisition } from '../semantic/acquire-plan.js';
 import { bindClauses } from '../semantic/points.js';
-import { applyCorrection, bindAndCompose, coverageGaps, diagnoseCorrection, LlmBudget, sealContract } from '../semantic/hybrid.js';
+import { applyCorrection, bindAndCompose, coverageGaps, createRuntimeBudgets, diagnoseCorrection, sealContract } from '../semantic/hybrid.js';
 import {
-  assertIntentIntact, fidelityAgainstPrompt, independentPromptAudit, type ContractConstraints, type SealedContract,
+  assertIntentIntact, fidelityAgainstPrompt, independentPromptAudit, intentKey,
+  type ContractConstraints, type SealedContract,
 } from '../semantic/contract-guard.js';
+import { isDerivedDataset, recomputeDerivedDatasets } from '../semantic/fusion.js';
 import { isMultiSection } from '../semantic/sections.js';
 import { buildWorkspace, cleanupWorkspace, createWorkspace, shadcnAdd, writeWorkspaceFile } from './workspace.js';
 import { emit, setState, type JobRef } from './events.js';
@@ -72,7 +74,14 @@ function sourceSummary(acqs: Acquired[]) {
   });
 }
 
-async function acquireFromPlan(job: JobRef, planned: PlannedAcquisition[], projectId: string | null, usedIds = new Set<string>(), limitedServers = new Set<string>()) {
+async function acquireFromPlan(
+  job: JobRef,
+  planned: PlannedAcquisition[],
+  projectId: string | null,
+  usedIds = new Set<string>(),
+  limitedServers = new Set<string>(),
+  maxPages?: number,
+) {
   const acqs: Acquired[] = [];
   for (const p of planned) {
     check(job);
@@ -84,7 +93,7 @@ async function acquireFromPlan(job: JobRef, planned: PlannedAcquisition[], proje
     while (usedIds.has(qid)) qid = baseId.slice(0, 32) + '_' + n++;
     usedIds.add(qid);
     await emit(job, 'log', { text: `Lecture ${ref.serverName} · ${ref.tool.name}${'code' in args ? ` (gabarit relu : ${args.intent})` : Object.keys(args).length ? ` ${JSON.stringify(args)}` : ''}${p.forReqIds[0] !== '*' ? ` ← ${p.forReqIds.join(',')}` : ''}` });
-    const a = await acquire(ref, qid, { jobId: job.id, projectId }, args);
+    const a = await acquire(ref, qid, { jobId: job.id, projectId, maxPages }, args);
     acqs.push(a);
     if (a.envelope.error?.kind === 'quota' || a.envelope.error?.kind === 'rate_limited') limitedServers.add(ref.serverId);
     await emit(job, 'log', { text: `${ref.tool.name} : ${a.envelope.status}${a.envelope.error ? ` (${a.envelope.error.kind}) — ${a.envelope.error.message}` : ''}${a.envelope.coverage.note ? ` — ${a.envelope.coverage.note}` : ''}`, retryAfterMs: a.envelope.error?.retryAfterMs });
@@ -142,7 +151,8 @@ async function runContractBuild(job: JobRef, input: { prompt: string; fileIds: s
   if (named.length) await emit(job, 'log', { text: `Périmètre : ${scoped.map((s) => s.name).join(', ')}` });
 
   let u: Understanding = understand(prompt, scoped);
-  const budget = new LlmBudget(3); // A interprétation + B liaison + C correction max
+  const budgets = createRuntimeBudgets();
+  const { llm: budget, mcp } = budgets;
   budget.take(); // appel 1 consommé dans draftAnalytical / interpretAndPlan
   const draft = await draftAnalytical(prompt, u, scoped, { budget });
   if (!draft.ok) {
@@ -166,9 +176,9 @@ async function runContractBuild(job: JobRef, input: { prompt: string; fileIds: s
   check(job);
   if (!reqs.length) return blocked(job, prompt, named.length ? scoped : catalog);
 
-  // Couverture LLM + audit sémantique indépendant AVANT toute acquisition.
+  // Couverture structurée + audit structurel AVANT toute acquisition (pas de matching lexical).
   let gapsBefore = [
-    ...coverageGaps(coverage, reqs),
+    ...coverageGaps(coverage, reqs, constraints),
     ...independentPromptAudit(prompt, reqs, constraints),
   ];
   if (gapsBefore.length) {
@@ -187,7 +197,7 @@ async function runContractBuild(job: JobRef, input: { prompt: string; fileIds: s
         reqs = [...sealed.reqs];
       } else {
         u = { ...u, reqs };
-        gapsBefore = [...coverageGaps(coverage, reqs), ...independentPromptAudit(prompt, reqs, constraints)];
+        gapsBefore = [...coverageGaps(coverage, reqs, constraints), ...independentPromptAudit(prompt, reqs, constraints)];
         await emit(job, 'log', { text: `Contrat corrigé avant acquisition${preFix.note ? ` : ${preFix.note}` : ''}` });
       }
     }
@@ -199,7 +209,7 @@ async function runContractBuild(job: JobRef, input: { prompt: string; fileIds: s
   }
 
   const acqHints = { toolHints: draft.toolHints, argHints: draft.argHints, groups: draft.acquisitions };
-  const { planned: acqPlan, unresolved } = await planAcquisitions(reqs, scoped, prompt, fileIds, new Set(), acqHints);
+  const { planned: acqPlan, unresolved } = await planAcquisitions(reqs, scoped, prompt, fileIds, new Set(), acqHints, mcp);
   if (!acqPlan.length) {
     if (unresolved.length) {
       await setState(job, 'BLOCKED');
@@ -208,11 +218,11 @@ async function runContractBuild(job: JobRef, input: { prompt: string; fileIds: s
     }
     return blocked(job, prompt, named.length ? scoped : catalog);
   }
-  await emit(job, 'log', { text: `Acquisitions mutualisées : ${acqPlan.length} lecture(s) pour ${reqs.filter((r) => r.view !== 'note').length} exigence(s)` });
+  await emit(job, 'log', { text: `Acquisitions mutualisées : ${acqPlan.length} lecture(s) pour ${reqs.filter((r) => r.view !== 'note').length} exigence(s) · budget MCP ${mcp.usedReads}/${mcp.maxReads}` });
 
   const usedIds = new Set<string>();
   const limitedServers = new Set<string>();
-  const acqs = await acquireFromPlan(job, acqPlan, null, usedIds, limitedServers);
+  const acqs = await acquireFromPlan(job, acqPlan, null, usedIds, limitedServers, mcp.maxPages);
   const datasets = new Map<string, Dataset>();
   for (const a of acqs) datasets.set(a.queryId, datasetOf(a));
 
@@ -222,17 +232,12 @@ async function runContractBuild(job: JobRef, input: { prompt: string; fileIds: s
     const intact = assertIntentIntact(sealed, composed.reqs);
     if (intact.length) {
       await emit(job, 'log', { text: `Liaison IA partiellement refusée (intentions figées) : ${intact.slice(0, 3).join(' ; ')}` });
-      // Conserve mesures/outils proposés seulement si l'intention reste intacte par exigence.
+      // Conserve mesures/outils proposés seulement si l'intention reste intacte (intentKey intégral).
       reqs = composed.reqs.map((r) => {
         const lock = sealed.intentLock.get(r.id);
         const orig = sealed.reqs.find((x) => x.id === r.id);
         if (!orig || !lock) return orig ?? r;
-        const key = [
-          r.visualization ?? r.view, r.operation ?? r.agg ?? '',
-          (r.entities ?? []).map((e) => e.toLowerCase()).sort().join(','),
-          r.population ?? '', r.period ?? '', r.transform ?? '', r.limit ?? '', r.unit ?? '',
-        ].join('|');
-        return key === lock ? r : orig;
+        return intentKey(r) === lock ? r : orig;
       });
     } else {
       reqs = composed.reqs;
@@ -253,7 +258,7 @@ async function runContractBuild(job: JobRef, input: { prompt: string; fileIds: s
     if (correction) {
       const allowedQ = new Set([...datasets.keys()].filter((qid) => {
         const ds = datasets.get(qid);
-        return ds && ds.acq.envelope.status !== 'error' && !limitedServers.has(ds.acq.ref.serverId);
+        return ds && ds.acq.envelope.status !== 'error' && !limitedServers.has(ds.acq.ref.serverId) && !isDerivedDataset(ds);
       }));
       const candidate = applyCorrection(reqs, correction, allowedQ);
       const intact = assertIntentIntact(sealed, candidate);
@@ -268,17 +273,17 @@ async function runContractBuild(job: JobRef, input: { prompt: string; fileIds: s
     }
   }
 
-  // Un seul tour d'acquisition supplémentaire, périmètre autorisé, serveurs non limités (PR#5).
+  // Un seul tour d'acquisition supplémentaire, borné par le budget MCP retry.
   {
     check(job);
     const missing = planned.filter((p) => p.status !== 'covered' && p.tpl.view !== 'note').map((p) => p.tpl);
     const available = scoped.filter((s) => !limitedServers.has(s.serverId));
-    if (missing.length && available.length) {
-      const next = await planAcquisitions(missing, available, prompt, fileIds, attempted, acqHints);
-      const candidates = next.planned.slice(0, 8);
+    if (missing.length && available.length && mcp.takeRetry()) {
+      const next = await planAcquisitions(missing, available, prompt, fileIds, attempted, acqHints, mcp);
+      const candidates = next.planned.slice(0, Math.min(8, mcp.remainingReads || 8));
       if (candidates.length) {
         for (const p of candidates) attempted.add(acquisitionKey(p.ref, p.args));
-        const retry = await acquireFromPlan(job, candidates, null, usedIds, limitedServers);
+        const retry = await acquireFromPlan(job, candidates, null, usedIds, limitedServers, mcp.maxPages);
         for (const a of retry) { acqs.push(a); datasets.set(a.queryId, datasetOf(a)); }
         planned = bindClauses(reqs, datasets);
       }
@@ -286,8 +291,9 @@ async function runContractBuild(job: JobRef, input: { prompt: string; fileIds: s
   }
 
   // Fidélité vs prompt original + couverture (jamais adapter l'intention aux données).
+  // Couverture structurée sur le contrat entier (pas seulement les covered — sinon checklist → faux positifs).
   const afterGaps = [
-    ...coverageGaps(coverage, planned.filter((p) => p.status === 'covered').map((p) => p.tpl)),
+    ...coverageGaps(coverage, planned.map((p) => p.tpl), constraints),
     ...fidelityAgainstPrompt(sealed, planned),
     ...assertIntentIntact(sealed, planned.map((p) => p.tpl)),
   ];
@@ -309,6 +315,7 @@ async function runContractBuild(job: JobRef, input: { prompt: string; fileIds: s
     engine: engineBanner(),
     contractFingerprint: sealed.fingerprint,
     llmBudgetUsed: budget.used,
+    mcpBudget: mcp.snapshot(),
   };
   await emit(job, 'source', summary);
   if (!summary.canApprove) {
@@ -390,15 +397,48 @@ async function evolve(job: JobRef, input: { prompt: string; projectId: string | 
   const styleOnly = ops.length > 0 && ops.every((o) => o.op === 'title' || o.op === 'density' || o.op === 'accent');
 
   // Un changement de style ne relance pas la collecte. Sinon, rafraîchir seulement si les données sont trop anciennes.
+  // Les datasets dérivés (fuse_*) ne sont jamais relus via MCP : on les recalcule après.
+  const budgets = createRuntimeBudgets();
   if (!styleOnly && Date.now() - oldest > FRESH_MS) {
-    await emit(job, 'log', { text: 'Données de plus de 24 h : nouvelle lecture des sources existantes' });
-    const refs = uniqueRefs(catalog, base.queries.map((q) => ({ serverId: q.serverId, tool: q.tool })).filter((t) => catalog.some((s) => s.serverId === t.serverId && s.tools.some((x) => x.name === t.tool))));
-    // relecture avec les arguments déjà déclarés
-    for (const q of base.queries) {
+    await emit(job, 'log', { text: 'Données de plus de 24 h : nouvelle lecture des sources MCP (hors dérivés)' });
+    const mcpQueries = base.queries.filter((q) => {
+      const ds = datasets.get(q.id);
+      return !ds || !isDerivedDataset(ds);
+    });
+    const refs = uniqueRefs(catalog, mcpQueries.map((q) => ({ serverId: q.serverId, tool: q.tool })).filter((t) => catalog.some((s) => s.serverId === t.serverId && s.tools.some((x) => x.name === t.tool))));
+    for (const q of mcpQueries) {
+      if (!budgets.mcp.takeRead()) {
+        await emit(job, 'log', { text: 'Budget MCP lectures épuisé pendant le rafraîchissement' });
+        break;
+      }
       const ref = refs.find((r) => r.serverId === q.serverId && r.tool.name === q.tool); if (!ref) continue;
-      const a = await acquire(ref, q.id, { jobId: job.id, projectId }, q.args);
+      const a = await acquire(ref, q.id, { jobId: job.id, projectId, maxPages: budgets.mcp.maxPages }, q.args);
       if (a.envelope.status !== 'error') datasets.set(q.id, datasetOf(a));
     }
+    // Recalcul déterministe des fusions : reprendre les props analytiques scellées (entities/period…),
+    // avec repli sur les séries multi-colonnes de la vue line liée.
+    const reqsFromSpec: ReqTemplate[] = base.requirements.map((r) => {
+      const linked = base.views.find((v) =>
+        (r.evidence?.viewId && v.id === r.evidence.viewId)
+        || ('requirementIds' in v && Array.isArray(v.requirementIds) && v.requirementIds.includes(r.id)),
+      );
+      const fromSeries = linked && linked.kind === 'line' && linked.bindings.series.length > 1
+        ? linked.bindings.series.map((s) => s.label)
+        : undefined;
+      const view = (r.visualization ?? (linked && 'kind' in linked ? linked.kind : 'kpi')) as ReqTemplate['view'];
+      return {
+        id: r.id, label: r.label, mandatory: r.mandatory, tool: ['*'], title: r.label,
+        view, visualization: view,
+        entities: r.entities?.length ? [...r.entities] : fromSeries,
+        period: r.period, population: r.population, unit: r.unit ?? r.inputUnit,
+        limit: r.limit, order: r.order,
+        operation: r.operation as ReqTemplate['operation'],
+        agg: r.operation as ReqTemplate['agg'],
+      };
+    });
+    const recomputed = recomputeDerivedDatasets(reqsFromSpec, datasets);
+    for (const [qid, ds] of recomputed) datasets.set(qid, ds);
+    await emit(job, 'log', { text: `Dérivés recalculés : ${[...recomputed.keys()].filter((k) => k.startsWith('fuse_')).length}` });
   } else await emit(job, 'log', { text: styleOnly ? 'Changement de style : aucune collecte relancée' : 'Données récentes réutilisées (aucune nouvelle collecte)' });
 
   const spec: AppSpec = JSON.parse(JSON.stringify(base));

@@ -1,7 +1,9 @@
 import { canonicalJson } from '@formule/contracts';
 import { packReads, rankTools, resolveArgs, type CatalogServer, type ToolRef } from '../discovery/catalog.js';
+import { validate } from '../discovery/args-synth.js';
 import { norm, type ReqTemplate } from './lexicon.js';
 import type { AcquisitionGroup } from './hybrid.js';
+import type { McpBudget } from './budgets.js';
 
 export interface PlannedAcquisition { ref: ToolRef; args: Record<string, unknown>; forReqIds: string[] }
 export const acquisitionKey = (ref: ToolRef, args: Record<string, unknown>) => `${ref.serverId}__${ref.tool.name}__${canonicalJson(args)}`;
@@ -20,6 +22,12 @@ const isDocs = (name: string) => /search_docs|documentation|readme|^docs?$/i.tes
  * Les groupes IA priorisent mutualisation et décomposition ; permissions / schéma / quotas restent déterministes.
  * Les outils documentaires sont exclus sauf si le groupe l'autorise explicitement.
  */
+/** Prompt / exigence demande-t-elle explicitement de la documentation ? */
+export function wantsDocumentation(prompt: string, reqs: ReqTemplate[]): boolean {
+  const blob = norm([prompt, ...reqs.map((r) => `${r.label} ${(r.tool ?? []).join(' ')}`)].join(' '));
+  return /\b(documentation|search_docs|readme|docs?\b|manuel|référence api|reference api)\b/.test(blob);
+}
+
 export async function planAcquisitions(
   reqs: ReqTemplate[],
   catalog: CatalogServer[],
@@ -27,7 +35,9 @@ export async function planAcquisitions(
   fileIds: string[] = [],
   excluded: ReadonlySet<string> = new Set(),
   hints: AcquisitionHints = {},
+  budget?: McpBudget,
 ): Promise<{ planned: PlannedAcquisition[]; unresolved: string[] }> {
+  const allowDocs = wantsDocumentation(prompt, reqs);
   const preamble = prompt.split(/\n\s*(?:#{1,4}\s*)?(?:\*\*)?(?:\d{1,2}[.)]\s+|[-•*]\s+)/)[0].trim();
   const global = preamble.length < 500 && preamble !== prompt ? preamble : '';
   const packed = await packReads(catalog, global || prompt);
@@ -37,6 +47,16 @@ export async function planAcquisitions(
   const covered = new Set<string>();
 
   const add = (ref: ToolRef, args: Record<string, unknown>, reqIds: string[]) => {
+    if (isDocs(ref.tool.name) && !allowDocs) return false;
+    // Validation schéma avant planification (refuse hors contrat).
+    const schema = (ref.tool.inputSchema ?? {}) as Parameters<typeof validate>[1];
+    if (Object.keys(schema.properties ?? {}).length) {
+      const errs = validate(args, schema);
+      if (errs.length) {
+        if (unresolved.length < 8) unresolved.push(`${ref.serverName} · ${ref.tool.name} : args invalides (${errs.slice(0, 2).join('; ')})`);
+        return false;
+      }
+    }
     const key = acquisitionKey(ref, args);
     if (excluded.has(key)) return false;
     const existing = planned.find((p) => acquisitionKey(p.ref, p.args) === key);
@@ -48,6 +68,10 @@ export async function planAcquisitions(
     if (seen.has(key)) {
       for (const id of reqIds) covered.add(id);
       return true;
+    }
+    if (budget && !budget.takeRead()) {
+      if (unresolved.length < 6) unresolved.push('budget MCP lectures épuisé');
+      return false;
     }
     seen.add(key);
     planned.push({ ref, args, forReqIds: [...reqIds] });
@@ -79,17 +103,17 @@ export async function planAcquisitions(
     const sample = reqs.find((r) => r.id === reqIds[0])!;
     const local = [g.purpose, g.entity, sample.label, sample.population, sample.period, global].filter(Boolean).join('\n');
     const hintNames = (g.toolHints ?? []).map(norm);
-    const allowDocs = g.dataNotDocs === false;
+    const groupAllowsDocs = allowDocs && g.dataNotDocs === false;
     const hinted = hintNames.length
       ? catalog.flatMap((s) => s.tools
         .filter((t) => t.permission === 'read' && hintNames.some((h) => norm(t.name) === h || norm(t.name).includes(h) || h.includes(norm(t.name))))
-        .filter((t) => allowDocs || !isDocs(t.name))
+        .filter((t) => groupAllowsDocs || !isDocs(t.name))
         .map((tool) => ({ serverId: s.serverId, serverName: s.name, demo: s.demo, tool })))
       : [];
     const ranked = [
       ...hinted,
-      ...rankTools(catalog, local || prompt, fileIds).filter((r) => allowDocs || !isDocs(r.tool.name)),
-      ...packed.filter((r) => allowDocs || !isDocs(r.tool.name)),
+      ...rankTools(catalog, local || prompt, fileIds).filter((r) => groupAllowsDocs || !isDocs(r.tool.name)),
+      ...packed.filter((r) => groupAllowsDocs || !isDocs(r.tool.name)),
     ];
     const seed = { ...(g.argHints ?? {}) };
     if (g.entity) {
@@ -135,7 +159,8 @@ export async function planAcquisitions(
         ...rankTools(catalog, [local, entity].filter(Boolean).join('\n') || prompt, fileIds).filter((r) => !isDocs(r.tool.name)),
         ...packed.filter((r) => !isDocs(r.tool.name)),
         ...rankTools(catalog, prompt, fileIds).filter((r) => !isDocs(r.tool.name)),
-        ...rankTools(catalog, local || prompt, fileIds).filter((r) => isDocs(r.tool.name)),
+        // Documentation uniquement si la consigne le demande explicitement.
+        ...(allowDocs ? rankTools(catalog, local || prompt, fileIds).filter((r) => isDocs(r.tool.name)) : []),
       ];
       const seed = { ...(hints.argHints?.get(req.id) ?? {}) };
       if (entity) {

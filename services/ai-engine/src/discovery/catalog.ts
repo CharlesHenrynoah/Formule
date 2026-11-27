@@ -153,15 +153,42 @@ export interface Acquired { queryId: string; ref: ToolRef; args: Record<string, 
 const CURSOR_ARG = /^(curseur|cursor|page_token|pagetoken|next|after)$/i;
 const NEXT_KEY = /^(curseur_suivant|next_cursor|nextcursor|next|cursor_next|next_page_token)$/i;
 
-/** Acquisition en lecture via le hub ; pagination suivie dans le budget, couverture déclarée. */
+/** Acquisition en lecture via le hub ; args validés contre le schéma ; pagination bornée. */
 export async function acquire(ref: ToolRef, queryId: string, ctx: { jobId: string; projectId?: string | null; maxPages?: number }, args: Record<string, unknown> = {}): Promise<Acquired> {
+  const schema = (ref.tool.inputSchema ?? {}) as Parameters<typeof validate>[1];
+  if (Object.keys(schema.properties ?? {}).length) {
+    const errs = validate(args, schema);
+    if (errs.length) {
+      const now = new Date().toISOString();
+      return {
+        queryId, ref, args,
+        envelope: {
+          id: `env_invalid_${queryId}`,
+          source: { serverId: ref.serverId, serverName: ref.serverName, demo: ref.demo },
+          tool: ref.tool.name,
+          args,
+          status: 'error',
+          error: { kind: 'invalid_schema', message: errs.slice(0, 5).join('; ') },
+          requestId: queryId,
+          schemaVersion: '1',
+          fetchedAt: now,
+          observedAt: now,
+          coverage: { complete: false, pages: 0, note: `args hors schéma : ${errs.slice(0, 3).join('; ')}` },
+          rawRef: '',
+          hash: null,
+        },
+        raw: null,
+      };
+    }
+  }
+  const maxPages = ctx.maxPages ?? Number(process.env.FORMULE_MCP_MAX_PAGES ?? 10);
   const first = await call<{ envelope: AcquisitionEnvelope; raw: unknown }>('mcp-hub', '/call', { body: { serverId: ref.serverId, tool: ref.tool.name, args, jobId: ctx.jobId, projectId: ctx.projectId ?? null } });
   const cursorArg = Object.keys(ref.tool.inputSchema?.properties ?? {}).find((k) => CURSOR_ARG.test(k));
   if (first.envelope.status === 'error' || !cursorArg || !first.raw || typeof first.raw !== 'object') return { queryId, ref, args, ...first };
   const nextPath = Object.keys(first.raw as object).find((k) => NEXT_KEY.test(k));
   const itemsPath = Object.entries(first.raw as object).find(([, v]) => Array.isArray(v))?.[0];
   if (!nextPath || !itemsPath || getPath(first.raw, nextPath) == null) return { queryId, ref, args, ...first };
-  const paginate = { cursorArg, nextPath, itemsPath, maxPages: ctx.maxPages ?? 10 };
+  const paginate = { cursorArg, nextPath, itemsPath, maxPages };
   const all = await call<{ envelope: AcquisitionEnvelope; raw: unknown }>('mcp-hub', '/call', { body: { serverId: ref.serverId, tool: ref.tool.name, args, paginate, jobId: ctx.jobId, projectId: ctx.projectId ?? null } });
   return { queryId, ref, args, paginate, ...all };
 }

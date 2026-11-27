@@ -36,6 +36,10 @@ export const RequirementSchema = z.object({
   acceptance: z.string().max(300).optional(),
   order: z.enum(['asc', 'desc']).optional(),
   limit: z.number().int().min(1).max(50).optional(),
+  /** Mesures / transform / covers : traçabilité prompt → certification. */
+  measures: z.array(z.string().max(80)).max(12).optional(),
+  transform: z.enum(['base100']).optional(),
+  covers: z.array(z.string().max(120)).max(12).optional(),
 });
 
 export const QuerySchema = z.object({

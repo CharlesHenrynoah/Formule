@@ -55,6 +55,8 @@ export interface ReqTemplate {
   unit?: string;
   /** Transformation déclarative de série (exécutée par le runtime, jamais inventée à la liaison). */
   transform?: 'base100';
+  /** Points de coverage portés explicitement (pas une détection lexicale). */
+  covers?: string[];
 }
 
 interface Recipe { match: RegExp; reqs: ReqTemplate[]; title: string; mission: string; commands: string[] }

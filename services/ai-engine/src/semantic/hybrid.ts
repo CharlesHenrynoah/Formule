@@ -11,12 +11,14 @@ import { AGGS, VIEW_KINDS, norm, type ClauseFilter, type ReqTemplate, type Under
 import { capRequirements, freezeReqs } from './analytical.js';
 import {
   exactFieldMatch, filterForbiddenDrops, LlmBudget, sealContract, separateNonAnalytical,
+  structuredCoverageGaps,
   type ContractConstraints, type SealedContract,
 } from './contract-guard.js';
+import { createRuntimeBudgets, McpBudget } from './budgets.js';
 import type { Dataset } from './resolve.js';
 import type { PlannedReq } from './plan.js';
 
-export { LlmBudget, sealContract };
+export { LlmBudget, McpBudget, createRuntimeBudgets, sealContract, structuredCoverageGaps };
 export type { ContractConstraints, SealedContract };
 
 /** Tolère un singleton LLM (objet / string) → tableau. */
@@ -413,33 +415,16 @@ export async function interpretAndPlan(prompt: string, catalog: CatalogServer[],
   };
 }
 
-/** Concepts métier universels → tokens de champ (pas de spécialisation fournisseur). */
-function expandMeasureTokens(raw: string[] | undefined): string[] | undefined {
-  if (!raw?.length) return undefined;
-  const out: string[] = [];
-  for (const m of raw) {
-    const n = norm(m);
-    if (n.length > 1) out.push(n);
-    if (/capitalisation|market\s*cap|taille.*(march|market)|total.?market/.test(n)) out.push('market_cap', 'total_market_cap', 'marketcap');
-    if (/volume/.test(n)) out.push('volume', 'total_volume');
-    if (/^prix$|price|cours/.test(n)) out.push('price', 'prix');
-    if (/revenu|montant|amount|chiffre/.test(n)) out.push('montant', 'amount', 'revenu');
-  }
-  return [...new Set(out)].slice(0, 8);
-}
-
 function aiReqToTpl(r: z.infer<typeof ReqSchema>, index: number, design?: string): ReqTemplate {
   const view = (r.kind === 'note' ? 'note' : (r.visualization ?? 'kpi')) as ViewKind;
   const agg = r.operation;
   const filters = r.filters as ClauseFilter[] | undefined;
   const id = (r.id?.replace(/[^a-zA-Z0-9_]/g, '_').slice(0, 40))
     || `${norm(r.label).replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 28) || 'req'}_${index + 1}`.slice(0, 40);
-  const measures = expandMeasureTokens([
-    ...(r.measures ?? []),
-    r.label,
-    ...(r.covers ?? []),
-  ].map(norm).filter((m) => m.length > 1));
+  // Mesures = tokens déclarés par le LLM uniquement (pas de synonymes métier injectés).
+  const measures = r.measures?.map(norm).filter((m) => m.length > 1).slice(0, 8);
   const entities = r.entities?.map((e) => e.trim()).filter((e) => e.length >= 2 && e.length <= 40 && e.split(/\s+/).length <= 3);
+  const covers = r.covers?.map((c) => c.slice(0, 120));
   return {
     id, label: r.label.slice(0, 120), mandatory: r.certainty !== 'hypothesis', tool: r.toolHints?.length ? r.toolHints.map(norm) : ['*'],
     title: r.label.slice(0, 80), view, visualization: view,
@@ -448,7 +433,7 @@ function aiReqToTpl(r: z.infer<typeof ReqSchema>, index: number, design?: string
     denWhere: agg === 'ratio' ? [] : undefined,
     percent: agg === 'ratio',
     entities, population: r.population, period: r.period, grain: r.grain, unit: r.unit,
-    transform: r.transform, limit: r.limit, order: r.order, section: r.section, design,
+    transform: r.transform, limit: r.limit, order: r.order, section: r.section, design, covers,
     label_: view === 'ranking' || view === 'donut' || view === 'bars' || view === 'table' ? ['nom', 'name', 'libelle', 'categorie', 'symbol', 'id'] : undefined,
     dimensions: view === 'ranking' || view === 'donut' || view === 'bars' || view === 'table' ? ['nom', 'name', 'libelle', 'categorie', 'symbol'] : undefined,
     acceptance: [
@@ -457,35 +442,17 @@ function aiReqToTpl(r: z.infer<typeof ReqSchema>, index: number, design?: string
       entities?.length ? `entite:${entities.join(',')}` : null,
       r.population ? `pop:${r.population}` : null, r.period ? `periode:${r.period}` : null,
       r.limit != null ? `limit:${r.limit}` : null,
-      r.covers?.length ? `covers:${r.covers.join('|')}` : null,
+      covers?.length ? `covers:${covers.join('|')}` : null,
     ].filter(Boolean).join(' · ').slice(0, 300),
   };
 }
 
 /**
- * Vérifie que chaque point de coverage est porté par au moins une exigence (label / acceptance / covers).
- * Déterministe — ne « invente » pas d'exigences.
+ * Couverture structurée : chaque point doit être porté par covers[] ou label exact.
+ * Plus de matching par présence de mots.
  */
-export function coverageGaps(coverage: string[], reqs: ReqTemplate[]): string[] {
-  if (!coverage.length) return ['coverage vide : le contrat ne déclare aucune intention à couvrir'];
-  const blob = (r: ReqTemplate) => norm(`${r.label} ${r.title} ${r.acceptance ?? ''} ${(r.entities ?? []).join(' ')} ${(r.measures ?? r.measure ?? []).join(' ')} ${r.population ?? ''} ${r.period ?? ''} ${r.design ?? ''} ${r.transform ?? ''} ${r.visualization ?? r.view} ${r.operation ?? r.agg ?? ''}`);
-  return coverage.filter((c) => {
-    const n = norm(c);
-    // Méta-couverture (créer une interface / nommer un serveur) ≠ intention analytique manquante.
-    if (/^(creer|crée|créer|create).*(interface|application)/.test(n)) return false;
-    if (/^(affichage|afficher|montre|montre)/.test(n) && /\bkpi\b/.test(n) && reqs.some((r) => (r.visualization ?? r.view) === 'kpi')) return false;
-    if (/^(affichage|montre|creer|crée|interface)/.test(n) && /\bkpi\b/.test(n) && reqs.some((r) => (r.visualization ?? r.view) === 'kpi')) return false;
-    if (/\btableau\b/.test(n) && reqs.some((r) => (r.visualization ?? r.view) === 'table')) return false;
-    if (/\b(courbe|serie|évolution|evolution)\b/.test(n) && reqs.some((r) => (r.visualization ?? r.view) === 'line')) return false;
-    if (/\bclassement\b/.test(n) && reqs.some((r) => (r.visualization ?? r.view) === 'ranking')) return false;
-    if (/capitalisation|market\s*cap|taille.*(march|market)/.test(n) && reqs.some((r) => (r.measures ?? r.measure ?? []).some((m) => /market_?cap|capitalisation|total_market/i.test(m)) || /capitalisation|market/.test(blob(r)))) return false;
-    const words = n.split(/[^a-z0-9]+/).filter((w) => w.length > 2 && !['avec', 'pour', 'dans', 'une', 'des', 'les', 'sur', 'par', 'total', 'totale', 'marche', 'crypto'].includes(w));
-    return !reqs.some((r) => {
-      const b = blob(r);
-      if (b.includes(n)) return true;
-      return words.length > 0 && words.filter((w) => b.includes(w)).length >= Math.min(2, words.length);
-    });
-  });
+export function coverageGaps(coverage: string[], reqs: ReqTemplate[], constraints?: ContractConstraints): string[] {
+  return structuredCoverageGaps(coverage, reqs, constraints);
 }
 
 /** Appel 2 : liaison sémantique proposée ; le moteur valide ensuite (intentions scellées immuables). */
@@ -608,7 +575,7 @@ export function applyCorrection(reqs: ReqTemplate[], correction: Correction, all
     const patch = patches.get(r.id);
     if (patch) {
       if (!r.mandatory) return patch;
-      // Conservation intégrale des intentions analytiques obligatoires.
+      // Conservation intégrale des intentions analytiques obligatoires (covers/transform/unit figés).
       return {
         ...r,
         label: patch.label || r.label,
@@ -618,6 +585,10 @@ export function applyCorrection(reqs: ReqTemplate[], correction: Correction, all
         filters: patch.filters ?? r.filters,
         where: patch.where ?? r.where,
         tool: patch.tool?.length ? patch.tool : r.tool,
+        covers: r.covers,
+        transform: r.transform,
+        unit: r.unit,
+        inputUnit: r.inputUnit,
         acceptance: `${r.acceptance ?? ''} · patch:mesures`.slice(0, 300),
       };
     }

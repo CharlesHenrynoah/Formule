@@ -352,7 +352,23 @@ export function capRequirements(reqs: ReqTemplate[]): ReqTemplate[] {
 }
 
 export function freezeReqs(reqs: ReqTemplate[]): ReqTemplate[] {
-  return reqs.map((r) => Object.freeze({ ...r, where: r.where ? Object.freeze([...r.where]) : undefined, filters: r.filters ? Object.freeze([...r.filters]) : undefined, measure: r.measure ? Object.freeze([...r.measure]) : undefined, measures: r.measures ? Object.freeze([...r.measures]) : undefined, entities: r.entities ? Object.freeze([...r.entities]) : undefined }));
+  return reqs.map((r) => Object.freeze({
+    ...r,
+    where: r.where ? Object.freeze([...r.where]) : undefined,
+    filters: r.filters ? Object.freeze([...r.filters]) : undefined,
+    denWhere: r.denWhere ? Object.freeze([...r.denWhere]) : undefined,
+    measure: r.measure ? Object.freeze([...r.measure]) : undefined,
+    measures: r.measures ? Object.freeze([...r.measures]) : undefined,
+    den: r.den ? Object.freeze([...r.den]) : undefined,
+    time: r.time ? Object.freeze([...r.time]) : undefined,
+    label_: r.label_ ? Object.freeze([...r.label_]) : undefined,
+    entities: r.entities ? Object.freeze([...r.entities]) : undefined,
+    dimensions: r.dimensions ? Object.freeze([...r.dimensions]) : undefined,
+    columns: r.columns ? Object.freeze([...r.columns]) : undefined,
+    series: r.series ? Object.freeze(r.series.map((s) => Object.freeze([...s]))) : undefined,
+    covers: r.covers ? Object.freeze([...r.covers]) : undefined,
+    tool: Object.freeze([...r.tool]),
+  }));
 }
 
 export type { HybridPlan as AnalyticalDraft } from './hybrid.js';

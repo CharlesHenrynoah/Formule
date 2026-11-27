@@ -131,6 +131,9 @@ export function assembleSpec(input: {
       ...(t.acceptance ? { acceptance: t.acceptance } : {}),
       ...(t.order ? { order: t.order } : {}),
       ...(t.limit != null ? { limit: t.limit } : {}),
+      ...(t.measures ?? t.measure ? { measures: [...(t.measures ?? t.measure ?? [])] } : {}),
+      ...(t.transform ? { transform: t.transform } : {}),
+      ...(t.covers?.length ? { covers: [...t.covers] } : {}),
     };
   });
   const styleBase = styleFromConstraints(constraints);
