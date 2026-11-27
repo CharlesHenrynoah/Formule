@@ -1,0 +1,9 @@
+{
+  "name": "@formule/hf-contract-mcp",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "TEST DE CONTRAT : reproduit les noms, schémas, descriptions (exemples compris) et FORMATS de sortie des outils du serveur MCP Hugging Face (hub_repo_search en Markdown, hf_fs en structuredContent, hub_repo_details, hf_whoami). Valeurs SYNTHÉTIQUES.",
+  "scripts": { "start": "tsx src/index.ts" },
+  "dependencies": { "@modelcontextprotocol/sdk": "^1.32.0", "zod": "^4.0.0" }
+}

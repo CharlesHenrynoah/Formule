@@ -1,25 +1,33 @@
 {
-  "name": "everything-software",
+  "name": "formule",
   "private": true,
-  "version": "0.1.0",
-  "description": "Tapez un prompt, obtenez une mini-app web générée en temps réel (micro-services + moteur IA).",
+  "type": "module",
+  "description": "FORMULE — interface universelle de pilotage (UCI), mono-utilisateur, locale.",
+  "engines": {
+    "node": ">=22.13"
+  },
   "workspaces": [
-    "services/*",
     "packages/*",
+    "services/*",
+    "servers/*",
     "frontend"
   ],
   "scripts": {
-    "dev": "concurrently -k -n storage,validator,mcp,ai,agents,voice,gateway,front -c blue,magenta,red,green,gray,white,yellow,cyan \"npm run dev -w services/storage\" \"npm run dev -w services/validator\" \"npm run dev -w services/mcp-hub\" \"npm run dev -w services/ai-engine\" \"npm run dev:app-agents -w services/ai-engine\" \"npm run dev -w services/voice-gateway\" \"npm run dev -w services/api-gateway\" \"npm run dev -w frontend\"",
-    "start": "concurrently -k -n storage,validator,mcp,ai,agents,voice,gateway,front \"npm start -w services/storage\" \"npm start -w services/validator\" \"npm start -w services/mcp-hub\" \"npm start -w services/ai-engine\" \"npm run start:app-agents -w services/ai-engine\" \"npm start -w services/voice-gateway\" \"npm start -w services/api-gateway\" \"npm run preview -w frontend\"",
-    "test": "npm test -w services/ai-engine && npm test -w services/validator && npm test -w @es/app-mcp && npm test -w @es/voice-gateway && npm test -w @es/mcp-hub && npm test -w @es/frontend",
-    "build": "npm run build -w @es/runtime && npm run build -w frontend",
+    "dev": "concurrently -k --names sto,hub,val,apps,voice,ai,gw,ui --prefix-colors gray,cyan,yellow,magenta,blue,green,white,red \"npm:dev -w @formule/storage\" \"npm:dev -w @formule/mcp-hub\" \"npm:dev -w @formule/validator\" \"npm:dev -w @formule/app-agents\" \"npm:dev -w @formule/voice-gateway\" \"npm:dev -w @formule/ai-engine\" \"npm:dev -w @formule/api-gateway\" \"npm:dev -w @formule/frontend\"",
+    "start": "npm run build -w @formule/frontend && FORMULE_SERVE_STUDIO=1 concurrently -k --names sto,hub,val,apps,voice,ai,gw \"npm:start -w @formule/storage\" \"npm:start -w @formule/mcp-hub\" \"npm:start -w @formule/validator\" \"npm:start -w @formule/app-agents\" \"npm:start -w @formule/voice-gateway\" \"npm:start -w @formule/ai-engine\" \"npm:start -w @formule/api-gateway\"",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "health": "node scripts/health.mjs",
     "e2e": "node scripts/e2e.mjs",
-    "screenshots": "python3 scripts/screenshots.py",
-    "start:services": "concurrently -k -n storage,validator,mcp,ai,agents,voice,gateway \"npm start -w services/storage\" \"npm start -w services/validator\" \"npm start -w services/mcp-hub\" \"npm start -w services/ai-engine\" \"npm run start:app-agents -w services/ai-engine\" \"npm start -w services/voice-gateway\" \"npm start -w services/api-gateway\"",
-    "public": "bash scripts/start-public.sh",
-    "voice:smoke": "node scripts/voice-smoke.mjs"
+    "e2e:real": "node scripts/e2e-real.mjs",
+    "mcp:add": "node scripts/mcp-add.mjs",
+    "e2e:sections": "node scripts/e2e-sections.mjs"
   },
   "devDependencies": {
-    "concurrently": "^9.1.0"
+    "@types/node": "^22.10.0",
+    "concurrently": "^9.1.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
   }
 }

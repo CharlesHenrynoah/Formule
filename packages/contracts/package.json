@@ -1,9 +1,14 @@
 {
-  "name": "@es/contracts",
+  "name": "@formule/contracts",
+  "version": "1.0.0",
   "private": true,
-  "version": "0.1.0",
   "type": "module",
   "exports": {
-    ".": "./src/types.ts"
+    ".": "./src/index.ts",
+    "./node": "./src/node/index.ts",
+    "./browser": "./src/browser.ts"
+  },
+  "dependencies": {
+    "zod": "^4.0.0"
   }
 }

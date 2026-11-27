@@ -1,0 +1,36 @@
+{
+  "id": "coingecko",
+  "version": 1,
+  "description": "Gabarits de code relus pour le serveur CoinGecko « code mode » (outil execute). Pack d'exemple : Formule n'envoie jamais de code écrit par le modèle, seulement ces gabarits paramétrés et validés.",
+  "appliesTo": { "server": "coingecko", "anyTool": ["execute"] },
+  "codeTemplates": {
+    "tool": "execute",
+    "argument": "code",
+    "boost": "(crypto|bitcoin|btc|ethereum|eth|coingecko|solana|token|coin)",
+    "dictionaries": {
+      "currency": { "eur": "eur", "euro": "eur", "euros": "eur", "usd": "usd", "dollar": "usd", "dollars": "usd", "gbp": "gbp", "livre": "gbp", "chf": "chf", "jpy": "jpy", "yen": "jpy" },
+      "coin": { "bitcoin": "bitcoin", "btc": "bitcoin", "ethereum": "ethereum", "eth": "ethereum", "ether": "ethereum", "solana": "solana", "sol": "solana", "xrp": "ripple", "ripple": "ripple", "cardano": "cardano", "ada": "cardano", "dogecoin": "dogecoin", "doge": "dogecoin", "bnb": "binancecoin", "tron": "tron", "trx": "tron", "polkadot": "polkadot", "dot": "polkadot", "litecoin": "litecoin", "ltc": "litecoin", "avalanche": "avalanche-2", "avax": "avalanche-2", "chainlink": "chainlink", "link": "chainlink", "toncoin": "the-open-network", "ton": "the-open-network", "usdt": "tether", "tether": "tether", "usdc": "usd-coin" }
+    },
+    "params": {
+      "vs": { "dictionary": "currency", "default": "eur", "pattern": "^[a-z]{3}$" },
+      "coin": { "dictionary": "coin", "pattern": "^[a-z0-9-]{1,60}$" },
+      "days": { "numbers": [{ "re": "(\\d{1,3})\\s*(jours|j|days|derniers jours)", "mul": 1 }, { "re": "(\\d{1,2})\\s*mois", "mul": 30 }, { "re": "\\b(an|annee|1 an|12 mois)\\b", "value": 365 }], "default": 30, "min": 1, "max": 365 },
+      "n": { "numbers": [{ "re": "top\\s*(\\d{1,3})", "mul": 1 }, { "re": "(\\d{1,3})\\s*(premieres|principales|plus grosses)?\\s*(cryptos?|crypto-monnaies|monnaies|coins)", "mul": 1 }], "default": 20, "min": 3, "max": 100 }
+    },
+    "templates": [
+      {
+        "name": "historique",
+        "when": "(historique|evolution|courbe|tendance|depuis|derniers|jours|mois|graphique|simul)",
+        "requires": ["coin"],
+        "intent": "historique {{coin}} {{days}} j en {{vs}}",
+        "code": "async function run(client) {\n  const r = await client.coins.marketChart.get('{{coin}}', { vs_currency: '{{vs}}', days: '{{days}}' });\n  const caps = new Map(r.market_caps.map(([t, v]) => [t, v]));\n  const vols = new Map(r.total_volumes.map(([t, v]) => [t, v]));\n  return { crypto: '{{coin}}', devise: '{{vs|upper}}', observe_a: new Date().toISOString(),\n    points: r.prices.map(([t, p]) => ({ horodatage: new Date(t).toISOString(), prix_{{vs}}: p, capitalisation_{{vs}}: caps.get(t) ?? null, volume_{{vs}}: vols.get(t) ?? null })) };\n}"
+      },
+      {
+        "name": "marchés",
+        "requires": [],
+        "intent": "marchés top {{n}} en {{vs}}",
+        "code": "async function run(client) {\n  const rows = await client.coins.markets.get({ vs_currency: '{{vs}}', order: 'market_cap_desc', per_page: {{n}}, page: 1, price_change_percentage: '24h,7d'{{#coin}}, ids: '{{coin}}'{{/coin}} });\n  return { devise: '{{vs|upper}}', observe_a: new Date().toISOString(),\n    cryptos: rows.map((c) => ({ id: c.id, symbole: String(c.symbol).toUpperCase(), nom: c.name, prix_{{vs}}: c.current_price, capitalisation_{{vs}}: c.market_cap, volume_24h_{{vs}}: c.total_volume, variation_24h_pct: c.price_change_percentage_24h, variation_7d_pct: c.price_change_percentage_7d_in_currency ?? null, rang: c.market_cap_rank, maj_le: c.last_updated })) };\n}"
+      }
+    ]
+  }
+}

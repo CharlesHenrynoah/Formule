@@ -1,0 +1,1 @@
+{ "station": { "id": "ST-07", "nom": "Quai nord" }, "mesure": { "temperature": { "valeur": 4.2, "unite": "°C" }, "humidite": { "valeur": 81, "unite": "%" } }, "releve_a": "2026-11-25T08:15:00Z", "capteurs": [ { "id": "c1", "etat": "ok" }, { "id": "c2", "etat": "panne" } ] }

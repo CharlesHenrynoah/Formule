@@ -1,14 +1,7 @@
-/** Service de validation / build : contrôle syntaxique et sécurité des mini-apps générées. */
-import { BIND_HOST } from './env.ts';
-import Fastify from 'fastify';
-import { validateHtml } from './validate.ts';
+import { createService, listen } from '@formule/service-kit';
+import { checkHtml, checkSpec } from './checks.js';
 
-const PORT = Number(process.env.VALIDATOR_PORT ?? 4002);
-
-const app = Fastify({ logger: { level: 'warn' }, bodyLimit: 5 * 1024 * 1024 });
-app.get('/health', async () => ({ service: 'validator', status: 'ok' }));
-app.post<{ Body: { code: string } }>('/validate', async (req, reply) => {
-  if (typeof req.body?.code !== 'string') return reply.code(400).send({ error: 'code (string) requis' });
-  return validateHtml(req.body.code);
-});
-app.listen({ port: PORT, host: BIND_HOST }).then(() => console.log(`[validator] prêt sur :${PORT}`));
+const app = await createService('validator');
+app.post<{ Body: { html: string; dataHosts?: string[] } }>('/validate/html', async (r) => { const findings = checkHtml(String(r.body.html ?? ''), (r.body.dataHosts ?? []).map(String).slice(0, 200)); return { ok: !findings.some((f) => f.severity === 'error'), findings }; });
+app.post<{ Body: { spec: unknown; catalog: never[] } }>('/validate/spec', async (r) => { const findings = checkSpec(r.body.spec, r.body.catalog ?? []); return { ok: findings.length === 0, findings }; });
+await listen(app, 'validator');

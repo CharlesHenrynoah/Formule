@@ -1,25 +1,14 @@
 {
-  "name": "@es/ai-engine",
+  "name": "@formule/ai-engine",
+  "version": "1.0.0",
   "private": true,
-  "version": "0.1.0",
   "type": "module",
-  "scripts": {
-    "dev": "tsx watch --exclude \"**/data/**\" --exclude \"**/*.test.ts\" src/index.ts",
-    "start": "tsx src/index.ts",
-    "test": "node --import tsx --test test/*.test.ts",
-    "typecheck": "tsc --noEmit -p .",
-    "dev:app-agents": "tsx watch --exclude \"**/data/**\" --exclude \"**/*.test.ts\" src/app-agents/server.ts",
-    "start:app-agents": "tsx src/app-agents/server.ts"
-  },
+  "scripts": { "dev": "tsx src/index.ts", "start": "tsx src/index.ts" },
   "dependencies": {
-    "@openai/agents": "^0.22.0",
-    "fastify": "^5.2.0",
-    "openai": "^7.60.0",
-    "tsx": "^4.19.0",
-    "zod": "^4.6.7"
-  },
-  "devDependencies": {
-    "@types/node": "^22.10.0",
-    "typescript": "^5.7.0"
+    "@formule/contracts": "*",
+    "@formule/service-kit": "*",
+    "@formule/app-runtime": "*",
+    "jsdom": "^26.0.0",
+    "zod": "^4.0.0"
   }
 }

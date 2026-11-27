@@ -1,346 +1,221 @@
-# ✨ Everything Software
+# FORMULE — interface universelle de pilotage
 
-> Tapez un prompt, regardez **votre mini-SaaS personnel** (monitoring · simulation · action) se construire **en temps réel**, pilotez-le comme une console de DJ avec son agent contremaître (texte ou voix), et faites-le évoluer en lui parlant.
+Tu décris l'interface que tu veux voir. Formule découvre les capacités MCP **réellement autorisées**, lit des données vérifiables, te montre ce qu'il a lu, attend ton **Valider**, puis construit, certifie et publie une application. Elle évolue par versions, sans jamais perdre la dernière version certifiée.
 
-Plateforme en **micro-services** pilotée par un **moteur d'IA** : le modèle par défaut est **Mercury 3** d'Inception Labs, un LLM de **diffusion** (le texte est « débruité » progressivement, affichable en direct). Les mini-apps peuvent utiliser des **outils MCP**, pendant la génération comme à l'exécution.
-
-![Aperçu](screenshots/09-mcp-ecriture-executee.png)
-
-## Fonctionnalités
-
-- **Prompt → plan → code streamé → validation → aperçu interactif** (iframe `srcdoc` sandboxée, sans `allow-same-origin`).
-- **Mode diffusion** (Mercury) : affichage des étapes de débruitage du code (`diffusing: true`). Si la diffusion s'arrête avant la fin, le moteur relance automatiquement en streaming classique.
-- **Itération** : « passe en thème clair », « ajoute un export CSV »… Le code précédent et la consigne sont envoyés au modèle, et chaque résultat devient une nouvelle version.
-- **Onglet Code** : lecture et édition, ▶ *Exécuter* sans sauvegarder, 💾 *Enregistrer une version* (validée).
-- **Historique** : projets, prompts et versions dans SQLite, avec réouverture et retour à une version antérieure.
-- **Validator** : HTML complet, analyse syntaxique de chaque `<script>` (JS, module, JSX/Babel), règles de sécurité. En cas d'erreur, **une** correction automatique est demandée au moteur IA.
-- **MCP** :
-  - micro-service `mcp-hub` (stdio, HTTP streamable, SSE) configuré par `mcp.config.json` et par l'UI (🔌 MCP) ;
-  - **à la génération**, les outils en lecture sont exposés au modèle par *tool calling* ;
-  - **à l'exécution**, les mini-apps appellent `await window.mcp.call('demo__get_weather', { city: 'Lyon' })` via un pont sécurisé `postMessage → gateway → mcp-hub`, avec liste blanche d'outils et **confirmation de l'utilisateur** pour les outils en écriture.
-- **Mode démo sans clé** : provider `mock` avec des mini-apps réalistes (todo, calculatrice, pomodoro, convertisseur, météo MCP, app générique), streamées token par token, diffusion simulée et itérations simulées.
-
-## Architecture
-
-```mermaid
-flowchart LR
-  U[Utilisateur] --> FE["frontend<br/>React + Vite + Tailwind<br/>:5173"]
-  FE -- "REST + SSE /api/*" --> GW["api-gateway<br/>Fastify :4000"]
-  FE <-. "postMessage<br/>window.mcp.call" .-> IF["iframe sandbox<br/>mini-app générée"]
-  GW -- "SSE /generate, /fix" --> AI["ai-engine<br/>orchestrateur :4001"]
-  GW -- "/validate" --> VA["validator<br/>:4002"]
-  GW -- "projets / versions" --> ST["storage<br/>SQLite :4003"]
-  GW -- "/api/mcp/call<br/>(liste blanche, confirmation)" --> HUB["mcp-hub<br/>:4004"]
-  AI -- "tool calling<br/>(outils en lecture)" --> HUB
-  AI -- "chat/completions<br/>stream / diffusing" --> LLM["Mercury 3 (Inception)<br/>OpenAI · Anthropic · compatible OpenAI<br/>ou mock"]
-  HUB -- stdio --> DEMO["mcp-demo-server<br/>météo · heure · calcul · notes"]
-  HUB -- "HTTP streamable / SSE" --> EXT["Serveurs MCP distants"]
-```
-
-Pipeline d'une génération (événements SSE relayés au frontend) :
-
-```mermaid
-sequenceDiagram
-  participant F as Frontend
-  participant G as Gateway
-  participant A as ai-engine
-  participant H as mcp-hub
-  participant V as Validator
-  participant S as Storage
-  F->>G: POST /api/generate {prompt, projectId?, diffusing}
-  G->>A: POST /generate (SSE)
-  A->>H: outils en lecture (tool calling)
-  A-->>G: tool_call / tool_result, plan_delta…, code_delta ou code_snapshot…
-  G-->>F: (relais en direct)
-  G->>V: /validate
-  alt erreurs
-    G->>A: /fix (une fois)
-    G->>V: /validate
-  end
-  G->>S: nouvelle version
-  G-->>F: saved, done
-```
-
-| Service | Dossier | Port | Rôle |
-|---|---|---|---|
-| frontend | `frontend/` | 5173 (dev) / 8080 (Docker) | Interface React |
-| api-gateway | `services/api-gateway/` | 4000 | Point d'entrée unique, SSE, proxy, pont MCP |
-| ai-engine | `services/ai-engine/` | 4001 | Providers LLM, plan, génération, correction, tool calling |
-| validator | `services/validator/` | 4002 | Analyse syntaxique et sécurité |
-| storage | `services/storage/` | 4003 | SQLite (`node:sqlite`, sans dépendance native) |
-| mcp-hub | `services/mcp-hub/` | 4004 | Connexions MCP, politique d'accès |
-| app-agents | `services/ai-engine/src/app-agents/` | 4005 | Backends MCP des apps + sous-agents contremaîtres (Agents SDK) |
-| voice-gateway | `services/voice-gateway/` | 4006 | Voix Google : TTS Gemini, STT Gemini Live (WebSocket), barge-in |
-| mcp-demo-server | `packages/mcp-demo-server/` | stdio (ou 4010 en `--http`) | Outils de démo sans clé |
-
-Chaque service a son `package.json`, son `Dockerfile` et un endpoint `GET /health`. `GET :4000/health` agrège l'état de tous les services.
-
-## 🤖 Équipe d'agents (mode par défaut)
-
-Derrière chaque génération, une **équipe de trois agents** construite avec le **[OpenAI Agents SDK](https://github.com/openai/openai-agents-js)** (`@openai/agents`) et branchée sur Mercury 3 :
-
-```mermaid
-flowchart LR
-  P([Prompt utilisateur]) --> DE
-  subgraph Crew["Équipe d'agents (OpenAI Agents SDK · Mercury 3)"]
-    DE["🗄️ Data Engineer<br/>explore les outils MCP<br/>appels en lecture seule"] -->|brief données| PO
-    PO["🧭 Product Owner<br/>user stories · critères<br/>écrans · composants shadcn"] -->|mini-spec + brief| DEV
-    DEV["🛠️ Développeur<br/>shadcn add · write_file<br/>vite build"] -->|build OK| REV
-    REV{"🧭 Revue PO<br/>critères d'acceptation"} -->|a_corriger ≤ 2×| DEV
-  end
-  REV -->|ok| OUT([index.html autonome → iframe sandbox])
-```
-
-| Rôle | Entrée | Outils | Sortie |
-|---|---|---|---|
-| **Data Engineer** | prompt + liste des outils MCP | `mcp_list_tools`, `mcp_sample` (lecture seule, ≤ 8 appels) | *brief données* : sources, schéma (champs, types, exemples), volumes, relations, contraintes, recommandations `window.mcp.call(...)`. Si aucun MCP n'est pertinent : une ligne, et la chaîne continue. |
-| **Product Owner** | prompt + brief | — | mini-spec : user stories, critères d'acceptation, écrans, composants shadcn |
-| **Développeur** | spec + brief | `shadcn_add` (vraie CLI `npx shadcn add`), `write_file`, `read_file`, `list_files`, `build` (`vite build`), MCP lecture seule | app React + Tailwind + shadcn compilée en un seul `index.html` |
-| **Revue PO** | spec + fichiers + résultat du build | — | verdict JSON `ok` / `a_corriger` (au plus 2 renvois au Dev) |
-
-Chaque étape (appel d'outil, commande CLI, fichier écrit, build, brief, spec, revue) est **streamée en direct** dans le panneau « Agent » du studio (onglets Agent / Pipeline). L'interrupteur **« Équipe d'agents »** permet de repasser en génération directe (un seul appel LLM).
-
-### Pourquoi l'OpenAI Agents SDK ?
-- **Compatible OpenAI nativement** : Mercury 3 expose une API compatible OpenAI → `OpenAIChatCompletionsModel` suffit, sans adaptateur.
-- **Léger et explicite** : `Agent` + `tool()` (schémas zod) + `run()` en streaming ; l'orchestration DE → PO → Dev ↔ revue reste du TypeScript lisible (`services/ai-engine/src/agent/crew.ts`), facile à déboguer.
-- **Remplaçable** : LangGraph.js apporte un graphe d'états plus lourd dont on n'a pas besoin pour une chaîne linéaire avec boucle bornée ; Mastra impose davantage son runtime. Le SDK reste interchangeable (seul `crew.ts` en dépend).
-
-### Workspace isolé par app
-- Template **Vite + React + Tailwind v4 déjà passé par `shadcn init`** (`bash scripts/setup-agent-template.sh` → `data/agent-template`).
-- Chaque génération copie le template dans `data/workspaces/ws-…` (`node_modules` lié en dur, sources copiées) ; les 20 plus récents sont conservés.
-- `vite build` + `vite-plugin-singlefile` → un `index.html` autonome (250–550 Ko) affiché dans l'iframe sandbox.
-
-### Sécurité de l'agent
-- Aucune commande shell libre : uniquement `shadcn add <composants de la liste blanche>` et `vite build`, lancés via `execFile` (sans shell), une à la fois par workspace, avec délai maximal et environnement nettoyé (aucune clé transmise).
-- Écriture limitée à `src/**` et `index.html` ; chemins `..`, absolus ou `node_modules` refusés.
-- MCP en **lecture seule** pour les agents (outils d'écriture refusés), sorties tronquées, chemins du serveur masqués dans les messages d'erreur.
-- Repli hors ligne : si le registre shadcn est injoignable, copie locale des mêmes composants.
-
-### Mode démo sans clé
-Sans clé LLM, une **équipe scriptée** joue les trois rôles avec les **vrais outils** (vraie CLI shadcn, vrai `vite build`, vrais appels MCP). Ajoutez `[revue]` au prompt pour voir le PO renvoyer une première version au Dev.
-
-### Temps observés (Mercury 3, mode agent)
-24,7 s · 25,6 s · 27,9 s · 34,9 s · 76,1 s (ce dernier avec une reprise demandée par la revue PO et 3 builds) → **≈ 38 s en moyenne, ≈ 28 s en médiane**. Mode démo scripté : ≈ 8 s. Mesure : `node scripts/gen-time.mjs "<prompt>"`.
-
-## 🎛️ Mini-SaaS personnels : monitoring, simulation, action
-
-Chaque app générée est un **mini-SaaS personnel**, mono-utilisateur, sans compte ni partage, ouvert directement sur **tes** données. Ses données et son historique restent en local (SQLite du backend de l'app). Une app fait trois choses :
-- **Surveiller** : graphiques shadcn Charts rafraîchis en continu, seuils et anomalies ;
-- **Simuler** : des knobs (Slider) qui recalculent instantanément les scénarios « et si » ;
-- **Agir** : des pads, avec confirmation explicite et un journal pour tout effet réel.
-
-On ne saisit pas de données : elles arrivent des sources MCP ou des fichiers importés.
-
-**Mindset DJ.** L'app se pilote comme une console :
-- les sources de données sont des decks, comparés avec un crossfader (réel ou scénario) ;
-- les knobs règlent la simulation, les VU-mètres montrent le live ;
-- les scènes sont des presets que l'on sauvegarde et rappelle ;
-- un co-DJ suggère le prochain mouvement.
-
-**Mise en page** : un dashboard à gauche et un chat agentique à droite (`AppShell`, `src/components/es/app-shell.tsx`).
-
-### Une app = 3 parties cohérentes
-1. **Front** React + shadcn/ui, compilé en un seul `index.html`.
-2. **Backend MCP propre à l'app** : agrégation, simulation et stockage local de l'historique, des scènes, des réglages et du journal. Le contrat est écrit par le PO et l'implémentation par le Dev (`server/tools.ts`), puis testée (`test_backend`).
-3. **Sous-agent « contremaître »**, construit avec l'OpenAI Agents SDK et Mercury 3 (service `app-agents`, :4005). Il agit avec :
-   - les outils de l'app ;
-   - les outils MCP externes autorisés, avec du retrieval (`mcp_list_tools`, `mcp_read_resource`, `mcp_call`) ;
-   - la mémoire ;
-   - un plan de tâches.
-
-### Le contremaître : ordres de données et évolution de l'app
-Dans le chat de l'app, le contremaître décide lui-même du traitement de chaque message :
-- **Ordre sur les données** (« pourquoi les ventes baissent ? », « simule +5 % ») : il appelle les outils MCP et répond.
-- **Évolution de l'app** (« ajoute un graphique par produit ») : il appelle `evolve_app`. L'équipe Data Engineer → PO → Dev reconstruit l'app, puis une nouvelle version est enregistrée. Le CLI de l'app (`app_cli`) est fusionné avec cette itération.
-
-Il n'y a **pas de barre d'itération séparée** : tout passe par le chat.
-
-### 🗣️ Voix (Google) = outil du contremaître
-**Mercury 3 reste le cerveau et ne traite que du texte. Google ne s'occupe que de la voix**, à travers le micro-service `voice-gateway` (:4006).
-- **TTS** : Gemini TTS, modèle `gemini-3.8-flash-lite-tts`, voix Charon par défaut. La synthèse se fait phrase par phrase avec préchargement. Mesuré à environ 2,5 s par phrase.
-- **STT en streaming** : Gemini Live, modèle `gemini-3.5-transcribe-live` (PCM 16 kHz par WebSocket). Les transcriptions intermédiaires permettent le **barge-in** (on coupe la parole à l'agent). La transcription finale arrive environ 0,6 s après la fin de la phrase.
-- **Outils du contremaître** : la voix est exposée comme des outils, `voice.speak(text, style)`, `voice.listen`, `voice.confirm(question)` et `voice.stop`. Une confirmation d'action peut se faire **à la voix ou par clic** : la carte de confirmation reste affichée.
-- **Studio** : push-to-talk (bouton 🎙️ ou touche Espace) ou mode mains libres avec le mot d'éveil « Jarvis ». Un orbe dans l'en-tête de l'app indique l'état de la voix.
-- **Configuration** : `GOOGLE_API_KEY` dans `.env`, qui n'est jamais commité ni affiché. `VOICE_MOCK=1` active une voix simulée pour les tests. Test réel : `npm run voice:smoke`.
-- **Proxy** : `/voice` est relayé vers :4006 par Vite (dev et preview) et par nginx (Docker). Le `voice-gateway` doit donc tourner.
-
-### 🎚️ Composants d'action contrôlés par le contremaître
-Les apps peuvent avoir des boutons et des champs, mais c'est **le contremaître qui les contrôle**, avec trois outils : `ui_render_action`, `ui_update_action` et `ui_remove_action`. Ils lui servent à afficher, masquer, préremplir ou activer un composant.
-- Chaque geste de l'utilisateur lui revient sous forme de message (`⚡ libellé · événement : valeur`).
-- Tout effet réel passe par lui, avec une confirmation.
-
-Le registre (`src/components/es/actions.tsx`) reprend les noms de l'Apps SDK UI, mais les composants sont des **équivalents shadcn** préinstallés par la CLI :
-
-Alert, Avatar, AvatarGroup, Badge, Button, ButtonLink, Checkbox, CodeBlock, DatePicker, DateRangePicker, EmptyMessage, Indicators, Input, Markdown, Menu, Popover, RadioGroup, SegmentedControl, Select, SelectControl, Slider, Switch, TagInput, TextLink, Textarea, CopyTooltip, Tooltip.
-
-### ✨ Scènes vivantes : PixiJS v8 (2D) et three.js (3D)
-Le contremaître a trois outils pour les scènes : `ui_render_scene(kind, scene, data, params, id)`, `ui_update_scene` et `ui_remove_scene`.
-- **Catalogue (Pixi)** : particle-flow, agent-sim, live-heatmap, network-graph.
-- **Catalogue (three)** : 3d-bars, 3d-surface, 3d-concept-model.
-- **Pas limité au catalogue** : toute métaphore demandée (« visualise mon tunnel de conversion comme une machine ») devient une **scène sur mesure** générée par le Dev via `evolve_app`.
-  - Interface standard : `CustomScene = (lib, ctx, spec) => ({ update, destroy })` avec `spec = { data, params }` et `ctx.onEvent`.
-  - On l'enregistre avec `registerScene(nom, 'pixi' | 'three', factory)`.
-  - Les données sont liées au MCP et les paramètres de simulation sont relus à chaque frame. Le renderer est libéré dans `destroy`.
-  - Le catalogue et l'exemple `scene-examples/conversion-machine.ts` servent de few-shot dans le prompt du Dev. Cet exemple montre des tapis et des engrenages dont la vitesse suit le débit, des visiteurs-particules qui tombent selon le taux de chute, et un goulot qui rougit et fume.
-- **Chargement léger** : Pixi et three ne sont **pas** des dépendances npm des apps. Les fichiers `packages/es-runtime/vendor/{pixi,three}.min.js` (environ 1,7 Mo au total) sont chargés à la demande depuis `/runtime/` (gateway ou nginx, cache immuable). Le bundle d'une app ne grossit pas.
-- **Démo** : la console de ventes affiche une machine du tunnel de conversion (outil MCP de démo `get_funnel`), liée aux knobs prix et trafic. Dans le chat, essayez « visualise mon tunnel de conversion comme une machine », « montre-moi les flux en mouvement » ou « affiche les contrôles ».
-
-### Captures « mini-SaaS vivants »
-- `screenshots/42-mercury-console-generee.png` : console de ventes générée par Mercury 3 (174 s, revue PO ok à la 2e itération), avec une scène machine sur mesure enregistrée par le Dev.
-- `screenshots/43-mercury-contremaitre-scene-curseur.png` : ordre au contremaître Mercury, « montre le tunnel en machine et donne-moi un curseur pour simuler plus de trafic ». En 3,6 s, il appelle `render_scene` puis `render_action` (Slider).
-- `screenshots/44-scene-machine-pixi.png`, `45-composants-action.png` et `46-scenes-catalogue.png` : la machine du tunnel de conversion (PixiJS), les composants d'action shadcn et le catalogue de scènes.
-
-### Espace disque (template des apps)
-`data/agent-template/node_modules` pèse environ 293 Mo :
-- environ +39 Mo pour les composants d'action (date-fns, cmdk et react-day-picker via shadcn ; react-markdown et typography) ;
-- environ 1,7 Mo de fichiers vendor pour Pixi et three.
-
-Après une mise à jour, relancez `bash scripts/setup-agent-template.sh` (registre shadcn, nécessite le réseau) ou `npm install` dans `data/agent-template`.
-
-## 🎨 shadcn/ui partout
-Le studio et les apps générées utilisent **shadcn/ui** (style radix-nova, thème sombre violet). En mode direct, les apps importent les composants depuis le runtime partagé `packages/es-runtime` (servi par la gateway sur `/runtime/`) ; en mode agent, elles sont compilées avec leurs propres composants ajoutés par la CLI.
-
-## 🌐 Mode public (protégé par mot de passe)
-```bash
-bash scripts/start-public.sh            # build + services (supervisés) + tunnel cloudflared
-bash scripts/start-public.sh --no-tunnel
-bash scripts/start-public.sh --rebuild  # rebuild forcé
-bash scripts/start-public.sh --stop
-```
-- Point d'entrée unique : la gateway (`:4000`) sert le studio buildé et l'API, protégée par **Basic Auth** (identifiants dans `.access`, `chmod 600`, format `user:motdepasse`, jamais commité).
-- Tunnel : cloudflared (Quick Tunnel), puis repli localhost.run. **Le tunnel nécessite une sortie réseau sur le port 7844 (ou SSH 22)** : dans un réseau qui ne laisse passer que HTTP(S) via proxy, l'URL `trycloudflare.com` est attribuée mais répond 530. Dans ce cas, lancez le script sur une machine avec un accès réseau normal, ou déployez sur un hébergeur (VPS, Render, Fly.io…).
-- Après une réinitialisation de la machine : `npm install && bash scripts/setup-agent-template.sh && bash scripts/start-public.sh --rebuild`.
-
-## 📸 Captures
-| | |
-|---|---|
-| Studio shadcn | `screenshots/14-studio-shadcn-accueil.png` |
-| Agent en cours / terminé (démo) | `screenshots/14-agent-en-cours.png`, `screenshots/14-agent-termine.png` |
-| Brief Data Engineer (démo) | `screenshots/14-brief-data-engineer.png` |
-| App shadcn générée / code (démo) | `screenshots/14-app-shadcn.png`, `screenshots/14-code-source.png` |
-| Mercury 3 réel | `screenshots/15-mercury3-*.png` (agent en cours, terminé, brief, app, code) |
-
-## Démarrage
-
-Prérequis : **Node.js ≥ 22.13** (24 recommandé, pour `node:sqlite`).
+Monorepo TypeScript, Node ≥ 22.13, mono-utilisateur, local.
 
 ```bash
-cp .env.example .env          # sans clé : repli automatique sur le mock
 npm install
-npm run dev                   # lance les 6 processus avec concurrently
-# → http://localhost:5173
+cp .env.example .env && chmod 600 .env   # facultatif : clé LLM
+npm run dev                              # Studio : http://127.0.0.1:5173
+npm run health                           # health agrégé (gateway :4000/health)
+npm test                                 # 55 tests : invariants + cas P0
 ```
 
-Avec Docker (non testé sur la machine de build, Docker n'y étant pas disponible) :
+Sans clé, tout fonctionne en **mode démo** (badge « Démo » dans la barre du champ) : la compréhension est déterministe et ne prétend jamais avoir lu une source.
 
-```bash
-docker compose up --build     # → http://localhost:8080
-```
+---
 
-Tests :
+## Parcours
 
-```bash
-npm test                      # tests unitaires ai-engine + validator
-npm run e2e                   # bout en bout via la gateway (services lancés)
-npm run screenshots           # captures Playwright (pip install playwright)
-```
+1. **Demande** : « Crée une interface du revenu du mois… » (bouton **Générer**, Entrée pour envoyer, Maj+Entrée pour aller à la ligne). Une question simple (« Quel est le revenu du mois ? ») reçoit une réponse factuelle et **ne crée pas d'écran**.
+2. **Sourcing avant construction** : Formule Agent répond par ce qu'il a réellement lu (sources, lignes, heure, couverture, exigences couvertes ou manquantes). **Valider** n'est actif que si au moins une mesure demandée est portée par une lecture réelle. **Rejeter** arrête tout : rien n'est construit sans ce oui.
+3. **Construction observable** (flux SSE ordonné par `seq`, repris par `Last-Event-ID` : une reconnexion ne relance jamais un second job) : Analyse des données → Conception → Construction → Vérification. **Arrêter** coupe le travail ; la version enregistrée ne bouge pas.
+4. **Certification par portes** G0–G7. Une porte obligatoire ratée bloque (pas de score moyen). Réponses types :
+   - `Application créée et certifiée : 4/4 exigences. Dernière lecture : 23:41.`
+   - `4/5 exigences ; coût d'acquisition client (CAC) manque. Non certifiée complète.`
+5. **Vivre avec l'interface** : **Ask** (lecture : « Quel est le taux de conversion ? » → `15,32 %, observé à 23:28, source …`) ou **Agent** (« Ajoute un classement par client », « Retire la colonne statut », « Simule +5 % », « Renomme en … », « Mets en pause la campagne la moins rentable »). Une demande d'écriture en Ask est refusée, avec l'invitation à passer en Agent.
+6. **Actions** : carte dans le fil (action, arguments, **Oui, exécuter** / **Non**). Le jeton de confirmation est lié aux arguments exacts : toute modification l'invalide (HTTP 428/409). Après un délai d'écriture dépassé, l'état devient « incertain » et **rien n'est renvoyé**.
+7. **Versions** : sélecteur v1, v2… dans l'en-tête du panneau, restauration d'une version publiée, historique à gauche (renommer, dupliquer, exporter, archiver, supprimer avec confirmation). La réouverture ne rejoue aucune action.
+8. **Journal** (colonne de gauche) : déroulé réel de chaque génération, portes de certification, sans chaîne de pensée simulée.
 
-## Brancher un vrai LLM
+## Ports
 
-### Mercury 3 (défaut)
+| Service | Port | Rôle |
+|---|---|---|
+| frontend (Vite, React 19, Tailwind 4, composants façon shadcn) | 5173 | Studio |
+| api-gateway (Fastify) | 4000 | REST + SSE, pont des apps, actions, Basic Auth en mode public. **Seul service joint par le navigateur** |
+| ai-engine | 4001 | Orchestration, découverte, contrats, génération, évaluation |
+| validator | 4002 | Contrôles statiques de la spec et du HTML généré |
+| storage (`node:sqlite`) | 4003 | Projets, versions, jobs, événements, snapshots, conversation |
+| mcp-hub | 4004 | **Seule autorité d'appel MCP** (liste blanche, confirmations, snapshots) |
+| app-agents | 4005 | Backend MCP de chaque app (`/apps/:id/mcp`) + agent local |
+| voice-gateway | 4006 | Arbitrage des confirmations vocales, STT/TTS serveur si clé OpenAI |
 
-1. Créez une clé sur <https://platform.inceptionlabs.ai> (rubrique *API Keys*).
-2. Dans `.env` :
-   ```env
-   LLM_PROVIDER=inception
-   INCEPTION_API_KEY=votre_cle
-   LLM_MODEL=mercury-3
-   LLM_REASONING_EFFORT=instant  # instant | low | medium | high
-   ```
-3. Redémarrez `npm run dev`. Le badge en haut à droite affiche `mercury-3 · Inception (diffusion)`.
+Chaque service expose `GET /health` ; `GET :4000/health` agrège.
 
-Endpoint utilisé : `POST https://api.inceptionlabs.ai/v1/chat/completions`, compatible OpenAI. Il prend en charge `stream`, `diffusing`, `tools`, `reasoning_effort` et `max_completion_tokens`.
+## LLM
 
-> ⚠️ D'après la documentation d'Inception (consultée le 19/11/2026), **l'API Mercury ferme** : elle reste disponible jusqu'au **28 décembre 2026**. Prévoyez un provider de repli (voir ci-dessous) : il suffit de changer `LLM_PROVIDER`.
+Ordre de résolution (lu dans `.env`, jamais journalisé ni envoyé au navigateur ou aux apps) :
 
-### Autres providers
+1. `INCEPTION_API_KEY` → **Inception Mercury** (`https://api.inceptionlabs.ai/v1`, modèle `mercury-3`, `reasoning_effort: medium`). Variables facultatives : `FORMULE_MODEL`, `INCEPTION_REASONING_EFFORT`, `INCEPTION_BASE_URL`.
+2. `OPENAI_API_KEY` (+ `OPENAI_BASE_URL`) → tout fournisseur OpenAI-compatible.
+3. Aucune clé → mock déterministe (mode démo).
 
-```env
-# OpenAI ou tout service compatible (OpenRouter, Groq, Mistral, Ollama…)
-LLM_PROVIDER=openai
-LLM_API_KEY=...
-LLM_MODEL=gpt-4o-mini
-LLM_BASE_URL=https://openrouter.ai/api/v1      # optionnel
-
-# Anthropic
-LLM_PROVIDER=anthropic
-LLM_API_KEY=...
-LLM_MODEL=claude-…
-```
-
-Sans clé, le moteur bascule sur le **mock**, et `GET /api/config` indique la raison (`fallback`). `LLM_PROVIDER=mock` force le mode démo.
+Le LLM **propose** des exigences (mots-clés d'outils et de champs) ; le code vérifie tout : outil présent dans le catalogue réel, permission, champs présents dans le brut, liaison vérifiée dans le DOM. Si le LLM est injoignable ou répond hors JSON, Formule le dit (`GET :4001/llm`) et revient à la compréhension déterministe. Le Studio n'affiche jamais le nom du modèle.
 
 ## MCP
 
-### Configuration
+- **Panneau MCP** (bouton en bas du champ, avec le nombre d'outils autorisés) : activer/désactiver un serveur, classer chaque outil en *Refusé / Lecture / Écriture*, ajouter un serveur **HTTP streamable** ou **SSE** avec jeton Bearer. Le jeton n'est plus jamais affiché qu'en `••••` + 4 derniers caractères.
+- **Refus par défaut** : un outil non classé est refusé. Les annotations du fournisseur (`readOnlyHint`…) sont affichées comme indices, jamais comme autorisations.
+- **stdio** : désactivé depuis l'UI (`FORMULE_ALLOW_STDIO_UI=1` pour l'autoriser). Ajout par la ligne de commande :
 
-`mcp.config.json` (racine) :
-
-```json
-{
-  "servers": [
-    { "id": "demo", "transport": "stdio", "command": "npx", "args": ["tsx", "packages/mcp-demo-server/src/index.ts"],
-      "enabled": true, "allowedTools": ["get_weather", "get_time", "calculate", "list_notes", "add_note"], "writeTools": [] },
-    { "id": "distant", "transport": "http", "url": "https://exemple.com/mcp", "auth": { "secret": true },
-      "enabled": true, "allowedTools": "*" }
-  ]
-}
+```bash
+# serveurs officiels, données publiques réelles (vega-datasets)
+npm i --prefix ~/mcp @modelcontextprotocol/server-filesystem @modelcontextprotocol/server-everything @modelcontextprotocol/server-memory vega-datasets
+npm run mcp:add -- --id fs --name "Fichiers" --read read_text_file,list_allowed_directories \
+  -- node ~/mcp/node_modules/@modelcontextprotocol/server-filesystem/dist/index.js ~/mcp/node_modules/vega-datasets/data
+npm run mcp:add -- --id everything --name "MCP Everything" --read get-structured-content \
+  -- node ~/mcp/node_modules/@modelcontextprotocol/server-everything/dist/index.js
+npm run mcp:add -- --id memory --name "Mémoire" --read read_graph,search_nodes \
+  -- node ~/mcp/node_modules/@modelcontextprotocol/server-memory/dist/index.js
+npm run e2e:real   # parcours contre ces serveurs réels
 ```
 
-- `transport` : `stdio` (commande locale), `http` (HTTP streamable) ou `sse` (ancien transport).
-- `allowedTools` : la liste blanche. Un outil absent de cette liste n'est **jamais** appelable. Les serveurs ajoutés depuis l'UI démarrent avec une liste vide.
-- **Outils en écriture** : un outil est traité comme tel quand son annotation MCP `readOnlyHint` n'est pas `true`, ou quand il figure dans `writeTools`. Ces outils ne sont **jamais** proposés au modèle pendant la génération. À l'exécution, ils demandent une confirmation dans l'UI, puis `mcp-hub` refuse l'appel (HTTP 428) tant que `confirmed: true` n'est pas fourni.
-- Le panneau 🔌 MCP de l'UI permet d'activer ou désactiver un serveur, de cocher les outils autorisés, et d'ajouter ou retirer des serveurs. Les changements sont sauvegardés dans `mcp.config.json`.
-- **Authentification (serveurs HTTP streamable / SSE)** : champ « Jeton (Bearer) » (et en-têtes personnalisés en mode avancé) dans le formulaire, ou « Ajouter / Remplacer le jeton » sur un serveur existant. Le jeton est envoyé en `Authorization: Bearer …` sur chaque requête (POST, flux GET/SSE, reconnexions). Il est stocké uniquement dans `data/secrets/mcp-servers.json` (chmod 600, dossier chmod 700, ignoré par git ; `MCP_SECRETS_PATH` pour changer) ou dans le `.env` via `MCP_TOKEN_<ID>` (ex. `MCP_TOKEN_N8N`, prioritaire). `mcp.config.json` ne garde que la référence `"auth": { "secret": true }` ; l'API ne renvoie que « jeton enregistré ••••xxxx ». Un 401 affiche : « Le serveur demande une authentification : ajoute un jeton Bearer ». Les anciens `headers` en clair de la config sont migrés automatiquement.
-- L'ajout d'un serveur **stdio** depuis l'UI revient à exécuter une commande locale. Il est donc désactivé par défaut (`MCP_ALLOW_UI_STDIO=false`) : éditez plutôt le fichier.
+- **Serveurs « code mode »** (un seul outil `execute`, ex. CoinGecko v9) : Formule n'envoie **jamais** de code écrit par le modèle. Il n'envoie que des **gabarits relus** (`services/ai-engine/src/discovery/code-adapters.ts`) dont les paramètres sont validés (identifiants `[a-z0-9-]`, devise sur liste, bornes). Tout autre outil exigeant du code est refusé avec la raison.
+- **CoinGecko** (testé sur le serveur MCP officiel `@coingecko/coingecko-mcp`, SDK réel, bac à sable Deno réel) :
 
-### Pont d'exécution des mini-apps
-
-Le frontend injecte dans l'iframe un petit script qui expose :
-
-```js
-const meteo = await window.mcp.call('demo__get_weather', { city: 'Lyon' }); // Promise<résultat JSON>
-const outils = await window.mcp.tools();
+```bash
+npm i --prefix ~/mcp @coingecko/coingecko-mcp deno@2.8.3        # Deno ≤ 2.8 : la 2.9 refuse le socket du bac à sable
+export COINGECKO_DEMO_API_KEY=CG-…                              # clé démo gratuite (coingecko.com/api)
+npm run mcp:add -- --id coingecko --name "CoinGecko" --read execute,search_docs \
+  --secret-env COINGECKO_DEMO_API_KEY --env "COINGECKO_ENVIRONMENT=demo,PATH=$HOME/mcp/node_modules/.bin:/usr/local/bin:/usr/bin:/bin" \
+  -- node ~/mcp/node_modules/@coingecko/coingecko-mcp/index.js
 ```
 
-Le parent n'accepte que les messages venant de **son** iframe (`event.source`). Il vérifie la liste blanche et affiche la boîte de confirmation pour les écritures, puis appelle `POST /api/mcp/call`. La gateway limite à 60 appels par minute et à 20 Ko d'arguments. Le hub applique la politique et appelle le serveur MCP.
+  Demandes reconnues : « top 10 des cryptos en euros », « historique du bitcoin sur 90 jours avec une simulation », « quel est le prix de l'ethereum en dollars ? ». La clé est stockée dans `data/secrets/secrets.json` (chmod 600), jamais dans `servers.json`, et n'apparaît qu'en `NOM=••••`. Variables : `--env` (non secrètes), `--secret-env` (lues dans ton environnement au moment de l'enregistrement), `--demo true` pour marquer un serveur de données synthétiques.
+- **Arguments obligatoires** : pris dans la demande (nom de fichier `seattle-weather.csv`, valeur d'énumération citée, texte entre « guillemets », nombres) ou découverts par un outil de lecture du même serveur (`list_allowed_directories`). Jamais inventés : sinon Formule nomme l'argument manquant.
+- **Résultats** : `structuredContent` en priorité, sinon JSON du texte, sinon CSV (conversion **déclarée** dans la couverture), sinon texte = documentation, **jamais une mesure**.
+- **Pagination** suivie dans un budget (10 pages) ; au-delà, couverture partielle affichée.
+- **Fichiers joints** (CSV/JSON, 3 max) : restent sur la machine, exposés comme source en lecture seule « Fichiers joints ».
+- Serveur **démo** intégré (`servers/demo-mcp`, stdio) : revenus, pipeline, publicités, inscriptions. Données synthétiques **marquées démo** partout (badge DÉMO, provenance « (démo) »).
 
-### Serveur de démo
+## Demandes complexes : ne pas échouer
 
-`packages/mcp-demo-server` : `get_weather` (factice, déterministe), `get_time`, `calculate`, `list_notes`, `add_note` (écriture). Pour tester le transport HTTP : `npm run start:http -w packages/mcp-demo-server`, puis activez « demo-http » dans le panneau MCP.
+Une demande en sections (« 1. Indicateurs », « 2. Radar »…, comme *AI Intelligence Monitor* dans `packages/formule-bench/fixtures/`) n'est jamais bloquée par un argument manquant :
 
-## Étendre
+- **Arguments synthétisés depuis le schéma** (`services/ai-engine/src/discovery/args-synth.ts`) : énumérations rapprochées du français (*tendance* → `trendingScore`, *modèles* → `model`), « top 20 » → `limit`, défauts du schéma, **exemples publiés par le serveur dans la description de l'outil** (validés contre le schéma, choisis selon l'intention, jamais s'ils citent un identifiant précis absent de la demande), puis proposition du LLM validée contre le schéma.
+- **Une source par section**, choisie en lisant les candidats et en gardant celle dont les champs réels couvrent le plus de puces ; périmètre limité aux serveurs désignés (« Utilise `outil` pour … ») ou nommés ; outils exclus (« N'utilise pas `x` ») jamais appelés, même avec une faute de frappe.
+- **Réponses Markdown** converties (enregistrements « ### » + « **Clé :** valeur », tableaux, nombres abrégés signalés « ≈ approx. », tags `clé:valeur`).
+- **Livraison de ce qui existe** : chaque puce devient une exigence ; sans champ réel, elle est affichée « Donnée indisponible » avec la raison, et l'app est livrée « partielle » plutôt que bloquée.
+- **Style demandé** appliqué à l'app : accent (orange…), police monospace, fond graphite, navigation latérale par section, filtres de catégories, liens vers les sources (HTTPS, ouverts par le Studio).
 
-- **Nouveau provider** : implémenter `LLMProvider` (`services/ai-engine/src/types.ts` : `stream` et `chatWithTools`), puis l'enregistrer dans `providers/index.ts`.
-- **Nouvelle app du mock** : ajouter un fichier HTML dans `services/ai-engine/src/mock/apps/` et une entrée (mots-clés et plan) dans `mock/catalog.ts`.
-- **Nouvelle règle de sécurité** : ajouter une regex à `FORBIDDEN` ou `SUSPICIOUS` dans `services/validator/src/validate.ts`, avec un test.
-- **Prompts système** : `services/ai-engine/src/prompts.ts`.
-- **Nouveau micro-service** : dossier `services/<nom>` avec `/health`, une route dans la gateway et une entrée dans `docker-compose.yml`.
+`npm run e2e:sections` rejoue ce scénario. Serveur de test de contrat : `servers/hf-contract-mcp` (noms, schémas, descriptions et formats du serveur Hugging Face, valeurs synthétiques) :
 
-## Astuces de démo (mock)
+```bash
+npm run mcp:add -- --id huggingface --name "Hugging Face (test de contrat)" --demo true \
+  --read hub_repo_search,hub_repo_details,hf_fs,hf_whoami -- node --import tsx "$PWD/servers/hf-contract-mcp/src/index.ts"
+```
 
-- Itérations reconnues : « thème clair », une couleur (« couleur verte »), « titre : … », « plus grand », « coins arrondis ».
-- Ajoutez `[bug]` au prompt pour injecter une erreur JS : le validator la détecte et la correction automatique s'enclenche.
+Avec le vrai serveur : ajoute `https://huggingface.co/mcp` en HTTP depuis le panneau MCP (jeton facultatif), puis coche les outils en lecture.
+
+## Cœur agnostique et packs
+
+Le moteur ne connaît aucun fournisseur MCP. Il lit le catalogue (`tools/list`), le schéma JSON des arguments, les exemples publiés par le serveur et la forme réelle des réponses. Tout savoir propre à un service vit dans un **pack** JSON optionnel, dans `packs/` (ou `data/packs/`, ou `FORMULE_PACKS_DIR`) :
+
+- `recipes` / `knownMissing` : indicateurs métier prêts à l’emploi ;
+- `taxonomies` : regroupements de catégories pour les filtres ;
+- `codeTemplates` : gabarits de code **relus** pour les outils qui exigent du code (aucun code écrit par le modèle n’est envoyé) ;
+- `synonyms` : vocabulaire de la demande vers les valeurs d’énumération.
+
+Un pack ne s’active que si ses outils sont présents au catalogue. Sans pack, tout fonctionne quand même : arguments synthétisés depuis le schéma, filtres dérivés des valeurs réelles, source choisie par preuve discriminante. Un outil qui exige du code sans pack est refusé avec une raison lisible. `FORMULE_PACKS_DISABLED=1` désactive tous les packs.
+
+## Moteur de graphiques
+
+`services/ai-engine/src/semantic/charts.ts` choisit les graphiques en trois temps :
+
+1. **Profil** des données lues : mesures, catégories (2–24 valeurs), temps, noms, signe, additivité, asymétrie, champs cités dans la demande (vocabulaire FR↔EN).
+2. **Intentions** de la demande : tendance, part, classement, distribution, corrélation, comparaison, calendrier.
+3. **Recommandation notée** : adéquation données × intention × champs cités ; une vue par famille d’abord, pas de doublon sur les mêmes champs, budget par source (5, ou 4 par section).
+
+Règles de lisibilité : camembert seulement sur une mesure additive et ≤ 8 parts ; barres divergentes pour une mesure signée ; histogramme seulement avec ≥ 10 points ; calendrier seulement avec ≥ 20 jours ; jamais de courbe sur un instantané.
+
+## Où vont les secrets
+
+| Secret | Emplacement |
+|---|---|
+| Clé LLM | `.env` à la racine (ignoré par git, `chmod 600`) ou variables d'environnement |
+| Jetons MCP | `data/secrets/secrets.json` (`chmod 600`) ou `FORMULE_SECRET_<ID>` |
+| Clé de signature des confirmations, clé « humain » de la gateway | même fichier, générées au premier démarrage |
+
+Jamais dans les logs (expurgation pino + `redact()`), les événements, les prompts, les bundles d'app (contrôle du validateur) ni le navigateur. Le processus stdio d'un serveur MCP reçoit un environnement nettoyé.
+
+## Design
+
+- **Noir et blanc**, façon OpenAI / Apple : polices système (SF Pro sur Mac, repli Geist/Inter), chiffres tabulaires, boutons pilules, cartes très arrondies, verre dépoli pour les panneaux, libellés en casse normale. Aucun accent décoratif : l'état actif est blanc.
+- **La couleur est réservée aux graphiques**, et elle est **dynamique** : palette OKLCH aux teintes vives (bleu, vert, orange, rose, violet, cyan, jaune, rouge façon couleurs système), dont le point de départ dépend de l'interface (titre + accent) et qui reste distincte quel que soit le nombre de séries (angle d'or au-delà de 8). Les barres de comptage et le calendrier utilisent une rampe d'intensité selon la valeur.
+- **Plusieurs graphiques par page, de toutes formes**, choisis d'après le contrat réel des données : KPI avec mini-courbe (et jauge pour les %), courbes, anneau de répartition, barres, classement, histogramme, nuage de points (avec coefficient r), calendrier quotidien, simulation en éventail, tableau.
+- Graphiques **shadcn/ui `chart`** (Recharts). Le composant est préinstallé dans le gabarit (`packages/app-runtime/src/components/ui/chart.tsx`, `components.json`) pour fonctionner hors ligne ; `npm run shadcn:chart -w @formule/app-runtime` lance `npx shadcn@latest add chart --yes`. Dans le workspace de génération, l'agent exécute `shadcn add` via `execFile` sur **liste blanche** (`FORMULE_SHADCN_ALLOW`, défaut `chart`, ex. `chart,@shadcn-dashboard/sales-trend-chart`) seulement si `FORMULE_SHADCN_ONLINE=1` et si le composant manque.
+
+## Applications générées
+
+- **Contrat avant le code** : le moteur écrit une spec typée (`packages/contracts/src/spec.ts`) ; elle est compilée par un gabarit Vite + React + Tailwind 4 (`packages/app-runtime`) en **un seul `index.html`** (vite-plugin-singlefile), dans un workspace isolé par génération (écriture limitée à `src/**` et `index.html`, `execFile` sans shell, env sans clé, délai borné).
+- **Instruments selon le besoin** : KPI (valeur, unité, fraîcheur), courbe (trous conservés, horodatage natif, infobulle), tableau (tri, filtre, pagination), classement (métrique + population), simulation, actions typées.
+- **Simulations** : éventail pessimiste / central / optimiste autour de la dernière observation, repère « Aujourd'hui », projection par période, animation à chaque changement d'hypothèse, préréglages, fenêtre 60/180/tout. Hypothèses listées, aucun effet externe, calcul reproductible, toujours étiqueté SCÉNARIO.
+- **États** : initial, chargement, prêt, vide, partiel, obsolète, erreur, indisponible ; toute erreur propose une action. Une panne d'actualisation garde la dernière donnée **marquée obsolète**.
+- **Sécurité** : iframe `sandbox="allow-scripts allow-forms"` **sans** `allow-same-origin`, CSP `connect-src 'none'`, pont `postMessage` filtré par `event.source`, liste blanche = requêtes de la version certifiée + outils `app__*`, 60 appels/min, arguments ≤ 20 Ko et identiques à ceux déclarés. Un aperçu non certifié ne peut déclencher aucune action.
+
+## Certification
+
+| Porte | Contrôle |
+|---|---|
+| G0 | Outils du catalogue réel, lectures classées « read », actions classées « write » |
+| G1 | Lecture réelle réussie, empreinte du brut, pas de documentation seule, couverture déclarée |
+| G2 | Spec valide ; chaque chemin lié existe dans le contrat, est numérique, sans unités mélangées |
+| G3 | Build vite OK + validateur HTML (scripts externes, cookies, `window.top`, URL inconnues, secrets) |
+| G4 | Calcul de l'app = **oracle indépendant** (implémentation séparée) |
+| G5 | jsdom dans un processus fils non privilégié : chaque vue présente, valeur du DOM = valeur attendue, tri testé, pas d'écran blanc |
+| G6 | Exigences obligatoires couvertes (vue vérifiée dans le DOM) et données de moins de 24 h |
+| G7 | Vues non demandées strictement inchangées, publication possible, version précédente restaurable |
+
+Réparation bornée (1 tentative) : les vues mal liées sont retirées et leurs exigences nommées comme manquantes.
+
+## Tests
+
+- `npm test` — 55 tests : machine à états, enveloppes, confirmations, certification, stockage (promotion atomique, restauration, isolation), validateur, pont, voix, LLM, et `packages/formule-bench` (cas P0).
+- `npm run e2e` — parcours complet contre une instance lancée (démo) : question simple, refus en Ask, création, certification, évolution sans recollecte, non-régression, livraison partielle, action confirmée, arguments modifiés refusés, pas de double exécution.
+- `npm run e2e:real` — contre les serveurs MCP officiels : CSV réels (1 461 jours de météo de Seattle, CO₂ de Mauna Loa), objet structuré, argument manquant non inventé, graphe vide.
+- CoinGecko : chaîne réelle (serveur MCP officiel → SDK → Deno → gabarit) validée jusqu'à la requête HTTP ; sans clé → « autorisation manquante », sans réseau → « panne du fournisseur ». La transformation des réponses a été vérifiée avec `COINGECKO_BASE_URL` pointé sur un serveur reproduisant le **format** de l'API v3 avec des valeurs **synthétiques** (marquées DÉMO) : 2 apps certifiées 5/5.
+
+| Cas P0 | Où |
+|---|---|
+| MCP inédit imbriqué, documentation seule, binding absent du DOM, série irrégulière, exigence manquante, deux unités, rupture de schéma, simulation, incrément, panne runtime | `packages/formule-bench/test/p0.test.ts` |
+| Vide / zéro / null / date invalide, injection détectée, pas de transition invalide, événements dédupliqués | `packages/contracts/test` |
+| Suppression, restauration, versions, nonce à usage unique | `services/storage/test` |
+| Pagination, timeout d'écriture sans second envoi, coupure SSE | vérifiés en e2e (voir limites) |
+
+## Docker
+
+```bash
+docker compose up --build    # http://localhost:4000 (Studio compilé servi par la gateway)
+```
+
+Données persistées dans le volume `formule-data`. `FORMULE_PUBLIC=1` + `FORMULE_BASIC_PASS` activent la Basic Auth.
 
 ## Limites connues
 
-- **Mercury 3 / API Inception : arrêt annoncé le 28 décembre 2026** → basculer ensuite `LLM_PROVIDER`/`LLM_BASE_URL` vers un autre modèle compatible OpenAI.
-- Mode agent plus lent que le mode direct (≈ 30–40 s contre ≈ 10 s) ; le premier `shadcn add` dépend du réseau (repli local sinon).
-- Les images Docker (dont le build du template agent) n'ont pas été testées dans cet environnement.
-- Le mode public dépend d'une sortie réseau compatible avec le tunnel (voir plus haut).
+- **Le modèle n'écrit pas de code TSX** : il propose des exigences ; la spec déclarative est compilée par un runtime fixe. C'est volontaire (aucun code arbitraire du modèle dans le DOM), mais les vues possibles sont limitées au catalogue d'instruments (KPI, courbe, tableau, classement, simulation, note). Pas encore de scènes 2D/3D (PixiJS/three.js non intégrés).
+- **Sans LLM**, la compréhension repose sur un lexique (revenu, pipeline, publicités, inscriptions, mesures manquantes connues) et sur un mode générique (outil nommé, fichier cité). Avec Mercury, la compréhension est plus large mais reste vérifiée par le code. L'appel à Mercury n'a **pas pu être testé ici** (réseau sortant bloqué dans l'environnement de construction) : `GET :4001/llm` indique s'il répond chez toi.
+- **Redémarrage du moteur** : les jobs en cours sont marqués FAILED (« interrompu, relance la demande »), pas repris.
+- **Voix** : reconnaissance et synthèse du navigateur (Chrome/Edge) ; STT/TTS serveur seulement avec `OPENAI_API_KEY` (Mercury ne fait pas d'audio).
+- **Évaluateur** : jsdom (pas de vrai moteur de rendu) ; le canvas n'est pas vérifié pixel par pixel, seulement le nombre de points liés.
+- **Builds** : délai et taille bornés, mais pas de quotas CPU/RAM au niveau OS (à confier à Docker/cgroups).
+- Les tests de timeout d'écriture et de pagination passent par le hub réel (e2e), pas par la suite unitaire.
+- Docker Compose est fourni mais n'a pas été exécuté dans l'environnement de construction.
+- Le serveur MCP Hugging Face réel (`huggingface.co`) n'était pas joignable ici : le scénario a été validé sur `servers/hf-contract-mcp`, qui suit le code source public du serveur (formats de sortie compris). Les sections « Auteurs des publications », « colonnes/configurations/volumes » et « aperçu des données » restent « Donnée indisponible » tant qu'aucun outil lu ne fournit ces champs.
+- Le registre shadcn (`ui.shadcn.com`) et les blocs `@shadcn-dashboard` n'étaient pas joignables ici : le composant `chart` est une réécriture fidèle de l'API shadcn ; lance `npm run shadcn:chart -w @formule/app-runtime` sur une machine connectée pour reprendre la version officielle. Avec `FORMULE_SHADCN_ONLINE=1`, `shadcn add` peut installer des dépendances dans le `node_modules` partagé : à réserver à un environnement de confiance.
+- Fichiers d'app plus lourds avec Recharts (~0,8 Mo par version, un seul fichier).
+- CoinGecko n'a pas pu être interrogé avec de vrais cours (`api.coingecko.com` inaccessible depuis l'environnement de construction, pas de clé fournie). Le serveur MCP distant sans clé (`https://mcp.api.coingecko.com/mcp`) peut aussi être ajouté en HTTP depuis le panneau MCP ; ses outils (non « code mode ») passent par le mode générique.
 
-- Une seule passe de correction automatique, comme spécifié. Avec un vrai LLM, une erreur peut subsister : elle est alors affichée et la version est enregistrée avec son rapport.
-- Le validator fait une analyse **statique** (syntaxe et motifs dangereux). Ce n'est pas une analyse d'exécution : la vraie barrière reste l'iframe sandboxée sans `allow-same-origin`, où `localStorage` est indisponible et les apps doivent utiliser `try/catch`.
-- Avec Mercury, `diffusing` s'arrête parfois avant la fin sur les longs fichiers (`finish_reason=length`). Le moteur relance alors en streaming classique, ce qui rallonge la génération.
-- La confirmation des écritures MCP est portée par le frontend : la gateway fait confiance au drapeau `confirmed`. C'est adapté à un usage local mono-utilisateur ; ajoutez une authentification avant toute exposition réseau.
-- Pas d'authentification ni de multi-utilisateur. Le mock n'« invente » pas d'app sur mesure : hors catalogue, il produit une app générique.
+## Arborescence
+
+```
+packages/contracts      schémas versionnés, machine à états, enveloppes, agrégats, certification, simulation
+packages/service-kit    Fastify, health, appels internes, .env, secrets
+packages/app-runtime    gabarit des apps générées (React + Tailwind 4 → index.html unique)
+packages/formule-bench  fixtures et scénarios P0
+services/*              gateway, ai-engine, validator, storage, mcp-hub, app-agents, voice-gateway
+servers/demo-mcp        serveur MCP de démonstration (stdio)
+frontend                Studio + Journal
+scripts                 health, e2e, e2e-real, mcp-add
+```

@@ -1,0 +1,3 @@
+{ "specVersion": 1, "title": "Exemple", "mission": "Gabarit de développement : aucune donnée réelle.", "demo": true,
+  "requirements": [], "queries": [], "views": [{ "kind": "note", "id": "n", "title": "Gabarit", "text": "Le workspace de build remplace ce fichier.", "requirementIds": [] }],
+  "actions": [], "commands": [], "style": { "density": "confortable", "accent": "bleu" } }

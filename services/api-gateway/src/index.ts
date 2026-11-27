@@ -1,598 +1,177 @@
-/**
- * api-gateway — point d'entrée unique du frontend.
- *  - /api/generate : orchestre ai-engine → validator (→ correction unique) → storage, en SSE
- *  - /api/projects* : proxy vers storage (+ validation des éditions manuelles)
- *  - /api/mcp/*     : proxy vers mcp-hub, dont /api/mcp/call (pont des mini-apps, liste blanche + confirmation)
- *  - /voice/*       : proxy HTTP + WebSocket vers voice-gateway (micro / TTS Google), même en mode public (port unique)
- */
-import { BIND_HOST } from './env.ts';
-import Fastify, { type FastifyReply } from 'fastify';
-import cors from '@fastify/cors';
+import { existsSync, readFileSync } from 'node:fs';
+import path from 'node:path';
 import fastifyStatic from '@fastify/static';
-import { existsSync, readFileSync, statSync } from 'node:fs';
-import { resolve } from 'node:path';
-import { timingSafeEqual, createHash, createHmac, randomUUID } from 'node:crypto';
-import { asLog, localLog, type GenLog } from './journal.ts';
-import { RELAY_BUDGET_MS, RELAY_TRIES, linkCut, relayAgain } from './link.ts';
-import { connect as netConnect } from 'node:net';
+import { call, createService, findRepoRoot, listen, PORTS, serviceUrl, ServiceError, type ServiceName } from '@formule/service-kit';
+import { humanKey } from '@formule/service-kit/secrets';
+import type { AppSpec } from '@formule/contracts';
+import { APP_CSP, decideBridge, bridgeWhitelist } from './bridge.js';
+import { RateLimiter } from './ratelimit.js';
 
-const PORT = Number(process.env.GATEWAY_PORT ?? 4000);
-const AI = process.env.AI_ENGINE_URL ?? 'http://localhost:4001';
-const VALIDATOR = process.env.VALIDATOR_URL ?? 'http://localhost:4002';
-const STORAGE = process.env.STORAGE_URL ?? 'http://localhost:4003';
-const MCP = process.env.MCP_HUB_URL ?? 'http://localhost:4004';
-const AGENTS = process.env.APP_AGENTS_URL ?? 'http://localhost:4005';
-const VOICE = process.env.VOICE_GATEWAY_URL ?? 'http://localhost:4006';
-// Fichier d'accès `user:motdepasse` : s'il existe, tout le site est protégé par Basic Auth (mode public).
-const ACCESS_FILE = resolve(process.env.ACCESS_FILE ?? '../../.access');
-const ACCESS = existsSync(ACCESS_FILE) ? readFileSync(ACCESS_FILE, 'utf8').trim() : '';
-const PUBLIC_MODE = !!ACCESS;
-// En mode public, l'ajout de serveurs stdio depuis l'UI est toujours interdit.
-const ALLOW_UI_STDIO = !PUBLIC_MODE && process.env.MCP_ALLOW_UI_STDIO === 'true';
-const STATIC_DIR = resolve(process.env.STATIC_DIR ?? '../../frontend/dist');
-const RUNTIME_DIR = resolve(process.env.RUNTIME_DIR ?? '../../packages/es-runtime/dist');
-// Bibliothèques de rendu vivant chargées À LA DEMANDE par les mini-apps (pixi.min.js, three.min.js) : jamais dans le bundle de l'app.
-const VENDOR_DIR = resolve(process.env.RUNTIME_VENDOR_DIR ?? '../../packages/es-runtime/vendor');
-const GEN_PER_HOUR = Number(process.env.GEN_RATE_PER_HOUR ?? 40);
+const app = await createService('api-gateway', undefined, { defaultHealth: false });
+const limiter = new RateLimiter(60, 60_000);
+type B = Record<string, any>;
 
-type Json = Record<string, any>;
-type Validation = { ok: boolean; errors: Array<{ code: string; message: string; line?: number }>; warnings: unknown[] };
-
-async function call(url: string, init?: RequestInit & { json?: unknown }): Promise<{ status: number; body: any }> {
-  const { json, ...rest } = init ?? {};
-  const res = await fetch(url, {
-    ...rest,
-    headers: { ...(json !== undefined ? { 'Content-Type': 'application/json' } : {}), ...(rest.headers ?? {}) },
-    body: json !== undefined ? JSON.stringify(json) : rest.body,
-  });
-  const text = await res.text();
-  let body: any = text;
-  try { body = text ? JSON.parse(text) : null; } catch { /* texte */ }
-  return { status: res.status, body };
-}
-
-/** La construction dure plus que le délai par défaut d'undici (5 min sans octet). Le moteur envoie des pings, mais un build peut bloquer la boucle. */
-let engineAgent: { close?: () => Promise<void> } | undefined;
-async function engineDispatcher() {
-  if (engineAgent) return engineAgent;
-  try {
-    const undici = await import('undici') as { Agent: new (opts: { bodyTimeout: number; headersTimeout: number }) => { close?: () => Promise<void> } };
-    engineAgent = new undici.Agent({ bodyTimeout: 0, headersTimeout: 60_000 });
-  } catch { /* fetch par défaut */ }
-  return engineAgent;
-}
-
-const LIAISON = 'La liaison a été coupée pendant la construction. Relance la génération.';
-
-/** Le moteur peut mettre du temps à réécouter après un redémarrage. Un seul budget pour toute la reprise. */
-async function waitListening(url: string, signal: AbortSignal, deadline: number) {
-  while (Date.now() < deadline) {
-    if (signal.aborted) return false;
-    try {
-      const r = await fetch(url, { signal: AbortSignal.timeout(800) });
-      if (r.ok) return true;
-    } catch { /* pas encore là */ }
-    const pause = Math.min(400, deadline - Date.now());
-    if (pause <= 0) break;
-    await new Promise((r) => setTimeout(r, pause));
-  }
-  return false;
-}
-
-/** Lit le flux SSE d'un service et relaie chaque événement ; renvoie l'événement `result`. Une coupure réseau est rejouée jusqu'au retour du moteur. */
-async function relaySse(url: string, payload: unknown, onEvent: (e: Json) => void, signal: AbortSignal): Promise<Json> {
-  const deadline = Date.now() + RELAY_BUDGET_MS;
-  let last: unknown;
-  let told = false;
-  for (let attempt = 0; attempt < RELAY_TRIES; attempt++) {
-    if (signal.aborted) break;
-    try {
-      return await readSse(url, payload, onEvent, signal);
-    } catch (e) {
-      last = e;
-      if (signal.aborted || !relayAgain(e, attempt)) break;
-      if (!told) {
-        told = true;
-        onEvent({ type: 'log', ...localLog('Passerelle', 'reprise', 'Reprise de la liaison') });
-        onEvent({ type: 'phase', phase: 'plan', label: 'Reprise de la liaison' });
-      }
-      const back = await waitListening(`${AI}/health`, signal, deadline);
-      if (!back) break;
-    }
-  }
-  if (last && linkCut(last)) throw new Error(LIAISON);
-  throw last instanceof Error ? last : new Error(LIAISON);
-}
-
-async function readSse(url: string, payload: unknown, onEvent: (e: Json) => void, signal: AbortSignal): Promise<Json> {
-  const dispatcher = await engineDispatcher();
-  const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), signal, ...(dispatcher ? { dispatcher } : {}) });
-  if (!res.ok || !res.body) throw new Error(`${url} : HTTP ${res.status}`);
-  const reader = res.body.getReader();
-  const dec = new TextDecoder();
-  let buf = '';
-  let result: Json | null = null;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += dec.decode(value, { stream: true });
-    let i: number;
-    while ((i = buf.indexOf('\n\n')) >= 0) {
-      const chunk = buf.slice(0, i);
-      buf = buf.slice(i + 2);
-      const line = chunk.split('\n').find((l) => l.startsWith('data:'));
-      if (!line) continue;
-      const e = JSON.parse(line.slice(5).trim()) as Json;
-      if (e.type === 'result') result = e;
-      else if (e.type === 'error') throw Object.assign(new Error(String(e.message ?? 'erreur')), { delivered: true });
-      else onEvent(e);
-    }
-  }
-  if (!result) throw new Error('flux interrompu sans résultat');
-  return result;
-}
-
-const app = Fastify({ logger: { level: 'warn' }, bodyLimit: 5 * 1024 * 1024, trustProxy: '127.0.0.1' });
-if (!PUBLIC_MODE) await app.register(cors, { origin: true });
-
-const clientIp = (req: { headers: Record<string, unknown>; ip: string }) =>
-  String(req.headers['cf-connecting-ip'] ?? req.ip);
-const digest = (s: string) => createHash('sha256').update(s).digest();
-
-// ---- Basic Auth (mode public) + anti force brute ----
-const SESSION_COOKIE = 'es_session';
-const SESSION_TOKEN = ACCESS ? createHmac('sha256', ACCESS).update('es-session-v1').digest('hex') : '';
-function hasSession(cookie?: string) {
-  if (!SESSION_TOKEN || !cookie) return false;
-  const m = new RegExp(`(?:^|;\\s*)${SESSION_COOKIE}=([a-f0-9]{64})`).exec(cookie);
-  return !!m && timingSafeEqual(Buffer.from(m[1]), Buffer.from(SESSION_TOKEN));
-}
-function basicOk(h?: string) {
-  if (!ACCESS || !h?.startsWith('Basic ')) return false;
-  return timingSafeEqual(digest(Buffer.from(h.slice(6), 'base64').toString('utf8')), digest(ACCESS));
-}
-const authFails = new Map<string, { n: number; t: number }>();
-if (PUBLIC_MODE) {
-  const expected = digest(ACCESS);
+// ---------- Basic Auth en mode public ----------
+if (process.env.FORMULE_PUBLIC === '1') {
+  const user = process.env.FORMULE_BASIC_USER ?? 'formule';
+  const pass = process.env.FORMULE_BASIC_PASS;
+  if (!pass) throw new Error('FORMULE_PUBLIC=1 exige FORMULE_BASIC_PASS');
+  const expected = 'Basic ' + Buffer.from(`${user}:${pass}`).toString('base64');
   app.addHook('onRequest', async (req, reply) => {
-    // Session : après une Basic Auth réussie, un cookie HttpOnly signé suffit (utile pour le WebSocket de la voix,
-    // que certains navigateurs ouvrent sans renvoyer l'en-tête Authorization).
-    if (hasSession(req.headers.cookie)) return;
-    // Le runtime des mini-apps est du code statique public : chargé depuis l'iframe sandboxée (origine opaque),
-    // il ne peut pas transmettre la Basic Auth. Aucune donnée ni action derrière cette route.
-    if (req.method === 'GET' && /^\/runtime\/[\w.-]+\.js(\?.*)?$/.test(req.url)) return;
-    const ip = clientIp(req);
-    const f = authFails.get(ip);
-    if (f && f.n >= 20 && Date.now() - f.t < 15 * 60_000) return reply.code(429).send({ error: 'trop de tentatives, réessayez plus tard' });
-    const h = req.headers.authorization ?? '';
-    let ok = false;
-    if (h.startsWith('Basic ')) {
-      const given = Buffer.from(h.slice(6), 'base64').toString('utf8');
-      ok = timingSafeEqual(digest(given), expected);
-    }
-    if (!ok) {
-      if (h) authFails.set(ip, { n: (f && Date.now() - f.t < 15 * 60_000 ? f.n : 0) + 1, t: Date.now() });
-      return reply.code(401).header('WWW-Authenticate', 'Basic realm="Everything Software", charset="UTF-8"').send({ error: 'authentification requise' });
-    }
-    reply.header('Set-Cookie', `${SESSION_COOKIE}=${SESSION_TOKEN}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=43200`);
-  });
-  app.addHook('onSend', async (_req, reply, payload) => {
-    reply.header('X-Content-Type-Options', 'nosniff');
-    reply.header('Referrer-Policy', 'no-referrer');
-    reply.header('X-Frame-Options', 'DENY');
-    reply.header('X-Robots-Tag', 'noindex, nofollow');
-    return payload;
+    if (req.url === '/health') return;
+    if (req.headers.authorization !== expected) { reply.header('www-authenticate', 'Basic realm="Formule"'); return reply.code(401).send({ code: 'auth', message: 'authentification requise' }); }
   });
 }
 
-// ---- Runtime des mini-apps (React + shadcn/ui + lucide + Tailwind navigateur) ----
-const runtimeCache = new Map<string, { mtime: number; body: Buffer }>();
-app.get('/runtime/:file', async (req, reply) => {
-  const file = (req.params as { file: string }).file;
-  if (!/^[\w.-]+\.js$/.test(file)) return reply.code(404).send({ error: 'introuvable' });
-  let path = resolve(RUNTIME_DIR, file);
-  if (!existsSync(path) && existsSync(resolve(VENDOR_DIR, file))) path = resolve(VENDOR_DIR, file);
-  if (!(path.startsWith(RUNTIME_DIR + '/') || path.startsWith(VENDOR_DIR + '/')) || !existsSync(path)) return reply.code(404).send({ error: 'runtime non construit (npm run build -w @es/runtime)' });
-  const mtime = statSync(path).mtimeMs;
-  let c = runtimeCache.get(path);
-  if (!c || c.mtime !== mtime) { c = { mtime, body: readFileSync(path) }; runtimeCache.set(path, c); }
-  return reply
-    .header('Content-Type', 'application/javascript; charset=utf-8')
-    .header('Cache-Control', path.startsWith(VENDOR_DIR) ? 'public, max-age=86400, immutable' : 'public, max-age=300')
-    .header('Access-Control-Allow-Origin', '*')
-    .header('Cross-Origin-Resource-Policy', 'cross-origin')
-    .send(c.body);
-});
-
-// ---- Voix : proxy HTTP vers voice-gateway (la clé Google reste côté serveur) ----
-app.route({
-  method: ['GET', 'POST'], url: '/voice/*',
-  handler: async (req, reply) => {
-    const path = req.url.replace(/^\/voice/, '') || '/';
-    try {
-      const r = await fetch(`${VOICE}${path}`, {
-        method: req.method, headers: req.method === 'POST' ? { 'Content-Type': 'application/json' } : undefined,
-        body: req.method === 'POST' ? JSON.stringify(req.body ?? {}) : undefined, signal: AbortSignal.timeout(60_000),
-      });
-      const text = await r.text();
-      return reply.code(r.status).header('Content-Type', r.headers.get('content-type') ?? 'application/json').send(text);
-    } catch (e) { return reply.code(502).send({ error: `voice-gateway injoignable : ${(e as Error).message}` }); }
-  },
-});
-
-// ---- Frontend de production servi par la gateway (un seul point d'entrée) ----
-if (existsSync(STATIC_DIR)) {
-  await app.register(fastifyStatic, { root: STATIC_DIR, wildcard: false });
-  app.setNotFoundHandler((req, reply) => {
-    if (req.method === 'GET' && !req.url.startsWith('/api/')) return reply.sendFile('index.html');
-    return reply.code(404).send({ error: 'introuvable' });
-  });
-}
-
-// ---- Limite de générations (elles consomment la clé LLM) ----
-const genHits = new Map<string, number[]>();
-function allowGeneration(ip: string) {
-  const now = Date.now();
-  const list = (genHits.get(ip) ?? []).filter((t) => now - t < 3_600_000);
-  if (list.length >= GEN_PER_HOUR) { genHits.set(ip, list); return false; }
-  list.push(now); genHits.set(ip, list); return true;
-}
-
-app.get('/health', async () => {
-  const names = { 'ai-engine': AI, validator: VALIDATOR, storage: STORAGE, 'mcp-hub': MCP, 'app-agents': AGENTS };
-  const services: Json = {};
-  await Promise.all(Object.entries(names).map(async ([n, u]) => {
-    try { const r = await fetch(`${u}/health`, { signal: AbortSignal.timeout(1500) }); services[n] = r.ok ? await r.json() : { status: `HTTP ${r.status}` }; }
-    catch { services[n] = { status: 'injoignable' }; }
+// ---------- Health agrégé ----------
+app.get('/health', async (_r, reply) => {
+  const names = (Object.keys(PORTS) as ServiceName[]).filter((n) => n !== 'api-gateway');
+  const results = await Promise.all(names.map(async (n) => {
+    try { const h = await call<Record<string, unknown>>(n, '/health', { timeoutMs: 3000 }); return [n, { status: 'ok', ...h }]; }
+    catch (e) { return [n, { status: 'down', message: (e as Error).message }]; }
   }));
-  const ok = Object.values(services).every((s: any) => s.status === 'ok');
-  return { service: 'api-gateway', status: ok ? 'ok' : 'dégradé', services };
+  const services = Object.fromEntries(results);
+  const ok = results.every(([, v]) => (v as { status: string }).status === 'ok');
+  reply.code(ok ? 200 : 503);
+  return { service: 'api-gateway', status: ok ? 'ok' : 'degraded', time: new Date().toISOString(), services };
 });
 
-app.get('/api/config', async () => {
-  try { return (await call(`${AI}/health`)).body; } catch { return { status: 'injoignable' }; }
+// ---------- Projets (routes explicites : le navigateur n'atteint jamais les routes internes) ----------
+app.get('/api/projects', async () => call('storage', '/projects'));
+app.patch<{ Params: { id: string }; Body: B }>('/api/projects/:id', async (r) => call('storage', `/projects/${r.params.id}`, { method: 'PATCH', body: { title: r.body.title, archived: r.body.archived } }));
+app.delete<{ Params: { id: string }; Body: B }>('/api/projects/:id', async (r) => {
+  if (r.body?.confirm !== true) throw new ServiceError(428, 'confirmation_required', 'suppression : confirmation requise');
+  return call('storage', `/projects/${r.params.id}`, { method: 'DELETE' });
+});
+app.post<{ Params: { id: string } }>('/api/projects/:id/duplicate', async (r) => call('storage', `/projects/${r.params.id}/duplicate`, { body: {} }));
+app.get<{ Params: { id: string } }>('/api/projects/:id/export', async (r, reply) => { reply.header('content-disposition', `attachment; filename="formule-${r.params.id}.json"`); return call('storage', `/projects/${r.params.id}/export`); });
+app.get<{ Params: { id: string } }>('/api/projects/:id/versions', async (r) => call('storage', `/projects/${r.params.id}/versions`));
+app.get<{ Params: { id: string } }>('/api/projects/:id/messages', async (r) => call('storage', `/projects/${r.params.id}/messages`));
+app.get<{ Params: { id: string } }>('/api/projects/:id', async (r) => call('storage', `/projects/${r.params.id}`));
+app.post<{ Params: { id: string; n: string } }>('/api/projects/:id/versions/:n/restore', async (r) => call('storage', `/projects/${r.params.id}/versions/${Number(r.params.n)}/restore`, { body: {} }));
+app.get<{ Params: { id: string; n: string } }>('/api/projects/:id/versions/:n', async (r) => {
+  const v = await call<B>('storage', `/projects/${r.params.id}/versions/${Number(r.params.n)}`);
+  // la page Studio n'a pas besoin du HTML ni des bruts : seulement les métadonnées
+  return { n: v.n, status: v.status, created_at: v.created_at, was_certified: v.was_certified, certification: v.certification, spec: v.spec, hasHtml: !!v.html };
 });
 
-function openSse(reply: FastifyReply) {
+// ---------- App générée : servie avec une CSP stricte, affichée dans une iframe sandbox sans allow-same-origin ----------
+app.get<{ Params: { id: string; n: string } }>('/apps/:id/:n/index.html', async (r, reply) => {
+  const v = await call<B>('storage', `/projects/${r.params.id}/versions/${Number(r.params.n)}`);
+  if (!v.html) throw new ServiceError(404, 'no_html', 'aucun bundle pour cette version');
+  reply.header('content-security-policy', APP_CSP).header('x-content-type-options', 'nosniff').header('referrer-policy', 'no-referrer').header('cache-control', 'no-store');
+  reply.type('text/html; charset=utf-8');
+  return v.html;
+});
+
+// ---------- Conversation & jobs ----------
+app.get('/api/meta', async () => {
+  const ai = await call<B>('ai-engine', '/meta').catch(() => ({ demo: true }));
+  const voice = await call<B>('voice-gateway', '/health').catch(() => null);
+  return { demo: ai.demo, voice: voice ? { stt: voice.stt, tts: voice.tts } : null };
+});
+app.post<{ Body: B }>('/api/chat', async (r) => call('ai-engine', '/chat', { body: { projectId: r.body.projectId ?? null, mode: r.body.mode, message: r.body.message, fileIds: (r.body.fileIds ?? []).slice(0, 3), version: r.body.version }, timeoutMs: 90_000 }));
+app.get<{ Querystring: { projectId?: string } }>('/api/jobs', async (r) => call('storage', `/jobs${r.query.projectId ? `?projectId=${encodeURIComponent(r.query.projectId)}` : ''}`));
+app.get<{ Params: { id: string } }>('/api/jobs/:id', async (r) => call('storage', `/jobs/${r.params.id}`));
+app.get<{ Params: { id: string } }>('/api/jobs/:id/log', async (r) => call('storage', `/jobs/${r.params.id}/events`));
+for (const a of ['approve', 'reject', 'cancel']) app.post<{ Params: { id: string } }>(`/api/jobs/:id/${a}`, async (r) => call('ai-engine', `/jobs/${r.params.id}/${a}`, { body: {} }));
+
+/** Proxy SSE en flux continu (Last-Event-ID transmis pour la reprise). */
+app.get<{ Params: { id: string }; Querystring: { after?: string } }>('/api/jobs/:id/events', async (req, reply) => {
+  const ctrl = new AbortController();
+  const lastId = req.headers['last-event-id'] ?? req.query.after ?? '0';
+  const upstream = await fetch(`${serviceUrl('ai-engine')}/jobs/${encodeURIComponent(req.params.id)}/events?after=${encodeURIComponent(String(lastId))}`, { signal: ctrl.signal, headers: { 'last-event-id': String(lastId) } }).catch(() => null);
+  if (!upstream?.ok || !upstream.body) throw new ServiceError(503, 'unavailable', 'flux de construction indisponible');
   reply.hijack();
-  reply.raw.writeHead(200, {
-    'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', Connection: 'keep-alive',
-    'X-Accel-Buffering': 'no', ...(PUBLIC_MODE ? {} : { 'Access-Control-Allow-Origin': '*' }),
-  });
-  const ac = new AbortController();
-  reply.raw.on('close', () => ac.abort());
-  const ping = setInterval(() => !reply.raw.writableEnded && reply.raw.write(': ping\n\n'), 15000);
-  return {
-    signal: ac.signal,
-    send: (e: Json) => { if (!reply.raw.writableEnded) reply.raw.write(`data: ${JSON.stringify(e)}\n\n`); },
-    end: () => { clearInterval(ping); reply.raw.end(); },
-  };
-}
+  reply.raw.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive', 'x-accel-buffering': 'no' });
+  req.raw.on('close', () => ctrl.abort());
+  try { for await (const chunk of upstream.body as unknown as AsyncIterable<Uint8Array>) reply.raw.write(chunk); } catch { /* client parti */ }
+  reply.raw.end();
+});
 
-function openJournal(send: (e: Json) => void, prompt: string, projectId?: string | null) {
-  const lines: GenLog[] = [];
-  const startedAt = new Date().toISOString();
-  const id = randomUUID();
-  let status = 'ok';
-  let pid = projectId ?? null;
-  const relay = (e: Json) => {
-    const line = asLog(e);
-    if (line && lines.length < 1600) lines.push(line);
-    send(e);
-  };
-  const note = (component: string, step: string, text: string, level: GenLog['level'] = 'info') => {
-    const line = localLog(component, step, text, level);
-    if (lines.length < 1600) lines.push(line);
-    send({ type: 'log', ...line });
-  };
-  const flush = async (next?: { status?: string; projectId?: string | null }) => {
-    if (next?.status) status = next.status;
-    if (next && 'projectId' in next) pid = next.projectId ?? null;
-    await call(`${STORAGE}/generations`, { method: 'POST', json: { id, projectId: pid, prompt: prompt.slice(0, 200), status, lines, startedAt, endedAt: new Date().toISOString() } }).catch(() => null);
-  };
-  return { relay, note, flush, id };
-}
+// ---------- MCP ----------
+app.get('/api/mcp/servers', async () => call('mcp-hub', '/servers'));
+app.get('/api/mcp/catalog', async () => call('mcp-hub', '/catalog', { timeoutMs: 40_000 }));
+app.post<{ Body: B }>('/api/mcp/servers', async (r) => call('mcp-hub', '/servers', { body: r.body }));
+app.patch<{ Params: { id: string }; Body: B }>('/api/mcp/servers/:id', async (r) => call('mcp-hub', `/servers/${r.params.id}`, { method: 'PATCH', body: r.body }));
+app.delete<{ Params: { id: string } }>('/api/mcp/servers/:id', async (r) => call('mcp-hub', `/servers/${r.params.id}`, { method: 'DELETE' }));
+app.post<{ Params: { id: string } }>('/api/mcp/servers/:id/reconnect', async (r) => call('mcp-hub', `/servers/${r.params.id}/reconnect`, { body: {} }));
 
-type Dataset = { name: string; rows: Json[] };
-type GenBody = { fullRebuild?: boolean; prompt: string; projectId?: string; diffusing?: boolean; useTools?: boolean; mode?: 'agent' | 'direct'; phase?: 'source' | 'build'; sourceBrief?: string; sourceSamples?: unknown; datasets?: Dataset[] };
-/** Données personnelles importées (CSV/JSON parsés dans le studio) : bornées, noms de collection sûrs. */
-function cleanDatasets(ds: unknown): Dataset[] {
-  if (!Array.isArray(ds)) return [];
-  return ds.slice(0, 3).map((d: any) => ({
-    name: String(d?.name ?? 'donnees').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').replace(/^(\d)/, 'd$1').slice(0, 30) || 'donnees',
-    rows: (Array.isArray(d?.rows) ? d.rows : []).slice(0, 2000).filter((r: unknown) => r && typeof r === 'object' && !Array.isArray(r)),
-  })).filter((d) => d.rows.length);
+// ---------- Fichiers joints (restent sur la machine) ----------
+app.post<{ Body: { name: string; content: string } }>('/api/files', async (r) => {
+  const name = String(r.body.name ?? '').slice(0, 120);
+  const content = String(r.body.content ?? '');
+  if (content.length > 5 * 1024 * 1024) throw new ServiceError(413, 'too_large', 'fichier > 5 Mo');
+  const kind = /\.json$/i.test(name) ? 'json' : /\.csv$/i.test(name) ? 'csv' : null;
+  if (!kind) throw new ServiceError(400, 'bad_type', 'CSV ou JSON uniquement');
+  let rows = 0;
+  if (kind === 'json') { let parsed: unknown; try { parsed = JSON.parse(content); } catch { throw new ServiceError(400, 'bad_json', 'JSON invalide'); } rows = Array.isArray(parsed) ? parsed.length : 1; }
+  else rows = Math.max(0, content.replace(/\r/g, '').split('\n').filter((l) => l.trim()).length - 1);
+  return call('storage', '/files', { body: { name, kind, rows, content } });
+});
+
+// ---------- Pont d'exécution des apps ----------
+async function versionSpec(projectId: string, n: number) {
+  const v = await call<{ spec: AppSpec; status: string; was_certified: boolean }>('storage', `/projects/${projectId}/versions/${n}`);
+  return v;
 }
-app.post<{ Body: GenBody }>('/api/generate', async (req, reply) => {
-  const { prompt, projectId, diffusing = false, useTools = true, mode } = req.body ?? ({} as GenBody);
-  const datasets = cleanDatasets(req.body?.datasets);
-  if (JSON.stringify(datasets).length > 1_500_000) return reply.code(413).send({ error: 'données importées trop volumineuses (1,5 Mo max)' });
-  if (!prompt?.trim()) return reply.code(400).send({ error: 'prompt requis' });
-  if (prompt.length > 4000) return reply.code(413).send({ error: 'prompt trop long (4000 caractères max)' });
-  if (!allowGeneration(clientIp(req))) return reply.code(429).send({ error: `limite atteinte : ${GEN_PER_HOUR} générations par heure` });
-  const s = openSse(reply);
-  const journal = openJournal(s.send, prompt, projectId);
-  const t0 = Date.now();
+app.post<{ Params: { id: string; n: string }; Body: { method: 'call' | 'tools'; name?: string; args?: unknown } }>('/api/bridge/:id/:n', async (r, reply) => {
+  const v = await versionSpec(r.params.id, Number(r.params.n));
+  if (r.body.method === 'tools') return { tools: bridgeWhitelist(v.spec) };
+  if (!limiter.take(`${r.params.id}`)) return reply.code(429).send({ code: 'rate_limited', message: '60 appels/min dépassés' });
+  const d = decideBridge(v.spec, String(r.body.name), r.body.args ?? {});
+  if (!d.ok) return reply.code(d.status).send({ code: 'bridge_refused', message: d.message });
+  if (d.target === 'hub') return call('mcp-hub', '/call', { body: { serverId: d.serverId, tool: d.tool, args: r.body.args ?? {}, paginate: d.paginate, projectId: r.params.id } });
+  const a = r.body.args as B;
+  if (d.tool === 'app__simuler') return call('app-agents', `/apps/${r.params.id}/simulate`, { body: { viewId: a.viewId, params: { variation_pct: Number(a.variation_pct ?? 0), horizon: Number(a.horizon ?? 7) }, version: Number(r.params.n) } });
+  if (d.tool === 'app__journal') return call('app-agents', `/apps/${r.params.id}/journal`);
+  return call('app-agents', `/apps/${r.params.id}/agent`, { body: { message: String(a.viewId ?? ''), mode: 'ask', version: Number(r.params.n) } });
+});
+
+// ---------- Actions : préparer → montrer → confirmer (humain) → exécuter → vérifier → journaliser ----------
+app.post<{ Body: { projectId: string; version: number; actionId: string; args: B } }>('/api/actions/prepare', async (r) => {
+  const v = await versionSpec(r.body.projectId, Number(r.body.version));
+  if (v.status !== 'ACTIVE' || !v.was_certified) throw new ServiceError(403, 'not_certified', 'Aperçu non certifié : aucune action externe.');
+  const action = v.spec.actions.find((a) => a.id === r.body.actionId);
+  if (!action) throw new ServiceError(404, 'unknown_action', 'action inconnue');
+  const args = { ...(r.body.args ?? {}), ...action.fixedArgs };
+  const allowed = new Set([...action.fields.map((f) => f.name), ...Object.keys(action.fixedArgs)]);
+  for (const k of Object.keys(args)) if (!allowed.has(k)) throw new ServiceError(400, 'bad_args', `argument non déclaré : ${k}`);
+  const op = await call<B>('mcp-hub', '/ops/prepare', { body: { serverId: action.serverId, tool: action.tool, args, projectId: r.body.projectId } });
+  const card = { opId: op.opId, label: action.label, effect: action.effect, server: op.serverName, tool: action.tool, args, demo: op.demo, status: 'pending' };
+  await call('storage', `/projects/${r.body.projectId}/messages`, { body: { role: 'agent', content: { text: `Action préparée : ${action.label}. Rien ne part sans ton « Oui, exécuter ».`, card } } });
+  return { card };
+});
+
+app.post<{ Params: { opId: string }; Body: { args: B; projectId?: string; via?: 'click' | 'voice' } }>('/api/actions/:opId/execute', async (r, reply) => {
+  // Le jeton de confirmation est lié aux arguments EXACTS affichés : toute modification l'invalide (428).
+  const conf = await call<{ token: string }>('mcp-hub', `/ops/${r.params.opId}/confirm`, { body: { args: r.body.args }, headers: { 'x-formule-human': humanKey() } });
   try {
-    let previous: Json | null = null;
-    if (projectId) {
-      const r = await call(`${STORAGE}/projects/${projectId}/latest`);
-      if (r.status !== 200) throw new Error('projet introuvable pour itération');
-      previous = r.body;
-    }
-    journal.note('Passerelle', 'départ', previous ? 'itération' : 'création');
-    s.send({ type: 'start', mode: previous ? 'iterate' : 'generate', projectId: projectId ?? null });
-
-    const trace: Json[] = [];
-    const gen = await relaySse(`${AI}/generate`, {
-      prompt, diffusing, useTools, mode, previousCode: previous?.code, previousPlan: previous?.plan,
-      previousFiles: previous?.files ?? undefined, previousComponents: previous?.agent?.components, previousBrief: previous?.agent?.brief,
-      previousContract: previous?.app?.contract, datasets: datasets.length ? datasets : undefined, projectId: projectId ?? undefined, previousVersion: previous?.number, fullRebuild: req.body?.fullRebuild === true,
-      phase: req.body?.phase, sourceBrief: req.body?.sourceBrief, sourceSamples: req.body?.sourceSamples,
-    }, (e) => { if (e.type === 'agent' && trace.length < 500) trace.push(e); journal.relay(e); }, s.signal);
-    if (gen.sourced) {
-      journal.note('Sélecteur', 'offre', 'lectures proposées', 'ok');
-      s.send({ type: 'source_ready' });
-      await journal.flush({ status: 'sources' });
-      s.end();
-      return;
-    }
-    const isAgent = gen.mode === 'agent';
-    let code: string = gen.code;
-
-    journal.note('Validateur', 'essai', 'Validation du code');
-    s.send({ type: 'phase', phase: 'validate', label: 'Validation du code' });
-    let validation = (await call(`${VALIDATOR}/validate`, { method: 'POST', json: { code } })).body as Validation;
-    journal.note('Validateur', 'essai 1', validation.ok ? 'code accepté' : (validation.errors?.[0]?.message ?? 'rejeté'), validation.ok ? 'ok' : 'error');
-    s.send({ type: 'validation', attempt: 1, ...validation });
-    let fixed = false;
-    // En mode agent, le Développeur a déjà livré un build vert relu par le PO : pas de réécriture du bundle.
-    if (!validation.ok && !isAgent) {
-      journal.note('Validateur', 'correction', 'Reprise du code');
-      const f = await relaySse(`${AI}/fix`, { prompt, code, errors: validation.errors, diffusing: false }, journal.relay, s.signal);
-      code = f.code;
-      fixed = true;
-      journal.note('Validateur', 'essai', 'Nouvelle validation');
-      s.send({ type: 'phase', phase: 'validate', label: 'Nouvelle validation' });
-      validation = (await call(`${VALIDATOR}/validate`, { method: 'POST', json: { code } })).body as Validation;
-      journal.note('Validateur', 'essai 2', validation.ok ? 'code accepté' : (validation.errors?.[0]?.message ?? 'rejeté'), validation.ok ? 'ok' : 'error');
-      s.send({ type: 'validation', attempt: 2, ...validation });
-    }
-
-    journal.note('Stockage', 'écriture', 'Enregistrement');
-    s.send({ type: 'phase', phase: 'save', label: 'Enregistrement' });
-    let pid = projectId;
-    let title: string = previous ? '' : ((/^#\s+(.+)$/m.exec(gen.plan ?? '')?.[1]) ?? prompt).replace(/^\s*(mini[- ]?spec|sp[ée]cification|spec)\s*[—:–-]\s*/i, '').replace(/[*_`]/g, '').trim().slice(0, 80);
-    if (!pid) {
-      const p = await call(`${STORAGE}/projects`, { method: 'POST', json: { title } });
-      pid = p.body.id;
-    }
-    const imported = datasets.length ? Object.fromEntries(datasets.map((d) => [d.name, d.rows])) : undefined;
-    const sampled = (gen.app?.seed ?? undefined) as Record<string, unknown> | undefined;
-    const kept = (previous?.app?.seed ?? undefined) as Record<string, unknown> | undefined;
-    const seed = imported || sampled || kept ? { ...(kept ?? {}), ...(sampled ?? {}), ...(imported ?? {}) } : undefined;
-    const v = await call(`${STORAGE}/projects/${pid}/versions`, {
-      method: 'POST',
-      json: {
-        prompt, kind: previous ? 'iterate' : 'generate', plan: gen.plan, code, provider: gen.provider, model: gen.model, validation: { ...validation, fixed },
-        files: isAgent ? gen.files : undefined,
-        // Mini-SaaS : contrat + définition du sous-agent + backend MCP. Le seed verse les lignes de la liaison dans la base locale.
-        app: isAgent && gen.app ? { ...gen.app, seed } : undefined,
-        agent: isAgent ? { framework: gen.framework, brief: gen.brief, components: gen.components, iterations: gen.iterations, reviews: gen.reviews, workspace: gen.workspace, ms: Date.now() - t0, trace } : undefined,
-      },
-    });
-    journal.note('Stockage', 'version', `v${v.body.number}`, 'ok');
-    s.send({ type: 'saved', projectId: pid, versionId: v.body.id, number: v.body.number, title });
-    if (isAgent && gen.files) {
-      // Mémoire persistante de la crew : la prochaine évolution repart de ce qui a été construit (pas de ré-exploration).
-      const mem = gen.memory ?? {};
-      await call(`${AGENTS}/apps/${pid}/crew-memory`, { method: 'POST', json: { version: v.body.number, title: gen.app?.title, prompt, kind: previous ? 'iterate' : 'generate', mode: mem.mode, features: mem.features, spec: gen.plan ?? '', brief: gen.brief ?? '', contract: gen.app?.contract ?? null, files: gen.files, prevFiles: previous?.files ?? undefined } })
-        .then((r) => { if (r.status === 200) { journal.note('Mémoire', 'mise à jour', `v${v.body.number} · ${r.body.files} fichiers`, 'ok'); s.send({ type: 'agent', kind: 'memory', role: 'po', mode: mem.mode ?? 'complet', version: v.body.number, text: `Mémoire de l'app mise à jour (v${v.body.number}) : ${r.body.files} fichier(s), ${r.body.criteria} critère(s) livrés, schéma ${r.body.schema}.` }); } })
-        .catch(() => {});
-    }
-    if (isAgent && gen.app) {
-      // Lancement du backend MCP de l'app (enregistré dans mcp-hub) : l'aperçu peut l'appeler immédiatement.
-      try {
-        const e = await call(`${AGENTS}/apps/${pid}/ensure`, { method: 'POST', json: { version: v.body.number } });
-        const ready = e.status === 200;
-        journal.note('Backend', ready ? 'prêt' : 'alerte', ready ? `${e.body.tools?.length ?? 0} outils` : `backend MCP : ${e.body?.error ?? e.status}`, ready ? 'ok' : 'error');
-        s.send(ready ? { type: 'app_ready', tools: e.body.tools, agent: e.body.agent?.name, connId: e.body.connId } : { type: 'app_warning', message: `backend MCP : ${e.body?.error ?? e.status}` });
-      } catch (err) {
-        journal.note('Backend', 'alerte', `app-agents injoignable : ${(err as Error).message}`, 'error');
-        s.send({ type: 'app_warning', message: `app-agents injoignable : ${(err as Error).message}` });
-      }
-    }
-    journal.note('Passerelle', 'fin', `${Date.now() - t0} ms`, 'ok');
-    s.send({ type: 'done', code, plan: gen.plan, validation, fixed, ms: Date.now() - t0, toolResults: gen.toolResults ?? [], mode: isAgent ? 'agent' : 'direct', files: isAgent ? gen.files : undefined, brief: gen.brief, app: isAgent ? gen.app ?? null : null });
-    await journal.flush({ status: validation.ok ? 'ok' : 'erreur', projectId: pid });
+    const res = await call<B>('mcp-hub', `/ops/${r.params.opId}/execute`, { body: { token: conf.token, args: r.body.args }, timeoutMs: 60_000 });
+    const text = `Exécuté et vérifié : ${res.envelope.tool} à ${new Date(res.envelope.observedAt).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })} (${res.envelope.source.serverName}${res.envelope.source.demo ? ', démo' : ''}). Résultat : ${JSON.stringify(res.raw).slice(0, 200)}`;
+    if (r.body.projectId) await call('storage', `/projects/${r.body.projectId}/messages`, { body: { role: 'agent', content: { text, opId: r.params.opId, opStatus: 'done', via: r.body.via ?? 'click' } } });
+    return { status: 'done', text, result: res.raw };
   } catch (e) {
-    if (s.signal.aborted) { /* l'utilisateur a annulé */ }
-    else {
-      const message = linkCut(e) ? LIAISON : ((e as Error).message || LIAISON);
-      journal.note('Processus', 'erreur', message, 'error');
-      s.send({ type: 'error', message });
-    }
-    await journal.flush({ status: s.signal.aborted ? 'annulé' : 'erreur' });
+    const err = e as ServiceError;
+    if (r.body.projectId) await call('storage', `/projects/${r.body.projectId}/messages`, { body: { role: 'agent', content: { text: err.message, opId: r.params.opId, opStatus: err.code } } });
+    return reply.code(err.status ?? 502).send({ code: err.code, message: err.message });
   }
-  s.end();
+});
+app.post<{ Params: { opId: string }; Body: { projectId?: string } }>('/api/actions/:opId/decline', async (r) => {
+  await call('storage', `/ops/${r.params.opId}`, { method: 'PATCH', body: { status: 'declined', expect: 'prepared' } });
+  if (r.body?.projectId) await call('storage', `/projects/${r.body.projectId}/messages`, { body: { role: 'agent', content: { text: 'Action refusée. Rien n’est parti.', opId: r.params.opId, opStatus: 'declined' } } });
+  return { status: 'declined' };
 });
 
-// ---- Projets (storage) ----
-app.get('/api/logs', async (_req, reply) => { const r = await call(`${STORAGE}/generations`); return reply.code(r.status).send(r.body); });
-app.get<{ Params: { id: string } }>('/api/logs/:id', async (req, reply) => {
-  const r = await call(`${STORAGE}/generations/${req.params.id}`); return reply.code(r.status).send(r.body);
-});
-app.get('/api/projects', async (_req, reply) => { const r = await call(`${STORAGE}/projects`); return reply.code(r.status).send(r.body); });
-app.get<{ Params: { id: string } }>('/api/projects/:id', async (req, reply) => {
-  const r = await call(`${STORAGE}/projects/${req.params.id}`); return reply.code(r.status).send(r.body);
-});
-app.delete<{ Params: { id: string } }>('/api/projects/:id', async (req, reply) => {
-  await call(`${AGENTS}/apps/${req.params.id}?data=1`, { method: 'DELETE' }).catch(() => null); // backend + données + mémoire de l'app
-  const r = await call(`${STORAGE}/projects/${req.params.id}`, { method: 'DELETE' }); return reply.code(r.status).send(r.body);
-});
-app.post<{ Params: { id: string }; Body: { code: string; prompt?: string } }>('/api/projects/:id/versions', async (req, reply) => {
-  if (!req.body?.code) return reply.code(400).send({ error: 'code requis' });
-  const validation = (await call(`${VALIDATOR}/validate`, { method: 'POST', json: { code: req.body.code } })).body;
-  const latest = await call(`${STORAGE}/projects/${req.params.id}/latest`);
-  const r = await call(`${STORAGE}/projects/${req.params.id}/versions`, {
-    method: 'POST', json: { prompt: req.body.prompt ?? 'Édition manuelle du code', kind: 'edit', plan: latest.body?.plan ?? null, code: req.body.code, provider: 'manuel', validation, files: latest.body?.files ?? undefined, app: latest.body?.app ?? undefined },
-  });
-  return reply.code(r.status).send({ ...r.body, validation });
-});
-app.post<{ Body: { code: string } }>('/api/validate', async (req, reply) => {
-  const r = await call(`${VALIDATOR}/validate`, { method: 'POST', json: req.body }); return reply.code(r.status).send(r.body);
-});
+// ---------- Voix ----------
+app.post<{ Body: B }>('/api/voice/confirmation', async (r) => call('voice-gateway', '/interpret/confirmation', { body: r.body }));
+app.post<{ Body: B }>('/api/voice/wake', async (r) => call('voice-gateway', '/interpret/wake', { body: r.body }));
 
-// ---- MCP (mcp-hub) ----
-app.get('/api/mcp/servers', async (_req, reply) => { const r = await call(`${MCP}/servers`); return reply.code(r.status).send(r.body); });
-app.post<{ Body: Json }>('/api/mcp/servers', async (req, reply) => {
-  if (req.body?.transport === 'stdio' && !ALLOW_UI_STDIO) {
-    return reply.code(403).send({ error: "L'ajout de serveurs stdio depuis l'interface est désactivé (MCP_ALLOW_UI_STDIO=true pour l'activer) : éditez mcp.config.json." });
-  }
-  const r = await call(`${MCP}/servers`, { method: 'POST', json: req.body }); return reply.code(r.status).send(r.body);
-});
-app.patch<{ Params: { id: string }; Body: Json }>('/api/mcp/servers/:id', async (req, reply) => {
-  const r = await call(`${MCP}/servers/${req.params.id}`, { method: 'PATCH', json: req.body }); return reply.code(r.status).send(r.body);
-});
-app.post<{ Params: { id: string } }>('/api/mcp/servers/:id/reconnect', async (req, reply) => {
-  const r = await call(`${MCP}/servers/${req.params.id}/reconnect`, { method: 'POST' }); return reply.code(r.status).send(r.body);
-});
-app.delete<{ Params: { id: string } }>('/api/mcp/servers/:id', async (req, reply) => {
-  const r = await call(`${MCP}/servers/${req.params.id}`, { method: 'DELETE' }); return reply.code(r.status).send(r.body);
-});
-app.get('/api/mcp/tools', async (_req, reply) => { const r = await call(`${MCP}/tools?allowedOnly=1`); return reply.code(r.status).send(r.body); });
+// ---------- Studio compilé (mode start / Docker) ----------
+const dist = path.join(findRepoRoot(), 'frontend/dist');
+if (process.env.FORMULE_SERVE_STUDIO === '1' && existsSync(dist)) {
+  await app.register(fastifyStatic, { root: dist, prefix: '/' });
+  app.setNotFoundHandler((req, reply) => (req.url.startsWith('/api') ? reply.code(404).send({ code: 'not_found', message: 'route inconnue' }) : reply.type('text/html').send(readFileSync(path.join(dist, 'index.html')))));
+}
 
-// Pont d'exécution des mini-apps : limite de débit + taille, la politique (liste blanche, confirmation) est appliquée par mcp-hub.
-const hits = new Map<string, { n: number; t: number }>();
-app.post<{ Body: { tool: string; args?: Json; confirmed?: boolean } }>('/api/mcp/call', async (req, reply) => {
-  const key = clientIp(req);
-  const now = Date.now();
-  const h = hits.get(key) ?? { n: 0, t: now };
-  if (now - h.t > 60_000) { h.n = 0; h.t = now; }
-  if (++h.n > 60) return reply.code(429).send({ error: 'trop d\'appels MCP (60/min)' });
-  hits.set(key, h);
-  if (!req.body?.tool || !/^[a-zA-Z0-9-]+__[\w.-]+$/.test(req.body.tool)) return reply.code(400).send({ error: 'nom d\'outil invalide' });
-  // Lectures MCP externes : args bornés (le Data Engineer / les apps doivent paginer, pas dumper).
-  if (JSON.stringify(req.body.args ?? {}).length > 100_000) return reply.code(413).send({ error: 'arguments trop volumineux' });
-  const correlation = String(req.headers['x-formule-correlation'] ?? randomUUID());
-  const r = await call(`${MCP}/call`, { method: 'POST', headers: { 'x-formule-correlation': correlation }, json: { tool: req.body.tool, args: req.body.args ?? {}, confirmed: req.body.confirmed === true } });
-  reply.header('x-formule-correlation', String(r.body?.correlationId ?? correlation));
-  return reply.code(r.status).send(r.body);
-});
-
-// ---- Apps : backend MCP propre + sous-agent (service app-agents) ----
-const APP_ID = /^[a-zA-Z0-9-]{8,64}$/;
-const agentHits = new Map<string, number[]>();
-app.post<{ Params: { id: string; op: string }; Body: Json }>('/api/apps/:id/:op', async (req, reply) => {
-  const { id, op } = req.params;
-  if (!APP_ID.test(id) || !['ensure', 'call', 'confirm', 'memory', 'refresh'].includes(op)) return reply.code(404).send({ error: 'introuvable' });
-  if (op === 'call' || op === 'refresh') {
-    const k = clientIp(req); const now = Date.now(); const h = hits.get(k) ?? { n: 0, t: now };
-    if (now - h.t > 60_000) { h.n = 0; h.t = now; }
-    if (++h.n > 120) return reply.code(429).send({ error: "trop d'appels (120/min)" });
-    hits.set(k, h);
-    // Backend d'app : ingest_* peut recevoir un JSON n8n ; plafond aligné sur bodyLimit (5 Mo) avec marge.
-    if (JSON.stringify(req.body?.args ?? {}).length > 1_500_000) return reply.code(413).send({ error: 'arguments trop volumineux' });
-  }
-  const r = await call(`${AGENTS}/apps/${id}/${op}`, { method: 'POST', json: req.body ?? {} });
-  return reply.code(r.status).send(r.body);
-});
-app.get<{ Params: { id: string; op: string }; Querystring: Json }>('/api/apps/:id/:op', async (req, reply) => {
-  const { id, op } = req.params;
-  if (!APP_ID.test(id) || !['tools', 'log', 'memory', 'source'].includes(op)) return reply.code(404).send({ error: 'introuvable' });
-  const qs = req.query?.version ? `?version=${Number(req.query.version)}` : '';
-  const r = await call(`${AGENTS}/apps/${id}/${op}${qs}`); return reply.code(r.status).send(r.body);
-});
-// Sous-agent : flux SSE relayé tel quel (deltas, appels d'outils, demandes de confirmation).
-app.post<{ Params: { id: string }; Body: Json }>('/api/apps/:id/ask', async (req, reply) => {
-  if (!APP_ID.test(req.params.id)) return reply.code(404).send({ error: 'introuvable' });
-  const ip = clientIp(req); const now = Date.now();
-  const list = (agentHits.get(ip) ?? []).filter((t) => now - t < 60_000);
-  if (list.length >= 20) return reply.code(429).send({ error: "trop de questions à l'agent (20/min)" });
-  list.push(now); agentHits.set(ip, list);
-  const s = openSse(reply);
-  try {
-    const res = await fetch(`${AGENTS}/apps/${req.params.id}/ask`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(req.body ?? {}), signal: s.signal });
-    if (!res.ok || !res.body) { const b = await res.json().catch(() => ({})); s.send({ type: 'error', message: (b as Json).error ?? `HTTP ${res.status}` }); }
-    else { const reader = res.body.getReader(); for (;;) { const { done, value } = await reader.read(); if (done) break; reply.raw.write(value); } }
-  } catch (e) { if (!s.signal.aborted) s.send({ type: 'error', message: linkCut(e) ? 'La liaison a été coupée. Renvoie la question.' : (e as Error).message }); }
-  s.end();
-});
-
-// ---- Tableaux vivants : une question, un document, les graphiques du studio, les données via l'interprète ----
-app.get<{ Params: { id: string } }>('/api/projects/:id/dashboards', async (req, reply) => {
-  const r = await call(`${STORAGE}/projects/${req.params.id}/dashboards`);
-  return reply.code(r.status).send(r.body);
-});
-app.post<{ Body: { prompt?: string; projectId?: string; dashboardId?: string; spec?: Json } }>('/api/dashboards/build', async (req, reply) => {
-  const prompt = String(req.body?.prompt ?? '').trim();
-  if (!prompt) return reply.code(400).send({ error: 'prompt requis' });
-  if (prompt.length > 4000) return reply.code(413).send({ error: 'prompt trop long (4000 caractères max)' });
-  if (!allowGeneration(clientIp(req))) return reply.code(429).send({ error: `limite atteinte : ${GEN_PER_HOUR} générations par heure` });
-  const s = openSse(reply);
-  const journal = openJournal(s.send, prompt, req.body?.projectId);
-  try {
-    journal.note('Tableau', 'départ', 'Construction du tableau');
-    const result = await relaySse(`${AI}/dashboards/build`, {
-      prompt, dashboardId: req.body?.dashboardId, spec: req.body?.spec,
-    }, journal.relay, s.signal);
-    let pid = req.body?.projectId;
-    const spec = result.spec as Json;
-    const id = String(result.id ?? '');
-    if (!pid) {
-      const p = await call(`${STORAGE}/projects`, { method: 'POST', json: { title: String(spec?.title ?? prompt).slice(0, 80) } });
-      if (p.status >= 400) throw new Error(p.body?.error ?? 'projet impossible');
-      pid = p.body.id;
-    }
-    const saved = await call(`${STORAGE}/projects/${pid}/dashboards/${id}`, { method: 'PUT', json: { spec } });
-    if (saved.status >= 400) throw new Error(saved.body?.error ?? 'enregistrement du tableau impossible');
-    journal.note('Stockage', 'tableau', String(spec?.title ?? 'enregistré'), 'ok');
-    s.send({ type: 'saved', projectId: pid, dashboardId: id, title: spec?.title });
-    journal.note('Tableau', 'fin', 'tableau prêt', 'ok');
-    s.send({ type: 'done', projectId: pid, dashboardId: id, spec, reply: result.reply, mode: result.mode });
-    await journal.flush({ status: 'ok', projectId: pid });
-  } catch (e) {
-    journal.note('Processus', 'erreur', (e as Error).message, 'error');
-    s.send({ type: 'error', message: (e as Error).message });
-    await journal.flush({ status: 'erreur' });
-  }
-  s.end();
-});
-const interpretHits = new Map<string, { n: number; t: number }>();
-app.post<{ Body: { tool?: string; args?: Json; x?: string; y?: string } }>('/api/interpreter', async (req, reply) => {
-  const key = clientIp(req);
-  const now = Date.now();
-  const h = interpretHits.get(key) ?? { n: 0, t: now };
-  if (now - h.t > 60_000) { h.n = 0; h.t = now; }
-  if (++h.n > 180) return reply.code(429).send({ error: 'trop de lectures (180/min)' });
-  interpretHits.set(key, h);
-  const r = await call(`${AI}/interpret`, { method: 'POST', json: req.body ?? {}, signal: AbortSignal.timeout(125_000) });
-  return reply.code(r.status).send(r.body);
-});
-
-// ---- Voix : WebSocket /voice/ws → voice-gateway (tunnel TCP brut après contrôle d'accès) ----
-app.server.on('upgrade', (req, socket, head) => {
-  const url = req.url ?? '';
-  const host = String(req.headers.host ?? '');
-  const origin = String(req.headers.origin ?? '');
-  const sameOrigin = !origin || origin.replace(/^https?:\/\//, '') === host || /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
-  const authed = !PUBLIC_MODE || hasSession(req.headers.cookie) || basicOk(req.headers.authorization);
-  if (!url.startsWith('/voice/ws') || !sameOrigin || !authed) {
-    socket.end(`HTTP/1.1 ${authed ? 403 : 401} ${authed ? 'Forbidden' : 'Unauthorized'}\r\nConnection: close\r\n\r\n`);
-    return;
-  }
-  const target = new URL(VOICE);
-  const up = netConnect(Number(target.port || 80), target.hostname, () => {
-    // En-têtes relayés sans identifiants ni origine publique (le voice-gateway n'accepte que des origines locales).
-    const skip = new Set(['host', 'origin', 'authorization', 'cookie', 'cf-connecting-ip', 'x-forwarded-for']);
-    const lines = [`GET ${url.replace(/^\/voice/, '')} HTTP/1.1`, `Host: ${target.host}`];
-    for (let i = 0; i < req.rawHeaders.length; i += 2) if (!skip.has(req.rawHeaders[i].toLowerCase())) lines.push(`${req.rawHeaders[i]}: ${req.rawHeaders[i + 1]}`);
-    up.write(lines.join('\r\n') + '\r\n\r\n');
-    if (head?.length) up.write(head);
-    socket.pipe(up).pipe(socket);
-  });
-  const close = () => { up.destroy(); socket.destroy(); };
-  up.on('error', close); socket.on('error', close);
-});
-
-app.listen({ port: PORT, host: BIND_HOST }).then(() => console.log(`[api-gateway] prêt sur ${BIND_HOST}:${PORT}${PUBLIC_MODE ? ' (mode public : Basic Auth active)' : ''}${existsSync(STATIC_DIR) ? ' — frontend servi depuis ' + STATIC_DIR : ''}`));
+await listen(app, 'api-gateway');

@@ -1,0 +1,68 @@
+{
+  "id": "huggingface",
+  "version": 1,
+  "description": "Taxonomie publique des tâches Hugging Face, pour regrouper les filtres de catégories. Pack d’exemple.",
+  "appliesTo": {
+    "anyTool": [
+      "hub_repo_search",
+      "hf_fs",
+      "model_search",
+      "space_search"
+    ]
+  },
+  "taxonomies": [
+    {
+      "fields": [
+        "task",
+        "pipeline_tag"
+      ],
+      "groups": {
+        "LLM": [
+          "text-generation",
+          "text2text-generation",
+          "conversational",
+          "fill-mask",
+          "question-answering",
+          "summarization",
+          "translation",
+          "text-classification",
+          "token-classification",
+          "feature-extraction",
+          "sentence-similarity"
+        ],
+        "Audio": [
+          "automatic-speech-recognition",
+          "text-to-speech",
+          "text-to-audio",
+          "audio-classification",
+          "audio-to-audio",
+          "voice-activity-detection"
+        ],
+        "Vision": [
+          "image-classification",
+          "object-detection",
+          "image-segmentation",
+          "text-to-image",
+          "image-to-image",
+          "depth-estimation",
+          "unconditional-image-generation",
+          "image-to-video",
+          "text-to-video",
+          "video-classification",
+          "zero-shot-image-classification",
+          "mask-generation"
+        ],
+        "Multimodal": [
+          "image-text-to-text",
+          "visual-question-answering",
+          "document-question-answering",
+          "image-to-text",
+          "any-to-any",
+          "video-text-to-text",
+          "audio-text-to-text",
+          "visual-document-retrieval"
+        ]
+      }
+    }
+  ]
+}

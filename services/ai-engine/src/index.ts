@@ -1,127 +1,56 @@
-/** ai-engine — moteur IA : endpoints SSE /generate et /fix. */
-import { BIND_HOST } from './env.ts';
-import Fastify, { type FastifyReply } from 'fastify';
-import { createProvider } from './providers/index.ts';
-import { generate, fix, type GenerateInput, type FixInput } from './engine.ts';
-import { httpMcpClient } from './mcp.ts';
-import type { EngineEvent } from './types.ts';
-import { agentBackend, runAgent } from './agent/index.ts';
-import { buildDashboard } from './dashboards/build.ts';
-import { INTERPRETER_TIMEOUT_MS, shapeRows, type DashboardSpec } from './dashboards/spec.ts';
-import { senseLines } from './agent/sensor.ts';
+import { call, createService, listen } from '@formule/service-kit';
+import type { JobEvent } from '@formule/contracts';
+import { chat } from './agent/chat.js';
+import { cancelJob, decide } from './agent/orchestrator.js';
+import { subscribe } from './agent/events.js';
+import { isDemoMode, llm, probeLlm, providerConf } from './llm.js';
 
-process.on('unhandledRejection', (error) => {
-  console.error('[ai-engine] rejet non géré, le moteur reste en écoute', error);
-});
-process.on('uncaughtException', (error) => {
-  console.error('[ai-engine] exception non gérée, le moteur reste en écoute', error);
-});
+const app = await createService('ai-engine', () => ({ llm: isDemoMode() ? 'demo' : 'connecté' }));
 
-const PORT = Number(process.env.AI_ENGINE_PORT ?? 4001);
-const choice = createProvider();
-const mcp = httpMcpClient();
-const backend = agentBackend(process.env, choice.provider.name);
-const DEFAULT_MODE = (process.env.GENERATION_MODE ?? 'agent') === 'direct' ? 'direct' : 'agent';
-console.log(`[ai-engine] provider=${choice.provider.name} model=${choice.provider.model}${choice.fallback ? ` (${choice.fallback})` : ''} agent=${backend.kind}${backend.kind === 'unavailable' ? ` (${backend.reason})` : ''}`);
-
-const app = Fastify({ logger: { level: 'warn' }, bodyLimit: 5 * 1024 * 1024 });
-
-function sse(reply: FastifyReply) {
-  reply.hijack();
-  reply.raw.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
-  const ac = new AbortController();
-  const stop = () => { clearInterval(ping); ac.abort(); };
-  const ping = setInterval(() => { try { if (!reply.raw.writableEnded) reply.raw.write(': ping\n\n'); } catch { stop(); } }, 10_000);
-  reply.raw.on('close', stop);
-  reply.raw.on('error', stop);
-  return {
-    signal: ac.signal,
-    emit: (e: EngineEvent | { type: string; [k: string]: unknown }) => {
-      if (reply.raw.writableEnded) return;
-      const write = (event: unknown) => reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
-      write(e);
-      if (e.type === 'log') return;
-      for (const line of senseLines(e)) write({ type: 'log', ...line });
-    },
-    end: () => { clearInterval(ping); reply.raw.end(); },
-  };
-}
-
-app.get('/health', async () => ({
-  service: 'ai-engine', status: 'ok', provider: choice.provider.name, model: choice.provider.model,
-  requested: choice.requested, fallback: choice.fallback ?? null, supportsDiffusion: choice.provider.supportsDiffusion,
-  agent: { available: backend.kind !== 'unavailable', kind: backend.kind, framework: backend.kind === 'llm' ? 'moteur agentique' : backend.kind === 'scripted' ? 'scripté (démo)' : null, roles: ['principal', 'routeur'], defaultMode: DEFAULT_MODE },
-}));
-
-type AgentBody = GenerateInput & { mode?: 'agent' | 'direct'; phase?: 'source' | 'build'; sourceBrief?: string; sourceSamples?: Array<{ tool: string; args?: Record<string, unknown>; rows: Array<Record<string, unknown>> }>; previousFiles?: Record<string, string>; previousComponents?: string[]; previousBrief?: string; previousContract?: any; projectId?: string; previousVersion?: number; fullRebuild?: boolean; datasets?: Array<{ name: string; rows: Array<Record<string, unknown>> }> };
-app.post<{ Body: AgentBody }>('/generate', async (req, reply) => {
-  if (!req.body?.prompt) return reply.code(400).send({ error: 'prompt requis' });
-  const s = sse(reply);
-  const mode = req.body.mode ?? DEFAULT_MODE;
-  // Une itération sur une app « directe » (sans fichiers source) reste en pipeline direct.
-  const canAgent = backend.kind !== 'unavailable' && (!req.body.previousCode || !!req.body.previousFiles);
-  if (mode === 'agent' && canAgent) {
-    s.emit({ type: 'meta', provider: choice.provider.name, model: choice.provider.model, diffusing: false, fallback: choice.fallback, tools: 0, mode: 'agent', framework: backend.kind === 'llm' ? 'moteur agentique' : 'scripté (démo)' });
-    try {
-      const r = await runAgent({
-        prompt: req.body.prompt, useTools: req.body.useTools, datasets: req.body.datasets, appId: req.body.projectId, previousVersion: req.body.previousVersion, fullRebuild: req.body.fullRebuild, phase: req.body.phase, sourceBrief: req.body.sourceBrief, sourceSamples: req.body.sourceSamples,
-        previous: req.body.previousFiles ? { files: req.body.previousFiles, components: req.body.previousComponents, spec: req.body.previousPlan, brief: req.body.previousBrief, contract: req.body.previousContract ?? null } : undefined,
-      }, backend, { mcp, emit: s.emit as (e: Record<string, unknown>) => void, signal: s.signal });
-      if (r.code) s.emit({ type: 'code_done', code: r.code });
-      s.emit({ type: 'result', ...r, mode: 'agent', provider: choice.provider.name, model: choice.provider.model });
-    } catch (e) {
-      s.emit({ type: 'error', message: `Agent : ${(e as Error).message}` });
+// Un redémarrage interrompt les jobs non terminés : on le dit, on ne les rejoue pas.
+const startedAt = new Date().toISOString();
+const pendingStates = ['DRAFT', 'DISCOVERY', 'CONTRACT', 'BUILD', 'CERTIFICATION', 'REPAIR', 'READY'];
+setTimeout(async () => {
+  try {
+    for (const j of await call<{ id: string; state: string; project_id: string | null; created_at: string }[]>('storage', '/jobs')) {
+      if (!pendingStates.includes(j.state) || j.created_at >= startedAt) continue;
+      await call('storage', `/jobs/${j.id}/transition`, { body: { to: 'FAILED' } }).catch(() => {});
+      await call('storage', '/events', { body: { jobId: j.id, projectId: j.project_id, version: null, type: 'error', payload: { message: 'interrompu par un redémarrage du moteur : relance la demande' } } }).catch(() => {});
+      await call('storage', '/events', { body: { jobId: j.id, projectId: j.project_id, version: null, type: 'job.done', payload: { state: 'FAILED' } } }).catch(() => {});
     }
-    s.end();
-    return;
-  }
-  if (mode === 'agent' && backend.kind === 'unavailable') s.emit({ type: 'phase', phase: 'plan', label: `Agent indisponible (${backend.reason}) : pipeline direct` });
-  try {
-    const result = await generate(req.body, { provider: choice.provider, mcp, emit: s.emit, signal: s.signal, fallback: choice.fallback });
-    s.emit({ type: 'result', ...result });
-  } catch (e) {
-    s.emit({ type: 'error', message: (e as Error).message });
-  }
-  s.end();
+  } catch { /* stockage pas encore prêt */ }
+}, 1500);
+
+let llmStatus = { ok: false, detail: 'non vérifié' };
+setTimeout(() => { void probeLlm().then((r) => { llmStatus = r; console.log(`[ai-engine] LLM : ${r.detail}`); }); }, 500);
+// Le Studio n'affiche pas le modèle : seulement « Démo » quand aucune clé n'est configurée.
+app.get('/meta', async () => ({ demo: isDemoMode(), provider: llm.name === 'mock' ? 'démo' : 'configuré' }));
+app.get('/llm', async () => ({ configured: !!providerConf(), provider: providerConf()?.label ?? null, model: providerConf()?.model ?? null, ...llmStatus }));
+app.post<{ Body: { projectId?: string | null; mode?: 'ask' | 'agent'; message: string; fileIds?: string[]; version?: number } }>('/chat', async (r) =>
+  chat({ projectId: r.body.projectId ?? null, mode: r.body.mode === 'agent' ? 'agent' : 'ask', message: String(r.body.message ?? ''), fileIds: r.body.fileIds ?? [], version: r.body.version }));
+app.post<{ Params: { id: string } }>('/jobs/:id/approve', async (r) => ({ ok: decide(r.params.id, true) }));
+app.post<{ Params: { id: string } }>('/jobs/:id/reject', async (r) => ({ ok: decide(r.params.id, false) }));
+app.post<{ Params: { id: string } }>('/jobs/:id/cancel', async (r) => ({ ok: cancelJob(r.params.id) }));
+
+/** SSE ordonné par seq. Reconnexion (Last-Event-ID) = reprise de l'état réel, jamais un second job. */
+app.get<{ Params: { id: string }; Querystring: { after?: string } }>('/jobs/:id/events', async (req, reply) => {
+  const after = Number(req.headers['last-event-id'] ?? req.query.after ?? 0) || 0;
+  reply.hijack();
+  const res = reply.raw;
+  res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive', 'x-accel-buffering': 'no' });
+  let last = after; const queue: JobEvent[] = []; let replaying = true; let done = false;
+  const send = (e: JobEvent) => {
+    if (e.seq <= last) return;
+    last = e.seq;
+    res.write(`id: ${e.seq}\nevent: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`);
+    if (e.type === 'job.done') { done = true; setTimeout(() => res.end(), 50); }
+  };
+  const unsub = subscribe(req.params.id, (e) => (replaying ? queue.push(e) : send(e)));
+  for (const e of await call<JobEvent[]>('storage', `/jobs/${req.params.id}/events?after=${after}`)) send(e);
+  replaying = false; queue.sort((a, b) => a.seq - b.seq).forEach(send);
+  const ping = setInterval(() => res.write(': ping\n\n'), 15_000);
+  req.raw.on('close', () => { clearInterval(ping); unsub(); });
+  if (done) { clearInterval(ping); unsub(); }
 });
 
-app.post<{ Body: FixInput }>('/fix', async (req, reply) => {
-  if (!req.body?.code) return reply.code(400).send({ error: 'code requis' });
-  const s = sse(reply);
-  try {
-    const result = await fix(req.body, { provider: choice.provider, emit: s.emit, signal: s.signal });
-    s.emit({ type: 'result', ...result });
-  } catch (e) {
-    s.emit({ type: 'error', message: (e as Error).message });
-  }
-  s.end();
-});
-
-app.post<{ Body: { prompt?: string; dashboardId?: string; spec?: DashboardSpec | null } }>('/dashboards/build', async (req, reply) => {
-  if (!req.body?.prompt?.trim()) return reply.code(400).send({ error: 'prompt requis' });
-  const s = sse(reply);
-  try {
-    const result = await buildDashboard(
-      { prompt: req.body.prompt.trim(), dashboardId: req.body.dashboardId, spec: req.body.spec },
-      { provider: choice.provider, mcp, emit: s.emit as (e: Record<string, unknown>) => void, signal: s.signal },
-    );
-    s.emit({ type: 'result', ...result });
-  } catch (e) {
-    s.emit({ type: 'error', message: (e as Error).message });
-  }
-  s.end();
-});
-
-/** Lecture d'un graphique : le tableau appelle ses sources à chaque ouverture. Budget : 2 minutes. */
-app.post<{ Body: { tool?: string; args?: unknown; x?: string; y?: string } }>('/interpret', async (req, reply) => {
-  const tool = String(req.body?.tool ?? '');
-  if (!/^[a-zA-Z0-9-]+__[\w.-]+$/.test(tool)) return reply.code(400).send({ error: 'nom d’outil invalide' });
-  try {
-    const r = await mcp.call(tool, req.body?.args ?? {}, { timeoutMs: INTERPRETER_TIMEOUT_MS });
-    return { rows: shapeRows(r.data, req.body?.x || 'label', req.body?.y || 'value'), ms: r.ms ?? null };
-  } catch (e) {
-    return reply.code(502).send({ error: (e as Error).message });
-  }
-});
-
-app.listen({ port: PORT, host: BIND_HOST }).then(() => console.log(`[ai-engine] prêt sur :${PORT}`));
+await listen(app, 'ai-engine');

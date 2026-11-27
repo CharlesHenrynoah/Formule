@@ -1,73 +1,23 @@
-# docker compose up --build   →  UI sur http://localhost:8080
-name: everything-software
-x-common: &common
-  restart: unless-stopped
-  env_file: [{ path: .env, required: false }]
-
+# docker compose up --build  →  Studio sur http://localhost:4000
+# Les services internes écoutent dans le conteneur ; seule la gateway est exposée.
 services:
-  storage:
-    <<: *common
-    build: ./services/storage
-    environment: { STORAGE_PORT: "4003", DB_PATH: /data/everything.db }
-    volumes: [storage-data:/data]
-    healthcheck: { test: ["CMD", "wget", "-qO-", "http://localhost:4003/health"], interval: 10s, retries: 5 }
-
-  validator:
-    <<: *common
-    build: ./services/validator
-    environment: { VALIDATOR_PORT: "4002" }
-    healthcheck: { test: ["CMD", "wget", "-qO-", "http://localhost:4002/health"], interval: 10s, retries: 5 }
-
-  mcp-hub:
-    <<: *common
-    build: { context: ., dockerfile: services/mcp-hub/Dockerfile }
-    environment: { MCP_HUB_PORT: "4004", MCP_CONFIG_PATH: /app/mcp.config.json, APPS_DIR: /apps }
-    volumes: [./mcp.config.json:/app/mcp.config.json, apps-data:/apps]
-    healthcheck: { test: ["CMD", "wget", "-qO-", "http://localhost:4004/health"], interval: 10s, retries: 5 }
-
-  ai-engine:
-    <<: *common
-    build: { context: ., dockerfile: services/ai-engine/Dockerfile }
-    environment: { AI_ENGINE_PORT: "4001", MCP_HUB_URL: http://mcp-hub:4004, AGENT_WORKSPACES_DIR: /workspaces }
-    volumes: ["agent-workspaces:/workspaces"]
-    depends_on: [mcp-hub]
-    healthcheck: { test: ["CMD", "wget", "-qO-", "http://localhost:4001/health"], interval: 10s, retries: 5 }
-
-  # Sous-agents des apps + façade de leurs backends MCP (même image que ai-engine)
-  app-agents:
-    <<: *common
-    build: { context: ., dockerfile: services/ai-engine/Dockerfile }
-    command: ["npx", "tsx", "src/app-agents/server.ts"]
-    environment: { APP_AGENTS_PORT: "4005", MCP_HUB_URL: http://mcp-hub:4004, STORAGE_URL: http://storage:4003, APPS_DIR: /apps, VOICE_GATEWAY_URL: http://voice-gateway:4006 }
-    volumes: [apps-data:/apps]
-    depends_on: [mcp-hub, storage]
-
-  # Voix du contremaître : Google (Gemini TTS + Gemini Live transcription). Mercury 3 reste le cerveau.
-  voice-gateway:
-    <<: *common
-    build: { context: services/voice-gateway }
-    environment: { VOICE_GATEWAY_PORT: "4006" }   # GOOGLE_API_KEY lue depuis .env (env_file), jamais loguée
-
-  api-gateway:
-    <<: *common
-    build: ./services/api-gateway
-    environment:
-      GATEWAY_PORT: "4000"
-      AI_ENGINE_URL: http://ai-engine:4001
-      VALIDATOR_URL: http://validator:4002
-      STORAGE_URL: http://storage:4003
-      MCP_HUB_URL: http://mcp-hub:4004
-      APP_AGENTS_URL: http://app-agents:4005
+  formule:
+    build: .
     ports: ["4000:4000"]
-    depends_on: [ai-engine, validator, storage, mcp-hub, app-agents]
-
-  frontend:
-    build: { context: ., dockerfile: frontend/Dockerfile }
-    ports: ["8080:80"]
-    depends_on: [api-gateway, voice-gateway]
-    restart: unless-stopped
-
+    env_file:
+      - path: .env          # INCEPTION_API_KEY / OPENAI_API_KEY, Basic Auth… (facultatif)
+        required: false
+    environment:
+      FORMULE_DATA_DIR: /data
+      # Seule la gateway écoute sur toutes les interfaces ; les autres restent internes au conteneur.
+      HOST: 127.0.0.1
+      FORMULE_GATEWAY_HOST: 0.0.0.0
+    volumes:
+      - formule-data:/data   # SQLite, snapshots, secrets (chmod 600), configuration MCP
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
 volumes:
-  apps-data:
-  agent-workspaces:
-  storage-data:
+  formule-data:

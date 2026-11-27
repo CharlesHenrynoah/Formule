@@ -1,22 +1,8 @@
 {
-  "name": "@es/voice-gateway",
+  "name": "@formule/voice-gateway",
+  "version": "1.0.0",
   "private": true,
-  "version": "0.1.0",
   "type": "module",
-  "scripts": {
-    "dev": "tsx watch src/index.ts",
-    "start": "tsx src/index.ts",
-    "test": "node --import tsx --test test/*.test.ts",
-    "typecheck": "tsc --noEmit -p ."
-  },
-  "dependencies": {
-    "fastify": "^5.2.0",
-    "ws": "^8.18.0",
-    "tsx": "^4.19.0"
-  },
-  "devDependencies": {
-    "typescript": "^5.7.0",
-    "@types/node": "^22.10.0",
-    "@types/ws": "^8.5.0"
-  }
+  "scripts": { "dev": "tsx src/index.ts", "start": "tsx src/index.ts" },
+  "dependencies": { "@formule/service-kit": "*" }
 }

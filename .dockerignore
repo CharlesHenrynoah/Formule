@@ -1,8 +1,6 @@
+node_modules
 **/node_modules
-**/dist
-**/data
+data
 .env
-screenshots
-.access
-.public-url
-*.db
+frontend/dist
+packages/app-runtime/dist

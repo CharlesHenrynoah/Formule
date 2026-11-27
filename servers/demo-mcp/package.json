@@ -1,0 +1,9 @@
+{
+  "name": "@formule/demo-mcp",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Serveur MCP de DÉMONSTRATION (données synthétiques, marquées démo). Transport stdio.",
+  "scripts": { "start": "tsx src/index.ts" },
+  "dependencies": { "@modelcontextprotocol/sdk": "^1.32.0", "zod": "^4.0.0" }
+}

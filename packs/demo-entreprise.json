@@ -1,0 +1,495 @@
+{
+  "id": "demo-entreprise",
+  "version": 1,
+  "description": "Vocabulaire métier du serveur de démonstration (revenus, pipeline, publicités, inscriptions). Pack d’exemple : le cœur de Formule ne le connaît pas.",
+  "appliesTo": {
+    "anyTool": [
+      "factures_lister",
+      "affaires_lister",
+      "campagnes_lister",
+      "inscriptions_serie"
+    ]
+  },
+  "recipes": [
+    {
+      "match": "(revenu|chiffre d.?affaires|\\bca\\b|factur|encaiss)",
+      "title": "Revenu du mois",
+      "mission": "Suivre le revenu facturé du mois en cours, son évolution et le détail des factures.",
+      "commands": [
+        "Quel est le revenu du mois ?",
+        "Affiche seulement les factures",
+        "Ajoute un classement par client"
+      ],
+      "reqs": [
+        {
+          "id": "revenu_mois",
+          "label": "revenu du mois",
+          "mandatory": true,
+          "tool": [
+            "factur",
+            "invoice"
+          ],
+          "view": "kpi",
+          "measure": [
+            "montant",
+            "amount",
+            "valeur"
+          ],
+          "time": [
+            "emise",
+            "date"
+          ],
+          "agg": "sum",
+          "where": [
+            {
+              "field": [
+                "emise",
+                "date"
+              ],
+              "op": "current_month"
+            }
+          ],
+          "title": "Revenu du mois"
+        },
+        {
+          "id": "factures_mois",
+          "label": "nombre de factures du mois",
+          "mandatory": false,
+          "tool": [
+            "factur",
+            "invoice"
+          ],
+          "view": "kpi",
+          "time": [
+            "emise",
+            "date"
+          ],
+          "agg": "count",
+          "where": [
+            {
+              "field": [
+                "emise",
+                "date"
+              ],
+              "op": "current_month"
+            }
+          ],
+          "title": "Factures du mois"
+        },
+        {
+          "id": "evolution",
+          "label": "évolution des montants facturés",
+          "mandatory": true,
+          "tool": [
+            "factur",
+            "invoice"
+          ],
+          "view": "line",
+          "series": [
+            [
+              "montant",
+              "amount",
+              "valeur"
+            ]
+          ],
+          "time": [
+            "emise",
+            "date"
+          ],
+          "title": "Montants facturés"
+        },
+        {
+          "id": "detail",
+          "label": "détail des factures",
+          "mandatory": true,
+          "tool": [
+            "factur",
+            "invoice"
+          ],
+          "view": "table",
+          "title": "Factures"
+        }
+      ]
+    },
+    {
+      "match": "(pipeline|affaires|deals?|opportunit|commercial|prospect)",
+      "title": "Pipeline commercial",
+      "mission": "Mesurer le pipeline ouvert, sa répartition par étape et par commercial.",
+      "commands": [
+        "Quel est le pipeline ouvert ?",
+        "Affiche seulement les affaires",
+        "Classe par probabilité"
+      ],
+      "reqs": [
+        {
+          "id": "pipeline_ouvert",
+          "label": "montant du pipeline ouvert",
+          "mandatory": true,
+          "tool": [
+            "affaire",
+            "deal",
+            "pipeline"
+          ],
+          "view": "kpi",
+          "measure": [
+            "montant",
+            "amount",
+            "valeur"
+          ],
+          "agg": "sum",
+          "where": [
+            {
+              "field": [
+                "etape",
+                "stage"
+              ],
+              "op": "neq",
+              "value": "gagnée"
+            },
+            {
+              "field": [
+                "etape",
+                "stage"
+              ],
+              "op": "neq",
+              "value": "perdue"
+            }
+          ],
+          "title": "Pipeline ouvert"
+        },
+        {
+          "id": "gagne",
+          "label": "montant gagné",
+          "mandatory": false,
+          "tool": [
+            "affaire",
+            "deal"
+          ],
+          "view": "kpi",
+          "measure": [
+            "montant",
+            "amount",
+            "valeur"
+          ],
+          "agg": "sum",
+          "where": [
+            {
+              "field": [
+                "etape",
+                "stage"
+              ],
+              "op": "eq",
+              "value": "gagnée"
+            }
+          ],
+          "title": "Gagné"
+        },
+        {
+          "id": "par_etape",
+          "label": "répartition par étape",
+          "mandatory": true,
+          "tool": [
+            "affaire",
+            "deal"
+          ],
+          "view": "ranking",
+          "measure": [
+            "montant",
+            "amount",
+            "valeur"
+          ],
+          "label_": [
+            "etape",
+            "stage"
+          ],
+          "groupBy": true,
+          "agg": "sum",
+          "title": "Montant par étape"
+        },
+        {
+          "id": "par_commercial",
+          "label": "classement des commerciaux",
+          "mandatory": true,
+          "tool": [
+            "affaire",
+            "deal"
+          ],
+          "view": "ranking",
+          "measure": [
+            "montant",
+            "amount",
+            "valeur"
+          ],
+          "label_": [
+            "proprietaire",
+            "owner"
+          ],
+          "groupBy": true,
+          "agg": "sum",
+          "title": "Montant par commercial"
+        },
+        {
+          "id": "detail",
+          "label": "liste des affaires",
+          "mandatory": true,
+          "tool": [
+            "affaire",
+            "deal"
+          ],
+          "view": "table",
+          "title": "Affaires"
+        }
+      ]
+    },
+    {
+      "match": "(publicit|campagne|\\bads?\\b|roas|rentab|acquisition payante)",
+      "title": "Publicités rentables",
+      "mission": "Comparer la rentabilité des campagnes : dépense, revenu attribué et ROAS.",
+      "commands": [
+        "Quelle campagne est la plus rentable ?",
+        "Mets en pause la campagne la moins rentable",
+        "Affiche seulement le classement"
+      ],
+      "reqs": [
+        {
+          "id": "depense",
+          "label": "dépense publicitaire",
+          "mandatory": true,
+          "tool": [
+            "campagne",
+            "campaign",
+            "ads"
+          ],
+          "view": "kpi",
+          "measure": [
+            "depense",
+            "spend",
+            "cout"
+          ],
+          "agg": "sum",
+          "title": "Dépense totale"
+        },
+        {
+          "id": "revenu_attribue",
+          "label": "revenu attribué",
+          "mandatory": true,
+          "tool": [
+            "campagne",
+            "campaign"
+          ],
+          "view": "kpi",
+          "measure": [
+            "revenu",
+            "revenue"
+          ],
+          "agg": "sum",
+          "title": "Revenu attribué"
+        },
+        {
+          "id": "roas_global",
+          "label": "ROAS global",
+          "mandatory": true,
+          "tool": [
+            "campagne",
+            "campaign"
+          ],
+          "view": "kpi",
+          "measure": [
+            "revenu",
+            "revenue"
+          ],
+          "den": [
+            "depense",
+            "spend",
+            "cout"
+          ],
+          "agg": "ratio",
+          "title": "ROAS global"
+        },
+        {
+          "id": "classement_roas",
+          "label": "classement par ROAS",
+          "mandatory": true,
+          "tool": [
+            "campagne",
+            "campaign"
+          ],
+          "view": "ranking",
+          "measure": [
+            "revenu",
+            "revenue"
+          ],
+          "den": [
+            "depense",
+            "spend",
+            "cout"
+          ],
+          "label_": [
+            "nom",
+            "name"
+          ],
+          "agg": "ratio",
+          "title": "ROAS par campagne"
+        },
+        {
+          "id": "detail",
+          "label": "détail des campagnes",
+          "mandatory": false,
+          "tool": [
+            "campagne",
+            "campaign"
+          ],
+          "view": "table",
+          "title": "Campagnes"
+        }
+      ]
+    },
+    {
+      "match": "(inscri|signup|devenu|convers|activation|essai)",
+      "title": "Inscriptions devenues clients",
+      "mission": "Suivre les inscriptions et la part devenue cliente, jour par jour.",
+      "commands": [
+        "Quel est le taux de conversion ?",
+        "Simule +5 %",
+        "Affiche seulement la courbe"
+      ],
+      "reqs": [
+        {
+          "id": "inscriptions",
+          "label": "inscriptions sur la période",
+          "mandatory": true,
+          "tool": [
+            "inscri",
+            "signup"
+          ],
+          "view": "kpi",
+          "measure": [
+            "inscriptions",
+            "signups"
+          ],
+          "agg": "sum",
+          "title": "Inscriptions"
+        },
+        {
+          "id": "taux_conversion",
+          "label": "taux inscrits → clients",
+          "mandatory": true,
+          "tool": [
+            "inscri",
+            "signup"
+          ],
+          "view": "kpi",
+          "measure": [
+            "devenus",
+            "clients",
+            "converted"
+          ],
+          "den": [
+            "inscriptions",
+            "signups"
+          ],
+          "agg": "ratio",
+          "percent": true,
+          "title": "Taux devenus clients"
+        },
+        {
+          "id": "courbe",
+          "label": "courbe quotidienne",
+          "mandatory": true,
+          "tool": [
+            "inscri",
+            "signup"
+          ],
+          "view": "line",
+          "series": [
+            [
+              "inscriptions",
+              "signups"
+            ],
+            [
+              "devenus",
+              "clients",
+              "converted"
+            ]
+          ],
+          "time": [
+            "horodatage",
+            "date",
+            "time",
+            "jour"
+          ],
+          "title": "Inscriptions et clients"
+        }
+      ]
+    }
+  ],
+  "knownMissing": [
+    {
+      "id": "cac",
+      "label": "coût d’acquisition client (CAC)",
+      "mandatory": true,
+      "tool": [
+        "cac",
+        "acquisition_cost"
+      ],
+      "view": "kpi",
+      "measure": [
+        "cac"
+      ],
+      "agg": "last",
+      "title": "CAC",
+      "match": "(\\bcac\\b|co[uû]t d.?acquisition)"
+    },
+    {
+      "id": "churn",
+      "label": "taux d’attrition",
+      "mandatory": true,
+      "tool": [
+        "churn",
+        "attrition",
+        "resiliation"
+      ],
+      "view": "kpi",
+      "measure": [
+        "churn"
+      ],
+      "agg": "last",
+      "title": "Attrition",
+      "match": "(churn|attrition|r[ée]siliation)"
+    },
+    {
+      "id": "marge",
+      "label": "marge",
+      "mandatory": true,
+      "tool": [
+        "marge",
+        "margin",
+        "cout_revient"
+      ],
+      "view": "kpi",
+      "measure": [
+        "marge",
+        "margin"
+      ],
+      "agg": "sum",
+      "title": "Marge",
+      "match": "\\bmarges?\\b"
+    },
+    {
+      "id": "ltv",
+      "label": "valeur vie client (LTV)",
+      "mandatory": true,
+      "tool": [
+        "ltv",
+        "lifetime"
+      ],
+      "view": "kpi",
+      "measure": [
+        "ltv"
+      ],
+      "agg": "last",
+      "title": "LTV",
+      "match": "(\\bltv\\b|valeur vie)"
+    }
+  ]
+}
