@@ -12,19 +12,11 @@ interface Conn { client: Client; status: 'connected' | 'error'; error?: string; 
 const conns = new Map<string, Conn>();
 
 export class HubError extends Error {
-  constructor(public kind: FailureKind, message: string, public status = 502) { super(message); }
+  constructor(public kind: FailureKind, message: string, public status = 502, public retryAfterMs?: number) { super(message); }
 }
 
-export function classifyError(e: unknown): FailureKind {
-  const m = String((e as Error)?.message ?? e).toLowerCase();
-  if (/401|403|unauthori|forbidden|permission|authentication method|api ?key|apikey/.test(m)) return 'permission';
-  if (/429|quota|rate/.test(m)) return 'quota';
-  if (/timeout|timed out|aborted/.test(m)) return 'timeout';
-  if (/not found|unknown tool|-32601/.test(m)) return 'method_missing';
-  if (/invalid|schema|-32602/.test(m)) return 'invalid_schema';
-  if (/econnrefused|enotfound|fetch failed|closed|spawn/.test(m)) return 'not_connected';
-  return 'provider_down';
-}
+export { classifyError } from './failure.js';
+import { classifyError, retryAfterMs } from './failure.js';
 
 export async function getClient(cfg: ServerConfig): Promise<Client> {
   const existing = conns.get(cfg.id);
@@ -52,7 +44,7 @@ export async function getClient(cfg: ServerConfig): Promise<Client> {
     return client;
   } catch (e) {
     conns.set(cfg.id, { client, status: 'error', error: (e as Error).message });
-    throw e instanceof HubError ? e : new HubError(classifyError(e), (e as Error).message);
+    throw e instanceof HubError ? e : new HubError(classifyError(e), (e as Error).message, 502, retryAfterMs(e));
   }
 }
 

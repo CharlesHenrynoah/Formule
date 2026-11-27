@@ -1,5 +1,5 @@
 import { call, createService, listen, ServiceError } from '@formule/service-kit';
-import { detectInjection, getPath, maskSecret, redact, splitToolKey } from '@formule/contracts';
+import { detectInjection, getPath, maskSecret, redact, redactString, splitToolKey } from '@formule/contracts';
 import { makeEnvelope, newId, operationHash, issueConfirmation, verifyConfirmation } from '@formule/contracts/node';
 import { loadConfig, saveConfig, type Permission, type ServerConfig } from './config.js';
 import { connStatus, disconnect, extractResult, getClient, HubError, withTimeout, classifyError } from './connections.js';
@@ -8,6 +8,8 @@ import { listFileTools, readFileTool } from './files.js';
 
 const app = await createService('mcp-hub', () => ({ servers: loadConfig().filter((s) => s.enabled).length }));
 type B = Record<string, any>;
+import { ReadCooldown, retryAfterMs } from './failure.js';
+const readCooldown = new ReadCooldown();
 const ARGS_MAX = 20 * 1024;
 const OP_TTL_MS = 10 * 60_000;
 const WRITE_TIMEOUT = Number(process.env.FORMULE_WRITE_TIMEOUT_MS ?? 15_000);
@@ -124,6 +126,11 @@ app.post<{ Body: B }>('/call', async (r) => {
     return { envelope: env.envelope, raw: null };
   }
   const requestId = newId('req');
+  const blocked = readCooldown.active(serverId);
+  if (blocked) {
+    const env = makeEnvelope({ serverId, serverName: s.name, demo: s.demo, tool, args, requestId, error: { kind: blocked.kind, message: 'Lectures temporairement suspendues après une limite fournisseur.', retryAfterMs: blocked.retryAfterMs } });
+    return { envelope: env.envelope, raw: null };
+  }
   try {
     const c = await getClient(s);
     let pages = 0; let merged: unknown = undefined; let cursor: string | null | undefined; let complete = true; let note: string | undefined;
@@ -131,8 +138,19 @@ app.post<{ Body: B }>('/call', async (r) => {
     do {
       const a = cursor ? { ...args, [paginate.cursorArg]: cursor } : args;
       const res = await withTimeout(c.callTool({ name: tool, arguments: a }), 20_000, `${tool}`);
-      if (res.isError) throw new HubError(classifyError(JSON.stringify(res.content)), JSON.stringify(res.content).slice(0, 300));
+      if (res.isError) {
+        const content = Array.isArray(res.content) ? res.content as { type: string; text?: string }[] : [];
+        const detail = content.filter((x) => x.type === 'text').map((x) => x.text ?? '').join('\n') || 'Le fournisseur a signalé un échec MCP.';
+        let structured: unknown = detail; try { structured = JSON.parse(detail); } catch { /* texte fournisseur */ }
+        if (typeof res.structuredContent === 'object' && res.structuredContent !== null) structured = res.structuredContent;
+        const kind = classifyError(structured);
+        throw new HubError(kind === 'provider_down' ? classifyError(detail) : kind, detail.slice(0, 300), 502, retryAfterMs(structured) ?? retryAfterMs(res));
+      }
       const { raw, note: convNote } = extractResult(res as never);
+      if (convNote === 'exécution en erreur') {
+        const detail = String(getPath(raw, 'texte') ?? 'Exécution en erreur');
+        throw new HubError(classifyError(detail), detail.slice(0, 300));
+      }
       if (convNote) note = convNote;
       pages++;
       if (!paginate) { merged = raw; break; }
@@ -149,7 +167,12 @@ app.post<{ Body: B }>('/call', async (r) => {
     return { envelope: env.envelope, raw: merged };
   } catch (e) {
     const kind = e instanceof HubError ? e.kind : classifyError(e);
-    const env = makeEnvelope({ serverId: s.id, serverName: s.name, demo: s.demo, tool, args, requestId, error: { kind, message: (e as Error).message.slice(0, 300) } });
+    const retry = retryAfterMs(e);
+    readCooldown.block(serverId, kind, retry);
+    const cooldown = readCooldown.active(serverId);
+    let message = redactString(String((e as Error)?.message ?? e));
+    const token = serverToken(s.id); if (token) message = message.split(token).join('••••');
+    const env = makeEnvelope({ serverId: s.id, serverName: s.name, demo: s.demo, tool, args, requestId, error: { kind, message: message.slice(0, 300), ...(cooldown ? { retryAfterMs: cooldown.retryAfterMs } : {}) } });
     return { envelope: env.envelope, raw: null };
   }
 });

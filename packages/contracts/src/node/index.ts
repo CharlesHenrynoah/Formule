@@ -9,7 +9,7 @@ export const sha256 = (s: string | Buffer) => createHash('sha256').update(s).dig
 export interface EnvelopeInput {
   serverId: string; serverName: string; demo: boolean; tool: string; args: Record<string, unknown>;
   requestId?: string; schemaVersion?: string; observedAt?: string | null; coverage?: Coverage;
-  raw?: unknown; error?: { kind: FailureKind; message: string };
+  raw?: unknown; error?: { kind: FailureKind; message: string; retryAfterMs?: number };
 }
 
 /** Enveloppe immuable. L'empreinte porte sur les octets canoniques du brut. */
