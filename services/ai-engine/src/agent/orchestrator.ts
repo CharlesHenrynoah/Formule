@@ -13,7 +13,7 @@ import { buildWorkspace, cleanupWorkspace, createWorkspace, shadcnAdd, writeWork
 import { emit, setState, type JobRef } from './events.js';
 import { matchView, parseDelta, untouchedEqual, type DeltaOp } from './delta.js';
 import { backendVsOracle, contractGate, runDomCheck, sourceGate, staticGates } from '../evaluation/gates.js';
-import { expectations } from '../evaluation/oracle.js';
+import { contradicts, expectations } from '../evaluation/oracle.js';
 import { isDemoMode } from '../llm.js';
 
 interface Ctx { cancelled: boolean; abort: AbortController; approval?: (ok: boolean) => void }
@@ -476,6 +476,10 @@ async function buildAndCertify(job: JobRef, x: { spec: AppSpec; datasets: Map<st
   const reqs: RequirementStatus[] = spec.requirements.map((r) => {
     if (r.status !== 'covered') return { id: r.id, label: r.label, mandatory: r.mandatory, status: r.status, reason: r.reason };
     const vid = r.evidence?.viewId;
+    if (r.analytical) {
+      const clash = contradicts(r.analytical, spec.views.find((v) => v.id === vid));
+      if (clash) return { id: r.id, label: r.label, mandatory: r.mandatory, status: 'missing', reason: clash };
+    }
     if (!vid || !domOk.has(vid)) {
       const diag = dom?.results.find((d) => d.viewId === vid)?.diag;
       return { id: r.id, label: r.label, mandatory: r.mandatory, status: 'missing', reason: `métrique lue mais absente du DOM${diag ? ` (${diag})` : ''}` };

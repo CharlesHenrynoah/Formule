@@ -158,14 +158,14 @@ function keep(v: unknown, w: { op: string; value?: string | number | (string | n
 export function contradicts(
   req: {
     view: string; visualization?: string; agg?: string; operation?: string;
-    where?: { path?: string; op: string; value?: unknown }[]; filters?: { path?: string; op: string; value?: unknown }[];
+    where?: { path?: string; field?: readonly string[]; op: string; value?: unknown }[]; filters?: { path?: string; field?: readonly string[]; op: string; value?: unknown }[];
     percent?: boolean; limit?: number; order?: string; entities?: string[]; population?: string; period?: string; grain?: string;
   },
   view: {
     kind: string;
     bindings?: {
       aggregate?: { agg?: string; where?: { path: string; op: string; value?: unknown }[]; percent?: boolean };
-      limit?: number; order?: string; population?: string;
+      limit?: number; order?: string; population?: string; agg?: string;
     };
   } | undefined,
 ): string | null {
@@ -173,13 +173,16 @@ export function contradicts(
   const wantView = req.visualization ?? req.view;
   if (view.kind !== wantView) return `vue « ${view.kind} » au lieu de « ${wantView} »`;
   const wantOp = req.operation ?? req.agg;
-  const got = view.bindings?.aggregate?.agg;
+  const got = view.bindings?.aggregate?.agg ?? view.bindings?.agg;
   if (wantOp && got && got !== wantOp) return `opération « ${got} » au lieu de « ${wantOp} »`;
   if (wantOp === 'identity' && got && got !== 'identity') return `identité remplacée par « ${got} »`;
   const wantFilters = req.filters ?? req.where ?? [];
   const gotFilters = view.bindings?.aggregate?.where ?? [];
   for (const w of wantFilters) {
-    const hit = gotFilters.find((g) => g.op === w.op && (w.path ? g.path === w.path || g.path.endsWith(w.path) : true));
+    const normField = (x: string) => x.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    const hit = gotFilters.find((g) => g.op === w.op
+      && JSON.stringify(g.value) === JSON.stringify(w.value)
+      && (w.path ? g.path === w.path : !w.field?.length || w.field.some((f) => normField(g.path).includes(normField(f)))));
     if (!hit && view.kind === 'kpi') return `filtre « ${w.op} » absent de la vue certifiée`;
   }
   if (req.percent && view.bindings?.aggregate && view.bindings.aggregate.percent !== true) return 'pourcentage exigé absent';
