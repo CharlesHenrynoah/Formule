@@ -269,6 +269,11 @@ export function styleFromConstraints(constraints: ContractConstraints): { theme:
   return { theme, accent };
 }
 
+/** Signal analytique dans un libellé / point de coverage (évite de classer un KPI comme « design seul »). */
+function hasAnalyticSignal(text: string): boolean {
+  return /(kpi|capitalisation|volume|prix|classement|courbe|tableau|graphique|ratio|somme|nombre|part\b|donut|histogram)/i.test(text);
+}
+
 /** Champ exact : path égal ou suffixe `.field` — pas d'includes flou. */
 export function exactFieldMatch(fieldRel: string, measure: string): boolean {
   const rel = norm(fieldRel);
