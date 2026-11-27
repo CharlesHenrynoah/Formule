@@ -47,11 +47,17 @@ export function rankDatasets(req: ReqTemplate, datasets: Map<string, Dataset>): 
 /** Conditions éliminatoires : false = compatible, string = motif d'élimination. */
 export function eliminate(req: ReqTemplate, ds: Dataset): string | null {
   const rows = ds.collection ? (getCollection(ds.acq.raw, ds.collection) ?? []) : [];
+  if (req.scopeSize != null && rows.length !== req.scopeSize) return `population de ${req.scopeSize} lignes demandée, ${rows.length} obtenues`;
   const labelFields = ds.fields.filter((f) => f.role === 'dimension' || f.role === 'text' || f.role === 'identifier');
 
   for (const entity of req.entities ?? []) {
     const hit = rows.some((r) => labelFields.some((f) => hitValue(getPath(r, f.rel), entity)));
-    if (!hit) return `entité « ${entity} » absente`;
+    const rootHit = ds.contract.fields.some((f) => !f.path.includes('[]') && f.type === 'string' && ['identifier','dimension','text'].includes(f.role) && hitValue(getPath(ds.acq.raw, f.path), entity));
+    if (!hit && !rootHit) return `entité « ${entity} » absente`;
+    if ((req.view === 'line' || req.visualization === 'line') && !rootHit && hit) {
+      const field = labelFields.find((f) => rows.some((r) => hitValue(getPath(r, f.rel), entity)));
+      if (!field || rows.some((r) => !(req.entities ?? []).some((e) => hitValue(getPath(r, field.rel), e)))) return 'série multi-entité non filtrée';
+    }
   }
 
   if (req.population) {
@@ -67,7 +73,14 @@ export function eliminate(req: ReqTemplate, ds: Dataset): string | null {
     const bounds = periodInterval(req.period);
     if (!bounds) return `période « ${req.period} » non interprétable`;
     const ts = rows.map((r) => parseTime(getPath(r, time.rel))).filter((t): t is number => t !== null);
-    if (!ts.some((t) => t >= bounds.start && t <= bounds.end)) return `période « ${req.period} » hors intervalle des données`;
+    if (!ts.length || ts.some((t) => t < bounds.start || t > bounds.end)) return `période « ${req.period} » hors intervalle des données`;
+    if ((req.view === 'line' || req.visualization === 'line') && /jours?|heures?/.test(req.period)) {
+      const sorted = [...new Set(ts)].sort((a,b) => a-b);
+      if (sorted.length < 2) return 'historique insuffisant : moins de deux observations';
+      const gaps = sorted.slice(1).map((v,i) => v - sorted[i]).sort((a,b) => a-b);
+      const tolerance = Math.min(86400_000, Math.max(3600_000, (gaps[Math.floor(gaps.length / 2)] ?? 0) * 2));
+      if (sorted[0] > bounds.start + tolerance || sorted[sorted.length - 1] < bounds.end - tolerance) return `couverture temporelle insuffisante : ${req.period}`;
+    }
   }
 
   if (req.grain) {
@@ -80,18 +93,19 @@ export function eliminate(req: ReqTemplate, ds: Dataset): string | null {
     if (req.grain === 'hour' && !(med >= 30 * 60_000 && med <= 2 * 3600_000)) return `granularité « hour » non respectée`;
   }
 
-  if (req.unit) {
+  const sourceUnit = req.inputUnit ?? (((req.operation ?? req.agg) === 'ratio' && req.percent) ? undefined : req.unit);
+  if (sourceUnit) {
     const measureKws = [...(req.measures ?? []), ...(req.measure ?? [])].map(norm);
     const hits = ds.fields.filter((f) => f.role === 'measure' && measureKws.some((k) => k.length > 2 && norm(f.rel).includes(k)));
-    const unitOk = hits.some((f) => f.unit && norm(f.unit) === norm(req.unit!))
-      || hits.some((f) => norm(f.rel).includes(norm(req.unit!)))
+    const unitOk = hits.some((f) => f.unit && norm(f.unit) === norm(sourceUnit))
+      || hits.some((f) => norm(f.rel).includes(norm(sourceUnit)))
       || rows.some((r) => hits.some((f) => {
         const us = ds.fields.find((x) => x.rel.startsWith(f.rel.split('.')[0]) && /devise|unite|unit|currency/.test(norm(x.rel)));
-        return us && norm(String(getPath(r, us.rel) ?? '')) === norm(req.unit!);
+        return us && norm(String(getPath(r, us.rel) ?? '')) === norm(sourceUnit);
       }));
     // Si aucune mesure n'expose d'unité, le suffixe du champ (prix_eur) peut suffire.
-    const suffixOk = hits.some((f) => norm(f.rel).endsWith(`_${norm(req.unit!)}`) || norm(f.rel).includes(norm(req.unit!)));
-    if (!unitOk && !suffixOk) return `unité « ${req.unit} » absente`;
+    const suffixOk = hits.some((f) => norm(f.rel).endsWith(`_${norm(sourceUnit)}`) || norm(f.rel).includes(norm(sourceUnit)));
+    if (!unitOk && !suffixOk) return `unité « ${sourceUnit} » absente`;
   }
 
   return null;
@@ -121,7 +135,7 @@ function scoreDataset(req: ReqTemplate, ds: Dataset): number {
 function hitValue(v: unknown, entity: string) {
   if (v === null || v === undefined) return false;
   const a = norm(String(v)), b = norm(entity);
-  return a.length > 1 && b.length > 1 && (a === b || a.includes(b) || b.includes(a));
+  return a === b && a.length > 0;
 }
 
 function unique(used: Set<string>, base: string) {

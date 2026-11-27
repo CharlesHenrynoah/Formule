@@ -140,3 +140,54 @@ describe('tests négatifs', () => {
     expect(contradicts(tpl, { kind: 'bars', bindings: { agg: 'count', collection: 'rows', label: 'nom', unit: null, limit: 8 } })).toMatch(/identité|opération/);
   });
 });
+
+describe('regressions multi-domaines', () => {
+  it('ne confond pas fenêtre de mesure et population', () => {
+    const [r] = readContract('- Volume cumulé des commandes sur 24 heures');
+    expect(r.population).toBeUndefined();
+    expect(r.period).toBeUndefined();
+    expect(r.measureWindow).toBe('24 heures');
+  });
+  it('reconnaît la période historique relative', () => {
+    const [r] = readContract('- Courbe historique des températures sur les 30 derniers jours');
+    expect(r.period).toBe('30 jours');
+    expect(r.population).toBeUndefined();
+  });
+  it('respecte le classement décroissant et la limite', () => {
+    const [r] = readContract('- Classement des 5 premiers magasins par montant décroissant');
+    expect(r.order).toBe('desc');
+    expect(r.limit).toBe(5);
+  });
+  it('calcule une part en pourcentage depuis des montants en euros', () => {
+    const [r] = readContract('- Part de Alpha dans le montant en euros, exprimée en pourcentage');
+    const ds = datasetOf(acq({ rows: [{ nom: 'Alpha', montant_eur: 30 }, { nom: 'Beta', montant_eur: 70 }] }, 'sales', 'sales'));
+    expect(r.unit).toBe('%');
+    const plan = bindClauses([r], new Map([['sales', ds]]))[0];
+    expect(plan.status).toBe('covered');
+    expect(expectations([plan.view!], {sales: ds.acq.raw}, {sales: Date.now()})[0]).toMatchObject({value: '30'});
+  });
+  it('préserve les colonnes d’un tableau et son filtre de trois produits', () => {
+    const reqs = readContract('## 1. Indicateurs\n- Nombre d’éléments\n## 2. Tableau comparatif\nCrée un seul tableau contenant exactement trois produits : Alpha, Beta et Gamma.\nColonnes :\n- Nom.\n- Prix actuel en euros.');
+    expect(reqs).toHaveLength(2);
+    const table = reqs.find((r) => r.view === 'table')!;
+    expect(table.columns).toEqual(['Nom', 'Prix actuel en euros']);
+    expect(table.entities).toEqual(['Alpha', 'Beta', 'Gamma']);
+  });
+  it('applique un filtre à un graphique de stocks', () => {
+    const groups = groupAgg({ rows: [{ nom: 'A', stock: 7 }, { nom: 'B', stock: 9 }] }, { collection: 'rows', label: 'nom', metric: 'stock', agg: 'identity', limit: 8, where: [{ path: 'nom', op: 'eq', value: 'A' }] });
+    expect(groups.groups.map((g) => g.label)).toEqual(['A']);
+  });
+});
+
+describe('contraintes de données', () => {
+  it('refuse la mauvaise fenêtre de mesure même si le nom du champ correspond', () => {
+    const [r] = readContract('- Graphique en barres des variations sur 24 heures');
+    const ds = datasetOf(acq({ rows: [{ nom: 'Alpha', variation_7d_pct: 5 }] }, 'bad', 'read'));
+    expect(bindClauses([r], new Map([['bad', ds]]))[0].status).not.toBe('covered');
+  });
+  it('refuse une population de mauvaise taille', () => {
+    const [r] = readContract('- Somme des montants des 5 premiers magasins');
+    const ds = datasetOf(acq({ rows: [{ nom: 'Alpha', montant: 5 }] }, 'bad', 'read'));
+    expect(eliminate(r, ds)).toMatch(/population/);
+  });
+});

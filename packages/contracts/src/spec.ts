@@ -25,6 +25,9 @@ export const RequirementSchema = z.object({
   entities: z.array(z.string().max(80)).max(12).optional(),
   population: z.string().max(120).optional(),
   period: z.string().max(40).optional(),
+  measureWindow: z.string().max(40).optional(),
+  inputUnit: z.string().max(20).optional(),
+  scopeSize: z.number().int().min(1).optional(),
   grain: z.string().max(20).optional(),
   columns: z.array(z.string().max(40)).max(12).optional(),
   unit: z.string().max(20).optional(),
@@ -81,7 +84,7 @@ export const LineView = z.object({
 });
 export const TableView = z.object({
   kind: z.literal('table'), id: z.string(), title: z.string().max(80), queryId: z.string(),
-  bindings: z.object({ collection: Path, columns: z.array(z.object({ path: Path, label: z.string().max(40), unit: z.string().max(20).nullable(), type: z.enum(['number', 'string', 'time', 'boolean', 'link']) })).min(1).max(12),
+  bindings: z.object({ collection: Path, where: z.array(Where).max(4).optional(), columns: z.array(z.object({ path: Path, label: z.string().max(40), unit: z.string().max(20).nullable(), type: z.enum(['number', 'string', 'time', 'boolean', 'link']) })).min(1).max(12),
     facets: z.object({ path: Path, groups: z.record(z.string(), z.array(z.string())).optional() }).optional() }),
   requirementIds: z.array(z.string()).default([]),
   section: z.string().max(40).optional(),
@@ -113,7 +116,7 @@ export const NoteView = z.object({
   section: z.string().max(40).optional(),
 });
 
-const GroupBindings = z.object({ collection: Path, label: Path, metric: Path.optional(), agg: z.enum(['sum', 'count', 'avg', 'identity']).default('count'), unit: z.string().max(20).nullable(), limit: z.number().int().min(2).max(24).default(8) });
+const GroupBindings = z.object({ collection: Path, where: z.array(Where).max(4).optional(), label: Path, metric: Path.optional(), agg: z.enum(['sum', 'count', 'avg', 'identity']).default('count'), unit: z.string().max(20).nullable(), limit: z.number().int().min(2).max(24).default(8) });
 export const BarsView = z.object({ kind: z.literal('bars'), id: z.string(), title: z.string().max(80), queryId: z.string(), bindings: GroupBindings, requirementIds: z.array(z.string()).default([]), section: z.string().max(40).optional() });
 export const DonutView = z.object({ kind: z.literal('donut'), id: z.string(), title: z.string().max(80), queryId: z.string(), bindings: GroupBindings, requirementIds: z.array(z.string()).default([]), section: z.string().max(40).optional() });
 export const HistogramView = z.object({

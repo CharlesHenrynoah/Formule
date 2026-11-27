@@ -1,10 +1,12 @@
+import { filterRows } from './aggregate.js';
+import type { Aggregate } from './spec.js';
 import { getCollection, getPath, parseTime } from './values.js';
 
 /** Calculs purs des graphiques « de forme » : regroupement, distribution, nuage, calendrier. Aucun null→0. */
 export interface Group { label: string; value: number; count: number; members?: { label: string; value: number }[] }
 
-export function groupAgg(raw: unknown, b: { collection: string; label: string; metric?: string; agg: 'sum' | 'count' | 'avg' | 'identity'; limit: number }): { groups: Group[]; others: Group | null; total: number; skipped: number } {
-  const rows = getCollection(raw, b.collection) ?? [];
+export function groupAgg(raw: unknown, b: { collection: string; label: string; metric?: string; agg: 'sum' | 'count' | 'avg' | 'identity'; limit: number; where?: Aggregate['where']; refTime?: number }): { groups: Group[]; others: Group | null; total: number; skipped: number } {
+  const rows = filterRows(getCollection(raw, b.collection) ?? [], b.where ?? [], b.refTime ?? Date.now());
   const m = new Map<string, { s: number; n: number; c: number; first: number | null }>();
   let skipped = 0;
   for (const r of rows) {

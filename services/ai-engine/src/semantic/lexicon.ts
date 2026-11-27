@@ -42,6 +42,9 @@ export interface ReqTemplate {
   population?: string;
   limit?: number;
   period?: string;
+  measureWindow?: string;
+  inputUnit?: string;
+  scopeSize?: number;
   grain?: string;
   dimensions?: string[];
   columns?: string[];
