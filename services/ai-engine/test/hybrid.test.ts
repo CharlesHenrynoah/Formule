@@ -48,11 +48,13 @@ describe('hybrid schemas AI-first', () => {
     expect(ok.success).toBe(true);
   });
 
-  it('rejette une visualisation inconnue', () => {
-    expect(InterpretPlanSchema.safeParse({
+  it('neutralise une visualisation inconnue (pas de rejet du contrat entier)', () => {
+    const p = InterpretPlanSchema.safeParse({
       title: 'X', mission: 'Y', coverage: ['a'],
       requirements: [{ label: 'Z', visualization: 'radar' }],
-    }).success).toBe(false);
+    });
+    expect(p.success).toBe(true);
+    if (p.success) expect(p.data.requirements[0]?.visualization).toBeUndefined();
   });
 
   it('valide liaison et correction avec patch', () => {

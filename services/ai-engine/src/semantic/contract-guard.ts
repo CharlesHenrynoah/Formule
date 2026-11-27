@@ -44,6 +44,36 @@ function intentKey(r: ReqTemplate): string {
   ].join('|');
 }
 
+/** Retire les unités inventées par le LLM et absentes du prompt (ne pas durcir hors intention). */
+export function stripUngroundedUnits(prompt: string, reqs: ReqTemplate[]): ReqTemplate[] {
+  const p = norm(prompt);
+  return reqs.map((r) => {
+    if (!r.unit && !r.inputUnit) return r;
+    const u = norm(r.unit ?? r.inputUnit ?? '');
+    if (!u) return r;
+    const grounded = p.includes(u)
+      || new RegExp(`\\b${u}\\b`, 'i').test(prompt)
+      || (u === 'eur' && /euros?|€/i.test(prompt))
+      || (u === 'usd' && /dollars?|\$|usd/i.test(prompt))
+      || (u === '%' && /%|pourcent/i.test(prompt));
+    if (grounded) return r;
+    return { ...r, unit: undefined, inputUnit: undefined };
+  });
+}
+
+/** Retire les entités inventées (ex. nom de collection) absentes du prompt. */
+export function stripUngroundedEntities(prompt: string, reqs: ReqTemplate[]): ReqTemplate[] {
+  const p = norm(prompt);
+  return reqs.map((r) => {
+    if (!r.entities?.length) return r;
+    const kept = r.entities.filter((e) => {
+      const n = norm(e);
+      return n.length >= 2 && (p.includes(n) || prompt.toLowerCase().includes(e.toLowerCase()));
+    });
+    return { ...r, entities: kept.length ? kept : undefined };
+  });
+}
+
 /** Scelle le contrat validé : toute mutation d'intention devient détectable. */
 export function sealContract(
   prompt: string,
@@ -51,7 +81,8 @@ export function sealContract(
   coverage: string[],
   constraints: ContractConstraints,
 ): SealedContract {
-  const analytical = separateNonAnalytical(reqs, constraints);
+  const cleaned = stripUngroundedEntities(prompt, stripUngroundedUnits(prompt, reqs));
+  const analytical = separateNonAnalytical(cleaned, constraints);
   const intentLock = new Map(analytical.reqs.map((r) => [r.id, intentKey(r)]));
   const fingerprint = createHash('sha256')
     .update(analytical.reqs.map((r) => `${r.id}:${intentLock.get(r.id)}`).join(';'))
@@ -171,11 +202,19 @@ export function independentPromptAudit(prompt: string, reqs: ReqTemplate[], cons
     { re: /courbe|evolution|historique/, label: 'série temporelle' },
     { re: /capitalisation|market\s*cap|taille.*(march|market)/, label: 'capitalisation / taille de marché' },
   ];
-  const blob = analyticalReqs.map((r) => norm(`${r.label} ${r.acceptance ?? ''} ${r.transform ?? ''} ${r.view}`)).join(' ');
+  const blob = analyticalReqs.map((r) => norm([
+    r.label, r.acceptance ?? '', r.transform ?? '', r.view,
+    ...(r.measures ?? r.measure ?? []), ...(r.entities ?? []),
+  ].join(' '))).join(' ');
   for (const c of checks) {
-    if (c.re.test(p) && !c.re.test(blob) && !(c.label.includes('base') && analyticalReqs.some((r) => r.transform === 'base100'))) {
-      gaps.push(`intention « ${c.label} » absente du contrat`);
-    }
+    if (!c.re.test(p)) continue;
+    const covered = c.re.test(blob)
+      || (c.label.includes('base') && analyticalReqs.some((r) => r.transform === 'base100'))
+      || (c.label.includes('capitalisation') && analyticalReqs.some((r) => (r.measures ?? r.measure ?? []).some((m) => /market_?cap|capitalisation|total_market/i.test(m))))
+      || (c.label.includes('série') && analyticalReqs.some((r) => (r.visualization ?? r.view) === 'line'))
+      || (c.label.includes('classement') && analyticalReqs.some((r) => (r.visualization ?? r.view) === 'ranking'))
+      || (c.label.includes('tableau') && analyticalReqs.some((r) => (r.visualization ?? r.view) === 'table'));
+    if (!covered) gaps.push(`intention « ${c.label} » absente du contrat`);
   }
 
   // Contraintes design présentes dans le prompt doivent être capturées.

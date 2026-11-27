@@ -11,6 +11,7 @@ import {
   LlmBudget,
   sealContract,
   separateNonAnalytical,
+  stripUngroundedUnits,
   styleFromConstraints,
 } from '../src/semantic/contract-guard.js';
 import { applyCorrection, coverageGaps } from '../src/semantic/hybrid.js';
@@ -98,6 +99,19 @@ describe('PR6 · 4 liaison exacte exigence↔champ', () => {
     expect(exactFieldMatch('data.market_cap', 'market_cap')).toBe(true);
     expect(exactFieldMatch('market_cap_change_24h', 'market_cap')).toBe(false);
     expect(exactFieldMatch('total_volume', 'volume')).toBe(false);
+  });
+
+  it('stripUngroundedUnits retire une devise absente du prompt', () => {
+    const out = stripUngroundedUnits(
+      'KPI capitalisation totale du marché',
+      [req({ id: 'r1', label: 'Cap', view: 'kpi', measures: ['market_cap'], unit: 'USD' })],
+    );
+    expect(out[0].unit).toBeUndefined();
+    const kept = stripUngroundedUnits(
+      'Capitalisation en USD',
+      [req({ id: 'r1', label: 'Cap', view: 'kpi', unit: 'USD' })],
+    );
+    expect(kept[0].unit).toBe('USD');
   });
 });
 

@@ -19,60 +19,131 @@ import type { PlannedReq } from './plan.js';
 export { LlmBudget, sealContract };
 export type { ContractConstraints, SealedContract };
 
+/** Tolère un singleton LLM (objet / string) → tableau. */
+const asStringArray = (max: number, itemMax: number) => z.preprocess((v) => {
+  if (v == null) return undefined;
+  if (typeof v === 'string') return [v.slice(0, itemMax)];
+  if (Array.isArray(v)) return v.map((x) => String(x).slice(0, itemMax)).slice(0, max);
+  if (typeof v === 'object') return Object.values(v as Record<string, unknown>).map((x) => String(x).slice(0, itemMax)).slice(0, max);
+  return [String(v).slice(0, itemMax)];
+}, z.array(z.string().min(1).max(itemMax)).max(max).optional());
+
 const FilterSchema = z.object({
-  field: z.array(z.string().min(1).max(40)).min(1).max(6),
+  field: z.preprocess((v) => {
+    if (typeof v === 'string') return [v.slice(0, 40)];
+    if (Array.isArray(v)) return v.map((x) => String(x).slice(0, 40)).slice(0, 6);
+    if (v && typeof v === 'object') return Object.values(v as object).map((x) => String(x).slice(0, 40)).slice(0, 6);
+    return ['id'];
+  }, z.array(z.string().min(1).max(40)).min(1).max(6)),
   op: z.enum(['eq', 'neq', 'current_month', 'gt', 'lt', 'gte', 'lte', 'in', 'between']),
   value: z.union([z.string(), z.number(), z.array(z.union([z.string(), z.number()])).max(12)]).optional(),
 });
 
+const ViewEnum = z.preprocess((v) => {
+  if (v == null || v === '') return undefined;
+  const s = String(v).toLowerCase();
+  if ((VIEW_KINDS as readonly string[]).includes(s)) return s;
+  if (/courbe|line|serie|time/.test(s)) return 'line';
+  if (/tableau|table|liste/.test(s)) return 'table';
+  if (/classement|rank|top/.test(s)) return 'ranking';
+  if (/donut|camembert|part/.test(s)) return 'donut';
+  if (/barre|bar/.test(s)) return 'bars';
+  if (/note|design|texte/.test(s)) return 'note';
+  if (/kpi|indicateur|nombre|somme|total/.test(s)) return 'kpi';
+  return undefined;
+}, z.enum(VIEW_KINDS).optional());
+
+const AggEnum = z.preprocess((v) => {
+  if (v == null || v === '') return undefined;
+  const s = String(v).toLowerCase();
+  if ((AGGS as readonly string[]).includes(s)) return s;
+  if (/somme|sum/.test(s)) return 'sum';
+  if (/compte|count|nombre/.test(s)) return 'count';
+  if (/moyenne|avg|average/.test(s)) return 'avg';
+  if (/dernier|last/.test(s)) return 'last';
+  if (/ratio|part|pourcent/.test(s)) return 'ratio';
+  if (/identit/.test(s)) return 'identity';
+  return undefined;
+}, z.enum(AGGS).optional());
+
 const ReqSchema = z.object({
   id: z.string().min(1).max(40).optional(),
-  label: z.string().min(1).max(120),
+  label: z.preprocess((v) => (v == null ? 'Exigence' : String(v).slice(0, 120)), z.string().min(1).max(120)),
   kind: z.enum(['analytical', 'note']).default('analytical'),
-  visualization: z.enum(VIEW_KINDS).optional(),
-  operation: z.enum(AGGS).optional(),
-  measures: z.array(z.string().min(1).max(40)).max(6).optional(),
-  entities: z.array(z.string().min(1).max(40)).max(12).optional(),
-  population: z.string().max(120).optional(),
-  period: z.string().max(40).optional(),
-  grain: z.string().max(20).optional(),
-  unit: z.string().max(20).optional(),
-  transform: z.enum(['base100']).optional(),
-  filters: z.array(FilterSchema).max(4).optional(),
-  toolHints: z.array(z.string().min(1).max(60)).max(6).optional(),
-  argHints: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional(),
+  visualization: ViewEnum,
+  operation: AggEnum,
+  measures: asStringArray(6, 40),
+  entities: asStringArray(12, 40),
+  population: z.preprocess((v) => (v == null ? undefined : String(v).slice(0, 120)), z.string().max(120).optional()),
+  period: z.preprocess((v) => (v == null ? undefined : String(v).slice(0, 40)), z.string().max(40).optional()),
+  grain: z.preprocess((v) => (v == null ? undefined : String(v).slice(0, 20)), z.string().max(20).optional()),
+  unit: z.preprocess((v) => (v == null ? undefined : String(v).slice(0, 20)), z.string().max(20).optional()),
+  transform: z.preprocess((v) => {
+    if (v == null || v === '' || v === false) return undefined;
+    const s = String(v).toLowerCase().replace(/[\s_-]/g, '');
+    if (s === 'base100' || s === 'rebase' || s === 'normalize' || s === 'normalise') return 'base100';
+    return undefined;
+  }, z.enum(['base100']).optional()),
+  filters: z.preprocess((v) => (v == null ? undefined : Array.isArray(v) ? v : [v]), z.array(FilterSchema).max(4).optional()),
+  toolHints: asStringArray(6, 60),
+  argHints: z.preprocess((v) => {
+    if (v == null || Array.isArray(v)) return undefined;
+    if (typeof v === 'object') return v;
+    return undefined;
+  }, z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional()),
   certainty: z.enum(['certain', 'hypothesis']).optional(),
-  section: z.string().max(40).optional(),
-  limit: z.number().int().min(1).max(50).optional(),
+  section: z.preprocess((v) => (v == null ? undefined : String(v).slice(0, 40)), z.string().max(40).optional()),
+  limit: z.preprocess((v) => {
+    if (v == null || v === '') return undefined;
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.min(50, Math.max(1, Math.trunc(n))) : undefined;
+  }, z.number().int().min(1).max(50).optional()),
   order: z.enum(['asc', 'desc']).optional(),
-  covers: z.array(z.string().max(120)).max(6).optional(),
+  covers: asStringArray(6, 120),
 });
 
 const AcquisitionGroupSchema = z.object({
-  id: z.string().min(1).max(40),
-  purpose: z.string().max(160).optional(),
-  entity: z.string().max(40).optional(),
-  forRequirementIds: z.array(z.string().max(40)).min(1).max(20),
-  toolHints: z.array(z.string().min(1).max(60)).max(6).optional(),
-  argHints: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional(),
+  id: z.preprocess((v) => (v == null ? 'g' : String(v).slice(0, 40)), z.string().min(1).max(40)),
+  purpose: z.preprocess((v) => (v == null ? undefined : String(v).slice(0, 160)), z.string().max(160).optional()),
+  entity: z.preprocess((v) => (v == null ? undefined : String(v).slice(0, 40)), z.string().max(40).optional()),
+  forRequirementIds: z.preprocess((v) => {
+    if (typeof v === 'string' || typeof v === 'number') return [String(v)];
+    if (Array.isArray(v)) return v.map(String).slice(0, 20);
+    if (v && typeof v === 'object') return Object.values(v as object).map(String).slice(0, 20);
+    return ['0'];
+  }, z.array(z.string().max(40)).min(1).max(20)),
+  toolHints: asStringArray(6, 60),
+  argHints: z.preprocess((v) => {
+    if (v == null || Array.isArray(v)) return undefined;
+    if (typeof v === 'object') return v;
+    return undefined;
+  }, z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional()),
   dataNotDocs: z.boolean().default(true),
 });
 
+const strList = (max: number) => z.preprocess((v) => {
+  if (v == null) return [];
+  if (typeof v === 'string') return v.trim() ? [v.slice(0, 160)] : [];
+  if (Array.isArray(v)) return v.map((x) => String(x).slice(0, 160)).filter(Boolean).slice(0, max);
+  if (typeof v === 'object') return Object.values(v as object).map((x) => String(x).slice(0, 160)).filter(Boolean).slice(0, max);
+  return [];
+}, z.array(z.string().min(1).max(160)).max(max));
+
 /** Appel 1 — contrat sémantique intégral. */
 export const InterpretPlanSchema = z.object({
-  title: z.string().min(1).max(80),
-  mission: z.string().min(1).max(400),
+  title: z.preprocess((v) => (v == null || v === '' ? 'Application' : String(v).slice(0, 80)), z.string().min(1).max(80)),
+  mission: z.preprocess((v) => (v == null || v === '' ? 'Analyse' : String(v).slice(0, 400)), z.string().min(1).max(400)),
   /** Points du prompt original qui doivent apparaître dans le contrat (couverture). */
-  coverage: z.array(z.string().min(1).max(160)).min(1).max(40),
+  coverage: strList(40).pipe(z.array(z.string().min(1).max(160)).min(1).max(40)),
   constraints: z.object({
-    global: z.array(z.string().max(160)).max(20).optional(),
-    design: z.array(z.string().max(160)).max(20).optional(),
-    interactions: z.array(z.string().max(160)).max(20).optional(),
-    reliability: z.array(z.string().max(160)).max(20).optional(),
+    global: strList(20).optional(),
+    design: strList(20).optional(),
+    interactions: strList(20).optional(),
+    reliability: strList(20).optional(),
   }).optional(),
-  requirements: z.array(ReqSchema).min(1).max(40),
+  requirements: z.preprocess((v) => (Array.isArray(v) ? v : v && typeof v === 'object' ? Object.values(v as object) : []), z.array(ReqSchema).min(1).max(40)),
   /** Groupes d'acquisition : mutualisation + décomposition multi-entités. */
-  acquisitions: z.array(AcquisitionGroupSchema).max(40).optional(),
+  acquisitions: z.preprocess((v) => (v == null ? undefined : Array.isArray(v) ? v : [v]), z.array(AcquisitionGroupSchema).max(40).optional()),
 });
 export type InterpretPlan = z.infer<typeof InterpretPlanSchema>;
 export type AcquisitionGroup = z.infer<typeof AcquisitionGroupSchema>;
@@ -282,13 +353,32 @@ export async function interpretAndPlan(prompt: string, catalog: CatalogServer[],
   };
 }
 
+/** Concepts métier universels → tokens de champ (pas de spécialisation fournisseur). */
+function expandMeasureTokens(raw: string[] | undefined): string[] | undefined {
+  if (!raw?.length) return undefined;
+  const out: string[] = [];
+  for (const m of raw) {
+    const n = norm(m);
+    if (n.length > 1) out.push(n);
+    if (/capitalisation|market\s*cap|taille.*(march|market)|total.?market/.test(n)) out.push('market_cap', 'total_market_cap', 'marketcap');
+    if (/volume/.test(n)) out.push('volume', 'total_volume');
+    if (/^prix$|price|cours/.test(n)) out.push('price', 'prix');
+    if (/revenu|montant|amount|chiffre/.test(n)) out.push('montant', 'amount', 'revenu');
+  }
+  return [...new Set(out)].slice(0, 8);
+}
+
 function aiReqToTpl(r: z.infer<typeof ReqSchema>, index: number, design?: string): ReqTemplate {
   const view = (r.kind === 'note' ? 'note' : (r.visualization ?? 'kpi')) as ViewKind;
   const agg = r.operation;
   const filters = r.filters as ClauseFilter[] | undefined;
   const id = (r.id?.replace(/[^a-zA-Z0-9_]/g, '_').slice(0, 40))
     || `${norm(r.label).replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 28) || 'req'}_${index + 1}`.slice(0, 40);
-  const measures = r.measures?.map(norm).filter((m) => m.length > 1);
+  const measures = expandMeasureTokens([
+    ...(r.measures ?? []),
+    r.label,
+    ...(r.covers ?? []),
+  ].map(norm).filter((m) => m.length > 1));
   const entities = r.entities?.map((e) => e.trim()).filter((e) => e.length >= 2 && e.length <= 40 && e.split(/\s+/).length <= 3);
   return {
     id, label: r.label.slice(0, 120), mandatory: r.certainty !== 'hypothesis', tool: r.toolHints?.length ? r.toolHints.map(norm) : ['*'],
@@ -318,10 +408,18 @@ function aiReqToTpl(r: z.infer<typeof ReqSchema>, index: number, design?: string
  */
 export function coverageGaps(coverage: string[], reqs: ReqTemplate[]): string[] {
   if (!coverage.length) return ['coverage vide : le contrat ne déclare aucune intention à couvrir'];
-  const blob = (r: ReqTemplate) => norm(`${r.label} ${r.title} ${r.acceptance ?? ''} ${(r.entities ?? []).join(' ')} ${r.population ?? ''} ${r.period ?? ''} ${r.design ?? ''} ${r.transform ?? ''}`);
+  const blob = (r: ReqTemplate) => norm(`${r.label} ${r.title} ${r.acceptance ?? ''} ${(r.entities ?? []).join(' ')} ${(r.measures ?? r.measure ?? []).join(' ')} ${r.population ?? ''} ${r.period ?? ''} ${r.design ?? ''} ${r.transform ?? ''} ${r.visualization ?? r.view} ${r.operation ?? r.agg ?? ''}`);
   return coverage.filter((c) => {
     const n = norm(c);
-    const words = n.split(/[^a-z0-9]+/).filter((w) => w.length > 2);
+    // Méta-couverture (créer une interface / nommer un serveur) ≠ intention analytique manquante.
+    if (/^(creer|crée|créer|create).*(interface|application)/.test(n)) return false;
+    if (/^(affichage|afficher|montre|montre)/.test(n) && /\bkpi\b/.test(n) && reqs.some((r) => (r.visualization ?? r.view) === 'kpi')) return false;
+    if (/^(affichage|montre|creer|crée|interface)/.test(n) && /\bkpi\b/.test(n) && reqs.some((r) => (r.visualization ?? r.view) === 'kpi')) return false;
+    if (/\btableau\b/.test(n) && reqs.some((r) => (r.visualization ?? r.view) === 'table')) return false;
+    if (/\b(courbe|serie|évolution|evolution)\b/.test(n) && reqs.some((r) => (r.visualization ?? r.view) === 'line')) return false;
+    if (/\bclassement\b/.test(n) && reqs.some((r) => (r.visualization ?? r.view) === 'ranking')) return false;
+    if (/capitalisation|market\s*cap|taille.*(march|market)/.test(n) && reqs.some((r) => (r.measures ?? r.measure ?? []).some((m) => /market_?cap|capitalisation|total_market/i.test(m)) || /capitalisation|market/.test(blob(r)))) return false;
+    const words = n.split(/[^a-z0-9]+/).filter((w) => w.length > 2 && !['avec', 'pour', 'dans', 'une', 'des', 'les', 'sur', 'par', 'total', 'totale', 'marche', 'crypto'].includes(w));
     return !reqs.some((r) => {
       const b = blob(r);
       if (b.includes(n)) return true;
