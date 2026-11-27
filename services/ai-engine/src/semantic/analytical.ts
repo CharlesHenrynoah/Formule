@@ -362,9 +362,9 @@ export type { HybridPlan as AnalyticalDraft } from './hybrid.js';
  * Pas de readContract / atomicSplit comme source d'intentions.
  * Échec → ok=false (signal explicite), jamais un contrat syntaxique « équivalent ».
  */
-export async function draftAnalytical(prompt: string, base: Understanding, catalog: CatalogServer[]) {
+export async function draftAnalytical(prompt: string, base: Understanding, catalog: CatalogServer[], options?: { budget?: import('./contract-guard.js').LlmBudget }) {
   const { interpretAndPlan } = await import('./hybrid.js');
-  return interpretAndPlan(prompt, catalog, base);
+  return interpretAndPlan(prompt, catalog, base, options);
 }
 
 export { VIEW_KINDS };

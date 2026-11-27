@@ -144,10 +144,10 @@ async function runContractBuild(job: JobRef, input: { prompt: string; fileIds: s
   let u: Understanding = understand(prompt, scoped);
   const budget = new LlmBudget(3); // A interprétation + B liaison + C correction max
   budget.take(); // appel 1 consommé dans draftAnalytical / interpretAndPlan
-  const draft = await draftAnalytical(prompt, u, scoped);
+  const draft = await draftAnalytical(prompt, u, scoped, { budget });
   if (!draft.ok) {
     await setState(job, 'BLOCKED');
-    await emit(job, 'answer', { text: `${draft.reason ?? 'Interprétation sémantique échouée.'} Configure un LLM ou reformule ; Formule ne substitue plus un contrat syntaxique.` });
+    await emit(job, 'answer', { text: `${draft.reason ?? 'Interprétation sémantique échouée.'} Vérifie le diagnostic LLM et les champs signalés ; aucune acquisition MCP n’a été lancée.` });
     return;
   }
   if (draft.source === 'demo_pack') {
