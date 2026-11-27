@@ -53,6 +53,8 @@ export interface ReqTemplate {
   section?: string;
   parentId?: string;
   unit?: string;
+  /** Transformation déclarative de série (exécutée par le runtime, jamais inventée à la liaison). */
+  transform?: 'base100';
 }
 
 interface Recipe { match: RegExp; reqs: ReqTemplate[]; title: string; mission: string; commands: string[] }
@@ -87,7 +89,16 @@ export function understand(prompt: string, catalog?: CatalogServer[]): Understan
 }
 
 export function titleFrom(prompt: string) {
+  // Titre explicite : guillemets, « … », ou ligne Title / Titre.
+  const quoted = prompt.match(/[«"“]([^»"”]{3,60})[»"”]/)?.[1]?.trim();
+  if (quoted) return quoted.slice(0, 60);
+  const labeled = prompt.match(/^\s*(?:title|titre)\s*[:：]\s*(.+)$/im)?.[1]?.trim();
+  if (labeled) return labeled.replace(/[.…]+$/, '').slice(0, 60);
+  const heading = prompt.match(/^\s*#{1,3}\s+(.+)$/m)?.[1]?.trim();
+  if (heading && heading.length <= 60) return heading;
   const s = prompt.replace(/^(cr[ée]e[rz]?|construis|fais|g[ée]n[èe]re|monte)( moi)?( une| un)?( interface| app(lication)?| console| tableau de bord)?( des| du| de la| de l['’]| de| d['’]| pour| qui)?\s*/i, '')
     .replace(/\s+(depuis|avec|à partir de)\s.*$/i, '').trim();
-  return (s.charAt(0).toUpperCase() + s.slice(1)).slice(0, 60) || 'Interface';
+  // Ne jamais prendre une phrase entière : couper au premier point / saut de ligne.
+  const short = s.split(/[.\n]/)[0]?.trim() ?? s;
+  return (short.charAt(0).toUpperCase() + short.slice(1)).slice(0, 60) || 'Interface';
 }

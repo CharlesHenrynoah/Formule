@@ -2,6 +2,7 @@ import { recommend } from './charts.js';
 import { getCollection, getPath, type AppSpec, type Requirement, type ViewSpec, type ActionSpec, type QuerySpec } from '@formule/contracts';
 import type { CatalogServer } from '../discovery/catalog.js';
 import { findTool } from '../discovery/catalog.js';
+import { styleFromConstraints, type ContractConstraints } from './contract-guard.js';
 import { datasetOf, isSeries, NON_ADDITIVE, resolveRequirement, type Dataset } from './resolve.js';
 import { norm, type ReqTemplate, type Understanding } from './lexicon.js';
 
@@ -63,14 +64,32 @@ export function planActions(catalog: CatalogServer[], usedServers: Set<string>, 
   return out.slice(0, 4);
 }
 
-export function assembleSpec(input: { u: Understanding; planned: PlannedReq[]; datasets: Map<string, Dataset>; actions: ActionSpec[]; demo: boolean; prompt?: string; pointsLocked?: boolean }): AppSpec {
+export function assembleSpec(input: {
+  u: Understanding;
+  planned: PlannedReq[];
+  datasets: Map<string, Dataset>;
+  actions: ActionSpec[];
+  demo: boolean;
+  prompt?: string;
+  pointsLocked?: boolean;
+  constraints?: ContractConstraints;
+}): AppSpec {
   const { u, planned, datasets } = input;
+  const constraints = input.constraints ?? { global: [], design: [], interactions: [], reliability: [] };
   const usedQ = new Set(planned.filter((p) => p.queryId).map((p) => p.queryId!));
   const queries: QuerySpec[] = [...usedQ].map((qid) => {
     const ds = datasets.get(qid)!;
     return { id: qid, serverId: ds.acq.ref.serverId, tool: ds.acq.ref.tool.name, args: ds.acq.args, refresh: { mode: 'once' as const }, envelopeId: ds.acq.envelope.id, ...(ds.acq.paginate ? { paginate: ds.acq.paginate } : {}) };
   });
-  const views: ViewSpec[] = planned.filter((p) => p.view).map((p) => p.view!);
+  // Composition fidèle : vues analytiques depuis le contrat ; contraintes → notes (pas de KPI/table).
+  const views: ViewSpec[] = planned.filter((p) => p.view && p.tpl.view !== 'note').map((p) => p.view!);
+  let noteIdx = 0;
+  for (const text of [...constraints.design, ...constraints.reliability].slice(0, 6)) {
+    views.push({
+      kind: 'note', id: `note_${++noteIdx}`, title: text.slice(0, 60),
+      text: text.slice(0, 1000), requirementIds: [],
+    });
+  }
   if (!input.pointsLocked && u.simulation) {
     const base = planned.find((p) => p.view?.kind === 'line');
     if (base?.view?.kind === 'line') {
@@ -114,9 +133,14 @@ export function assembleSpec(input: { u: Understanding; planned: PlannedReq[]; d
       ...(t.limit != null ? { limit: t.limit } : {}),
     };
   });
+  const styleBase = styleFromConstraints(constraints);
+  // Interactions → commands textuelles (pas des vues data).
+  const interactionCmds = constraints.interactions.map((c) => c.slice(0, 60)).filter(Boolean);
+  const commands = [...u.commands, ...interactionCmds].filter((c, i, a) => a.indexOf(c) === i).slice(0, 6);
   return {
     specVersion: 1, title: u.title.slice(0, 80), mission: u.mission.slice(0, 400), demo: input.demo,
-    requirements, queries, views, actions: input.actions, commands: u.commands, style: { density: 'confortable', accent: 'bleu' },
+    requirements, queries, views, actions: input.actions, commands,
+    style: { density: 'confortable' as const, accent: styleBase.accent, theme: styleBase.theme, font: 'system' as const, nav: 'top' as const },
   };
 }
 

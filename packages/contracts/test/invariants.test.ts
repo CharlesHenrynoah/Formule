@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   assertTransition, canTransition, InvalidTransitionError, classifyValue, datasetState, inferContract,
-  joinByTimestamp, toSeries, getPath, assertWorkspaceWritable, certify, redact, maskSecret,
+  joinByTimestamp, toSeries, toBase100, getPath, assertWorkspaceWritable, certify, redact, maskSecret,
   detectInjection, classifyIntent, isSimpleQuestion, AppSpecSchema, EventCursor, collectionFields,
   type GateResult,
 } from '../src/index.js';
@@ -83,6 +83,14 @@ describe('séries irrégulières', () => {
     expect(j.map((r) => r.t)).toEqual([Date.parse('2026-01-01T00:00:00Z'), Date.parse('2026-01-01T00:07:00Z'), Date.parse('2026-01-01T03:00:00Z')]);
     expect(j[1].values).toEqual({ a: null, b: null });
     expect(j[2].values).toEqual({ a: 3, b: 30 });
+  });
+
+  it('rebase en base 100 sans combler les trous', () => {
+    const pts = toSeries([{ t: '2026-01-01T00:00:00Z', v: 50 }, { t: '2026-01-02T00:00:00Z', v: null }, { t: '2026-01-03T00:00:00Z', v: 75 }], 't', 'v', getPath).points;
+    const b = toBase100(pts)!;
+    expect(b[0].v).toBe(100);
+    expect(b[1].v).toBeNull();
+    expect(b[2].v).toBe(150);
   });
 });
 

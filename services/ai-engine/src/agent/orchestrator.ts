@@ -9,6 +9,10 @@ import { assembleSpec, bindTools, planActions, planRequirements, queryIdFor, typ
 import { draftAnalytical } from '../semantic/analytical.js';
 import { acquisitionKey, planAcquisitions, type PlannedAcquisition } from '../semantic/acquire-plan.js';
 import { bindClauses } from '../semantic/points.js';
+import { applyCorrection, bindAndCompose, coverageGaps, diagnoseCorrection, LlmBudget, sealContract } from '../semantic/hybrid.js';
+import {
+  assertIntentIntact, fidelityAgainstPrompt, independentPromptAudit, type ContractConstraints, type SealedContract,
+} from '../semantic/contract-guard.js';
 import { isMultiSection } from '../semantic/sections.js';
 import { buildWorkspace, cleanupWorkspace, createWorkspace, shadcnAdd, writeWorkspaceFile } from './workspace.js';
 import { emit, setState, type JobRef } from './events.js';
@@ -16,6 +20,7 @@ import { matchView, parseDelta, untouchedEqual, type DeltaOp } from './delta.js'
 import { backendVsOracle, contractGate, runDomCheck, sourceGate, staticGates } from '../evaluation/gates.js';
 import { contradicts, expectations } from '../evaluation/oracle.js';
 import { isDemoMode } from '../llm.js';
+import { engineBanner } from '../semantic/engine-meta.js';
 
 interface Ctx { cancelled: boolean; abort: AbortController; approval?: (ok: boolean) => void }
 const ctxs = new Map<string, Ctx>();
@@ -130,22 +135,71 @@ async function createFromSections(job: JobRef, input: { prompt: string }, catalo
 /** Pipeline unique : contrat → plan d'acquisitions → liaison → certification. */
 async function runContractBuild(job: JobRef, input: { prompt: string; fileIds: string[]; catalog: CatalogServer[] }) {
   const { prompt, fileIds, catalog } = input;
+  await emit(job, 'log', { text: engineBanner() });
   if (isMultiSection(prompt)) await emit(job, 'log', { text: 'Demande structurée : contrat analytique unique (sections conservées comme parenté)' });
   const named = namedServerIds(prompt, catalog);
   const scoped = named.length ? catalog.filter((s) => named.includes(s.serverId)) : catalog;
   if (named.length) await emit(job, 'log', { text: `Périmètre : ${scoped.map((s) => s.name).join(', ')}` });
 
   let u: Understanding = understand(prompt, scoped);
-  const contract = await draftAnalytical(prompt, u, scoped);
-  const reqs = contract.reqs.length ? contract.reqs : u.reqs;
-  if (reqs.length) {
-    u = contract.reqs.length ? contract : { ...u, reqs };
-    await emit(job, 'log', { text: `Contrat analytique figé avant lecture : ${reqs.map((r) => `${r.label} [${r.visualization ?? r.view}${r.operation ?? r.agg ? ` ${r.operation ?? r.agg}` : ''}]`).join(' · ')}` });
+  const budget = new LlmBudget(3); // A interprétation + B liaison + C correction max
+  budget.take(); // appel 1 consommé dans draftAnalytical / interpretAndPlan
+  const draft = await draftAnalytical(prompt, u, scoped);
+  if (!draft.ok) {
+    await setState(job, 'BLOCKED');
+    await emit(job, 'answer', { text: `${draft.reason ?? 'Interprétation sémantique échouée.'} Configure un LLM ou reformule ; Formule ne substitue plus un contrat syntaxique.` });
+    return;
+  }
+  if (draft.source === 'demo_pack') {
+    await emit(job, 'log', { text: `Contrat démo (pack) — ${draft.reason ?? 'sans LLM'}` });
+  }
+  let constraints: ContractConstraints = { ...draft.constraints };
+  let sealed: SealedContract = draft.sealed ?? sealContract(prompt, draft.u.reqs, draft.coverage, constraints);
+  let reqs = [...sealed.reqs];
+  u = { ...draft.u, reqs };
+  constraints = sealed.constraints;
+  const coverage = [...sealed.coverage];
+  await emit(job, 'log', { text: `Contrat analytique scellé (${draft.source} · ${sealed.fingerprint}) : ${reqs.map((r) => `${r.label} [${r.visualization ?? r.view}${r.operation ?? r.agg ? ` ${r.operation ?? r.agg}` : ''}]`).join(' · ')}` });
+  if (constraints.design.length || constraints.interactions.length || constraints.reliability.length) {
+    await emit(job, 'log', { text: `Contraintes conservées : ${[...constraints.design, ...constraints.interactions, ...constraints.reliability, ...constraints.global].slice(0, 8).join(' · ')}` });
   }
   check(job);
   if (!reqs.length) return blocked(job, prompt, named.length ? scoped : catalog);
 
-  const { planned: acqPlan, unresolved } = await planAcquisitions(reqs, scoped, prompt, fileIds);
+  // Couverture LLM + audit sémantique indépendant AVANT toute acquisition.
+  let gapsBefore = [
+    ...coverageGaps(coverage, reqs),
+    ...independentPromptAudit(prompt, reqs, constraints),
+  ];
+  if (gapsBefore.length) {
+    await emit(job, 'log', { text: `Couverture incomplète avant lecture : ${gapsBefore.slice(0, 4).join(' ; ')}` });
+    const preFix = await diagnoseCorrection(
+      prompt,
+      reqs.map((r) => ({ tpl: r, status: 'missing' as const, reason: 'hors coverage' })),
+      gapsBefore,
+      { budget },
+    );
+    if (preFix?.patchRequirements?.length || preFix?.dropRequirementIds?.length) {
+      reqs = applyCorrection(reqs, preFix, new Set());
+      const intact = assertIntentIntact(sealed, reqs);
+      if (intact.length) {
+        await emit(job, 'log', { text: `Correction refusée (contrat scellé) : ${intact.slice(0, 3).join(' ; ')}` });
+        reqs = [...sealed.reqs];
+      } else {
+        u = { ...u, reqs };
+        gapsBefore = [...coverageGaps(coverage, reqs), ...independentPromptAudit(prompt, reqs, constraints)];
+        await emit(job, 'log', { text: `Contrat corrigé avant acquisition${preFix.note ? ` : ${preFix.note}` : ''}` });
+      }
+    }
+    if (gapsBefore.length) {
+      await setState(job, 'BLOCKED');
+      await emit(job, 'answer', { text: `Le contrat ne couvre pas le prompt : ${gapsBefore.join(' ; ')}. Corrige l’interprétation avant toute lecture MCP.` });
+      return;
+    }
+  }
+
+  const acqHints = { toolHints: draft.toolHints, argHints: draft.argHints, groups: draft.acquisitions };
+  const { planned: acqPlan, unresolved } = await planAcquisitions(reqs, scoped, prompt, fileIds, new Set(), acqHints);
   if (!acqPlan.length) {
     if (unresolved.length) {
       await setState(job, 'BLOCKED');
@@ -154,6 +208,7 @@ async function runContractBuild(job: JobRef, input: { prompt: string; fileIds: s
     }
     return blocked(job, prompt, named.length ? scoped : catalog);
   }
+  await emit(job, 'log', { text: `Acquisitions mutualisées : ${acqPlan.length} lecture(s) pour ${reqs.filter((r) => r.view !== 'note').length} exigence(s)` });
 
   const usedIds = new Set<string>();
   const limitedServers = new Set<string>();
@@ -161,23 +216,83 @@ async function runContractBuild(job: JobRef, input: { prompt: string; fileIds: s
   const datasets = new Map<string, Dataset>();
   for (const a of acqs) datasets.set(a.queryId, datasetOf(a));
 
+  // Appel 2 : liaison sémantique proposée ; le moteur valide (intentions scellées).
+  const composed = await bindAndCompose(prompt, reqs, datasets, { budget, sealed });
+  if (composed.source === 'llm') {
+    const intact = assertIntentIntact(sealed, composed.reqs);
+    if (intact.length) {
+      await emit(job, 'log', { text: `Liaison IA partiellement refusée (intentions figées) : ${intact.slice(0, 3).join(' ; ')}` });
+      // Conserve mesures/outils proposés seulement si l'intention reste intacte par exigence.
+      reqs = composed.reqs.map((r) => {
+        const lock = sealed.intentLock.get(r.id);
+        const orig = sealed.reqs.find((x) => x.id === r.id);
+        if (!orig || !lock) return orig ?? r;
+        const key = [
+          r.visualization ?? r.view, r.operation ?? r.agg ?? '',
+          (r.entities ?? []).map((e) => e.toLowerCase()).sort().join(','),
+          r.population ?? '', r.period ?? '', r.transform ?? '', r.limit ?? '', r.unit ?? '',
+        ].join('|');
+        return key === lock ? r : orig;
+      });
+    } else {
+      reqs = composed.reqs;
+    }
+    u = { ...u, reqs };
+    await emit(job, 'log', { text: 'Liaison sémantique proposée par l’IA (vérification déterministe)' });
+  } else if (composed.reason) {
+    await emit(job, 'log', { text: composed.reason });
+  }
+
   let planned: PlannedReq[] = bindClauses(reqs, datasets);
   const attempted = new Set(acqPlan.map((p) => acquisitionKey(p.ref, p.args)));
-  // Une lecture techniquement réussie ne prouve pas sa couverture.
-  // Deux tours maximum, uniquement pour les exigences non couvertes, dans le périmètre autorisé.
-  for (let round = 0; round < 2; round++) {
+
+  // Correction de contrat AVANT de multiplier les acquisitions (1 tour LLM max restant).
+  const earlyGaps = planned.filter((p) => p.tpl.mandatory && p.status !== 'covered' && p.tpl.view !== 'note');
+  if (earlyGaps.length) {
+    const correction = await diagnoseCorrection(prompt, planned, earlyGaps.map((g) => `${g.tpl.id}: ${g.reason ?? g.status}`), { budget });
+    if (correction) {
+      const allowedQ = new Set([...datasets.keys()].filter((qid) => {
+        const ds = datasets.get(qid);
+        return ds && ds.acq.envelope.status !== 'error' && !limitedServers.has(ds.acq.ref.serverId);
+      }));
+      const candidate = applyCorrection(reqs, correction, allowedQ);
+      const intact = assertIntentIntact(sealed, candidate);
+      if (intact.length) {
+        await emit(job, 'log', { text: `Correction refusée (exigences obligatoires protégées) : ${intact.slice(0, 3).join(' ; ')}` });
+      } else {
+        reqs = candidate;
+        u = { ...u, reqs };
+        planned = bindClauses(reqs, datasets);
+        await emit(job, 'log', { text: `Correction de contrat avant nouvelles lectures${correction.note ? ` : ${correction.note}` : ''}` });
+      }
+    }
+  }
+
+  // Un seul tour d'acquisition supplémentaire, périmètre autorisé, serveurs non limités (PR#5).
+  {
     check(job);
     const missing = planned.filter((p) => p.status !== 'covered' && p.tpl.view !== 'note').map((p) => p.tpl);
-    if (!missing.length) break;
     const available = scoped.filter((s) => !limitedServers.has(s.serverId));
-    if (!available.length) break;
-    const next = await planAcquisitions(missing, available, prompt, fileIds, attempted);
-    const candidates = next.planned.slice(0, 8);
-    if (!candidates.length) break;
-    for (const p of candidates) attempted.add(acquisitionKey(p.ref, p.args));
-    const retry = await acquireFromPlan(job, candidates, null, usedIds, limitedServers);
-    for (const a of retry) { acqs.push(a); datasets.set(a.queryId, datasetOf(a)); }
-    planned = bindClauses(reqs, datasets);
+    if (missing.length && available.length) {
+      const next = await planAcquisitions(missing, available, prompt, fileIds, attempted, acqHints);
+      const candidates = next.planned.slice(0, 8);
+      if (candidates.length) {
+        for (const p of candidates) attempted.add(acquisitionKey(p.ref, p.args));
+        const retry = await acquireFromPlan(job, candidates, null, usedIds, limitedServers);
+        for (const a of retry) { acqs.push(a); datasets.set(a.queryId, datasetOf(a)); }
+        planned = bindClauses(reqs, datasets);
+      }
+    }
+  }
+
+  // Fidélité vs prompt original + couverture (jamais adapter l'intention aux données).
+  const afterGaps = [
+    ...coverageGaps(coverage, planned.filter((p) => p.status === 'covered').map((p) => p.tpl)),
+    ...fidelityAgainstPrompt(sealed, planned),
+    ...assertIntentIntact(sealed, planned.map((p) => p.tpl)),
+  ];
+  if (afterGaps.length) {
+    await emit(job, 'log', { text: `Fidélité partielle après liaison : ${afterGaps.slice(0, 4).join(' ; ')}` });
   }
   for (const p of planned) await emit(job, 'log', { text: `Lien · ${p.tpl.label} → ${p.status}${p.reason ? ` (${p.reason})` : ''} [${p.tpl.visualization ?? p.tpl.view}${p.tpl.operation ?? p.tpl.agg ? ` ${p.tpl.operation ?? p.tpl.agg}` : ''}]` });
 
@@ -191,6 +306,9 @@ async function runContractBuild(job: JobRef, input: { prompt: string; fileIds: s
     })),
     canApprove: covered.length > 0,
     demo: acqs.some((a) => a.ref.demo),
+    engine: engineBanner(),
+    contractFingerprint: sealed.fingerprint,
+    llmBudgetUsed: budget.used,
   };
   await emit(job, 'source', summary);
   if (!summary.canApprove) {
@@ -222,7 +340,16 @@ async function runContractBuild(job: JobRef, input: { prompt: string; fileIds: s
 
   await setState(job, 'CONTRACT');
   const usedServers = new Set(acqs.filter((a) => a.envelope.status !== 'error').map((a) => a.ref.serverId));
-  const spec = assembleSpec({ u, planned, datasets, actions: planActions(catalog, usedServers, datasets), demo: summary.demo, prompt, pointsLocked: true });
+  // Certification fonctionnelle : assembler contre le prompt/contrat scellé (constraints conservées).
+  const fidelity = fidelityAgainstPrompt(sealed, planned);
+  if (fidelity.filter((g) => /intention dérivée|non couverte/.test(g)).length) {
+    await emit(job, 'log', { text: `Avertissement fidélité avant build : ${fidelity.slice(0, 3).join(' ; ')}` });
+  }
+  const spec = assembleSpec({
+    u, planned, datasets,
+    actions: planActions(catalog, usedServers, datasets),
+    demo: summary.demo, prompt, pointsLocked: true, constraints,
+  });
   await buildAndCertify(job, { spec, datasets, catalog, base: null, touched: new Set() });
 }
 
@@ -455,14 +582,38 @@ async function buildAndCertify(job: JobRef, x: { spec: AppSpec; datasets: Map<st
   const report = certify(gates, reqs, lastRead, { repairable: attempt === 0 });
   for (const g of report.gates) await emit(job, 'log', { text: `${g.gate} ${g.passed ? '✓' : '✗'} ${g.details.slice(0, 3).join(' · ')}`, gate: g.gate, passed: g.passed });
 
-  // Réparation bornée (1 tentative) : on retire les vues dont la liaison échoue ; leurs exigences deviennent manquantes.
+  // Réparation bornée (1 tentative) : diagnostic IA optionnel puis retrait déterministe des vues cassées.
+  // Pas de nouvel appel MCP ici — les serveurs limités (PR#5) restent hors reprise.
   if (report.outcome === 'REPAIR' && attempt === 0) {
     const broken = new Set(dom?.results.filter((r) => !r.ok).map((r) => r.viewId) ?? []);
     const fixable = broken.size > 0 && report.blockingGates.every((g) => g === 'G5' || g === 'G6');
     if (fixable) {
       await setState(job, 'REPAIR');
+      const divergences = [
+        ...reqs.filter((r) => r.status !== 'covered').map((r) => `${r.id}: ${r.reason ?? r.status}`),
+        ...[...broken].map((id) => `vue ${id}: liaison DOM échouée`),
+      ];
+      const plannedLike: PlannedReq[] = reqs.map((r) => ({
+        tpl: { id: r.id, label: r.label, mandatory: r.mandatory, tool: ['*'], view: r.visualization ?? 'kpi', title: r.label, visualization: r.visualization ?? 'kpi' },
+        status: r.status,
+        reason: r.reason,
+      }));
+      const correction = await diagnoseCorrection(spec.mission, plannedLike, divergences);
+      if (correction?.dropRequirementIds?.length) {
+        await emit(job, 'log', { text: `Correction : retrait proposé de ${correction.dropRequirementIds.length} exigence(s)` });
+      }
       await emit(job, 'log', { text: `Réparation : retrait de ${broken.size} vue(s) mal liée(s)` });
-      const repaired: AppSpec = { ...spec, views: spec.views.filter((v) => !broken.has(v.id)), requirements: spec.requirements.map((r) => (r.evidence && broken.has(r.evidence.viewId) ? { ...r, status: 'missing' as const, reason: reqs.find((q) => q.id === r.id)?.reason, evidence: null } : r)) };
+      const drop = new Set(correction?.dropRequirementIds ?? []);
+      const repaired: AppSpec = {
+        ...spec,
+        views: spec.views.filter((v) => !broken.has(v.id)),
+        requirements: spec.requirements.map((r) => {
+          if (drop.has(r.id) || (r.evidence && broken.has(r.evidence.viewId))) {
+            return { ...r, status: 'missing' as const, reason: reqs.find((q) => q.id === r.id)?.reason ?? correction?.note, evidence: null };
+          }
+          return r;
+        }),
+      };
       const touched = new Set([...x.touched, ...broken]);
       return buildAndCertify(job, { ...x, spec: repaired, touched }, 1);
     }
