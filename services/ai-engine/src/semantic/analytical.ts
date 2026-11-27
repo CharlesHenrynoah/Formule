@@ -355,24 +355,15 @@ export function freezeReqs(reqs: ReqTemplate[]): ReqTemplate[] {
   return reqs.map((r) => Object.freeze({ ...r, where: r.where ? Object.freeze([...r.where]) : undefined, filters: r.filters ? Object.freeze([...r.filters]) : undefined, measure: r.measure ? Object.freeze([...r.measure]) : undefined, measures: r.measures ? Object.freeze([...r.measures]) : undefined, entities: r.entities ? Object.freeze([...r.entities]) : undefined }));
 }
 
-export type AnalyticalDraft = {
-  u: Understanding;
-  toolHints: Map<string, string[]>;
-  argHints: Map<string, Record<string, unknown>>;
-  source: 'llm' | 'deterministic';
-};
+export type { HybridPlan as AnalyticalDraft } from './hybrid.js';
 
 /**
- * Fige le contrat avant la lecture MCP.
- * L'IA construit le contrat intégral lorsqu'elle est disponible — y compris si une recette pack
- * a déjà proposé des exigences. Le déterministe (packs / readContract) n'est qu'un repli.
+ * AI-first : le LLM construit le contrat intégral depuis le prompt.
+ * Pas de readContract / atomicSplit comme source d'intentions.
+ * Échec → ok=false (signal explicite), jamais un contrat syntaxique « équivalent ».
  */
-export async function draftAnalytical(prompt: string, base: Understanding, catalog: CatalogServer[]): Promise<AnalyticalDraft> {
+export async function draftAnalytical(prompt: string, base: Understanding, catalog: CatalogServer[]) {
   const { interpretAndPlan } = await import('./hybrid.js');
-  const { llm } = await import('../llm.js');
-  if (llm.name === 'mock' && !base.generic && base.reqs.length) {
-    return { u: { ...base, reqs: freezeReqs(capRequirements(base.reqs)) }, toolHints: new Map(), argHints: new Map(), source: 'deterministic' };
-  }
   return interpretAndPlan(prompt, catalog, base);
 }
 
