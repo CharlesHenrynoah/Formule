@@ -91,7 +91,13 @@ export function assembleSpec(input: { u: Understanding; planned: PlannedReq[]; d
   if (!input.pointsLocked) recommend(views, datasets, [...usedQ], input.prompt ?? `${input.u.title} ${input.u.mission}`);
   const requirements: Requirement[] = planned.map((p) => ({
     id: p.tpl.id, label: p.tpl.label, mandatory: p.tpl.mandatory, status: p.status,
-    ...(p.reason ? { reason: p.reason } : {}),
+    ...(p.reason ? { reason: p.reason.slice(0, 300) } : {}),
+    ...(input.pointsLocked ? { analytical: {
+      view: p.tpl.view, visualization: p.tpl.visualization, agg: p.tpl.agg, operation: p.tpl.operation,
+      filters: p.tpl.filters ?? p.tpl.where, percent: p.tpl.percent, limit: p.tpl.limit, order: p.tpl.order,
+      entities: p.tpl.entities, population: p.tpl.population, period: p.tpl.period, grain: p.tpl.grain,
+      measures: p.tpl.measures ?? p.tpl.measure, dimensions: p.tpl.dimensions ?? p.tpl.label_, columns: p.tpl.columns, design: p.tpl.design, section: p.tpl.section,
+    } } : {}),
     evidence: p.view && p.envelopeId ? { envelopeId: p.envelopeId, path: p.evidencePath!, viewId: p.view.id } : null,
   }));
   return {

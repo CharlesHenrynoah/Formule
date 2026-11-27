@@ -42,8 +42,15 @@ function analytical(t: string) {
 export function atomicSplit(text: string): string[] {
   const clean = text.replace(/\*\*/g, '').trim();
   if (!clean) return [];
+  // Un comptage hausse/baisse représente deux populations distinctes.
+  const paired = clean.match(/^(.*?)(?:en\s+)?(hausse|baisse)\s+et\s+(?:en\s+)?(hausse|baisse)(.*)$/i);
+  if (paired && paired[2].toLowerCase() !== paired[3].toLowerCase() && /nombre|combien|effectif|compter/i.test(paired[1])) {
+    const prefix = paired[1].trim().replace(/\ben$/i, '').trim();
+    return [`${prefix} en ${paired[2]}${paired[4]}`, `${prefix} en ${paired[3]}${paired[4]}`];
+  }
   const parts = clean.split(/\s*(?:;|\bet puis\b|\bpuis\b|\bet aussi\b|\ainsi que\b)\s+/i).map((s) => s.trim()).filter(Boolean);
   if (parts.length > 1 && parts.every((p) => analytical(norm(p)) || GLOBAL_CONSTRAINT.test(norm(p)))) return parts;
+  if (/\b(?:parmi|entre)\b/i.test(clean)) return [clean];
   const andSplit = clean.split(/\s+\bet\b\s+/i).map((s) => s.trim()).filter(Boolean);
   if (andSplit.length > 1 && andSplit.filter((p) => analytical(norm(p))).length >= 2) return andSplit;
   return [clean];
@@ -157,7 +164,7 @@ function populationOf(text: string, t: string): string | undefined {
 }
 
 function limitOf(t: string): number | undefined {
-  const m = t.match(/(?:top|premier(?:s)?|limite(?:e)?\s+a)\s+(\d{1,3})/);
+  const m = t.match(/(?:top|premier(?:s)?|limite(?:e)?\s+a)\s+(\d{1,3})/) ?? t.match(/\b(\d{1,3})\s+premier(?:e)?s?\b/);
   return m ? Number(m[1]) : undefined;
 }
 

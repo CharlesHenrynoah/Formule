@@ -11,6 +11,13 @@ export const RequirementSchema = z.object({
   mandatory: z.boolean(),
   status: z.enum(['covered', 'missing', 'unavailable']).default('missing'),
   reason: z.string().max(300).optional(),
+  analytical: z.object({
+    view: z.string(), visualization: z.string().optional(), agg: z.string().optional(), operation: z.string().optional(),
+    filters: z.array(z.object({ field: z.array(z.string()), op: z.string(), value: z.union([z.string(), z.number(), z.array(z.union([z.string(), z.number()]))]).optional() })).optional(),
+    percent: z.boolean().optional(), limit: z.number().optional(), order: z.string().optional(),
+    entities: z.array(z.string()).optional(), population: z.string().optional(), period: z.string().optional(), grain: z.string().optional(),
+    measures: z.array(z.string()).optional(), dimensions: z.array(z.string()).optional(), columns: z.array(z.string()).optional(), design: z.string().optional(), section: z.string().optional(),
+  }).optional(),
   evidence: z.object({ envelopeId: z.string(), path: z.string(), viewId: z.string() }).nullable().optional(),
 });
 

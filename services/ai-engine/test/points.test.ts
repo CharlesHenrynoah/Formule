@@ -137,3 +137,29 @@ describe('identité et multi-datasets', () => {
     expect(planned[0].queryId).toBe('spot');
   });
 });
+
+describe('regressions du contrat analytique', () => {
+  it('conserve le sujet du comptage dans une demande hausse et baisse', () => {
+    const reqs = readContract('- Nombre de cryptomonnaies en hausse et en baisse');
+    expect(reqs).toHaveLength(2);
+    expect(reqs.map((r) => r.operation)).toEqual(['count', 'count']);
+    expect(reqs.map((r) => r.filters?.[0]?.op)).toEqual(['gt', 'lt']);
+  });
+  it('reconnaît une limite exprimée avant premiers', () => {
+    expect(readContract('- Classement des 10 premières cryptomonnaies par capitalisation')[0].limit).toBe(10);
+  });
+  it('refuse un filtre de même opérateur mais de valeur différente', () => {
+    const req = readContract('- Nombre de cryptomonnaies en hausse')[0];
+    expect(contradicts(req, { kind: 'kpi', bindings: { aggregate: { agg: 'count', where: [{ path: 'variation', op: 'gt', value: 100 }] } } })).not.toBeNull();
+  });
+  it('ne substitue pas une autre entité à une entité absente', () => {
+    const reqs = readContract('- Prix de Alpha');
+    const wrong = datasetOf(acq({ rows: [{ nom: 'Beta', prix_eur: 20 }] }));
+    expect(bindClauses(reqs, new Map([['q', wrong]]))[0].status).not.toBe('covered');
+  });
+  it('refuse une série trop courte pour un historique sur 30 jours', () => {
+    const reqs = readContract('- Historique du prix sur 30 jours');
+    const wrong = datasetOf(acq(raw));
+    expect(bindClauses(reqs, new Map([['q', wrong]]))[0].status).not.toBe('covered');
+  });
+});

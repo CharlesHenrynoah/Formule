@@ -34,11 +34,39 @@ export function bindClauses(reqs: ReqTemplate[], datasets: Map<string, Dataset>)
 /** Score sémantique : entités, population, granularité, période, mesure, unité — pas seulement les mots. */
 export function rankDatasets(req: ReqTemplate, datasets: Map<string, Dataset>): { ds: Dataset; score: number }[] {
   const usable = [...datasets.values()].filter((d) => d.acq.envelope.status !== 'error' && !d.docOnly);
-  const scored = usable.map((ds) => ({ ds, score: scoreDataset(req, ds) })).filter((x) => x.score > 0);
+  const eligible = usable.filter((ds) => incompatibility(req, ds) === null);
+  const scored = eligible.map((ds) => ({ ds, score: scoreDataset(req, ds) })).filter((x) => x.score > 0);
   scored.sort((a, b) => b.score - a.score);
   if (scored.length) return scored;
   // Dernier recours : un seul dataset utilisable, score nul mais tentable.
-  return usable.length === 1 ? [{ ds: usable[0], score: 0 }] : [];
+  return eligible.length === 1 ? [{ ds: eligible[0], score: 0 }] : [];
+}
+
+/** Les contraintes vérifiables sont éliminatoires ; le score départage ensuite les candidats. */
+export function incompatibility(req: ReqTemplate, ds: Dataset): string | null {
+  const rows = ds.collection ? (getCollection(ds.acq.raw, ds.collection) ?? []) : [];
+  const labels = ds.fields.filter((f) => ['dimension', 'text', 'identifier'].includes(f.role));
+  const args = norm(JSON.stringify(ds.acq.args ?? {}));
+  for (const entity of req.entities ?? []) {
+    const actual = rows.some((r) => labels.some((f) => norm(String(getPath(r, f.rel) ?? '')) === norm(entity)));
+    // Pour une série mono-entité, l'identité peut être portée par les arguments de la requête.
+    const inArgs = (' ' + args.replace(/[^a-z0-9]+/g, ' ') + ' ').includes(' ' + norm(entity).replace(/[^a-z0-9]+/g, ' ') + ' ');
+    if (!actual && !inArgs) return `entité non démontrée : ${entity}`;
+  }
+  const time = ds.fields.find((f) => f.role === 'time');
+  const ts = time ? rows.map((r) => parseTime(getPath(r, time.rel))).filter((x): x is number => x !== null).sort((a,b) => a-b) : [];
+  const temporal = req.view === 'line' || req.visualization === 'line';
+  const days = norm(req.period ?? '').match(/^(\d+)\s*jours?$/);
+  if (temporal && days) {
+    const expected = Number(days[1]) * 86400_000;
+    const span = ts.length > 1 ? ts[ts.length - 1] - ts[0] : 0;
+    // Une série journalière de N jours peut avoir N-1 intervalles.
+    if (ts.length < 2 || span < expected - 86400_000 || span > expected + 86400_000) return `période ${req.period} non couverte`;
+  }
+  if (/^\d{4}$/.test(req.period ?? '')) {
+    if (!ts.length || ts.some((x) => String(new Date(x).getUTCFullYear()) !== req.period)) return `année ${req.period} non démontrée`;
+  }
+  return null;
 }
 
 function scoreDataset(req: ReqTemplate, ds: Dataset): number {
