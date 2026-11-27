@@ -17,6 +17,7 @@ import { matchView, parseDelta, untouchedEqual, type DeltaOp } from './delta.js'
 import { backendVsOracle, contractGate, runDomCheck, sourceGate, staticGates } from '../evaluation/gates.js';
 import { contradicts, expectations } from '../evaluation/oracle.js';
 import { isDemoMode } from '../llm.js';
+import { engineBanner } from '../semantic/engine-meta.js';
 
 interface Ctx { cancelled: boolean; abort: AbortController; approval?: (ok: boolean) => void }
 const ctxs = new Map<string, Ctx>();
@@ -131,6 +132,7 @@ async function createFromSections(job: JobRef, input: { prompt: string }, catalo
 /** Pipeline unique : contrat → plan d'acquisitions → liaison → certification. */
 async function runContractBuild(job: JobRef, input: { prompt: string; fileIds: string[]; catalog: CatalogServer[] }) {
   const { prompt, fileIds, catalog } = input;
+  await emit(job, 'log', { text: engineBanner() });
   if (isMultiSection(prompt)) await emit(job, 'log', { text: 'Demande structurée : contrat analytique unique (sections conservées comme parenté)' });
   const named = namedServerIds(prompt, catalog);
   const scoped = named.length ? catalog.filter((s) => named.includes(s.serverId)) : catalog;

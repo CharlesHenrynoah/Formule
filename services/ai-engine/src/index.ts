@@ -4,6 +4,7 @@ import { chat } from './agent/chat.js';
 import { cancelJob, decide } from './agent/orchestrator.js';
 import { subscribe } from './agent/events.js';
 import { isDemoMode, llm, probeLlm, providerConf } from './llm.js';
+import { engineDiagnostic, GIT, HAS_HYBRID, SEMANTIC_ENGINE } from './semantic/engine-meta.js';
 
 const app = await createService('ai-engine', () => ({ llm: isDemoMode() ? 'demo' : 'connecté' }));
 
@@ -22,10 +23,12 @@ setTimeout(async () => {
 }, 1500);
 
 let llmStatus = { ok: false, detail: 'non vérifié' };
-setTimeout(() => { void probeLlm().then((r) => { llmStatus = r; console.log(`[ai-engine] LLM : ${r.detail}`); }); }, 500);
+setTimeout(() => { void probeLlm().then((r) => { llmStatus = r; console.log(`[ai-engine] LLM : ${r.detail}`); console.log(`[ai-engine] moteur : ${SEMANTIC_ENGINE} · ${GIT.branch}@${GIT.commit} · hybrid=${HAS_HYBRID}`); }); }, 500);
 // Le Studio n'affiche pas le modèle : seulement « Démo » quand aucune clé n'est configurée.
 app.get('/meta', async () => ({ demo: isDemoMode(), provider: llm.name === 'mock' ? 'démo' : 'configuré' }));
 app.get('/llm', async () => ({ configured: !!providerConf(), provider: providerConf()?.label ?? null, model: providerConf()?.model ?? null, ...llmStatus }));
+/** Diagnostic visible : commit, moteur sémantique, LLM, mode. */
+app.get('/engine', async () => engineDiagnostic(startedAt, llmStatus));
 app.post<{ Body: { projectId?: string | null; mode?: 'ask' | 'agent'; message: string; fileIds?: string[]; version?: number } }>('/chat', async (r) =>
   chat({ projectId: r.body.projectId ?? null, mode: r.body.mode === 'agent' ? 'agent' : 'ask', message: String(r.body.message ?? ''), fileIds: r.body.fileIds ?? [], version: r.body.version }));
 app.post<{ Params: { id: string } }>('/jobs/:id/approve', async (r) => ({ ok: decide(r.params.id, true) }));
