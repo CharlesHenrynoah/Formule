@@ -83,18 +83,24 @@ export function expectations(views: ViewSpec[], raws: Record<string, unknown>, r
     } else if (v.kind === 'ranking') {
       const b = v.bindings;
       const rows = coll(raw, b.collection);
-      const acc: Record<string, { n: number; d: number }> = {};
+      const acc: Record<string, { n: number; d: number; first: number | null }> = {};
       const order: string[] = [];
       rows.forEach((r, i) => {
         const lab = String(dig(r, b.label) ?? '—');
         const k = b.groupBy ? lab : `${lab}#${i}`;
-        if (!acc[k]) { acc[k] = { n: 0, d: 0 }; order.push(k); }
+        if (!acc[k]) { acc[k] = { n: 0, d: 0, first: null }; order.push(k); }
         const m = dig(r, b.metric), d = b.den ? dig(r, b.den) : undefined;
         if (b.agg === 'count') acc[k].n++;
+        else if (b.agg === 'identity') { if (typeof m === 'number' && isFinite(m) && acc[k].first === null) { acc[k].first = m; acc[k].n = m; } }
         else if (typeof m === 'number' && (b.agg !== 'ratio' || typeof d === 'number')) { acc[k].n += m; if (typeof d === 'number') acc[k].d += d; }
       });
-      const list = order.map((k) => ({ label: b.groupBy ? k : k.replace(/#\d+$/, ''), value: b.agg === 'ratio' ? (acc[k].d > 0 ? acc[k].n / acc[k].d : NaN) : acc[k].n }))
-        .filter((x) => !isNaN(x.value)).map((x) => ({ ...x, value: Math.round(x.value * 100) / 100 }));
+      const list = order.map((k) => {
+        const g = acc[k];
+        const label = b.groupBy ? k : k.replace(/#\d+$/, '');
+        if (b.agg === 'ratio') return { label, value: g.d > 0 ? g.n / g.d : NaN };
+        if (b.agg === 'identity') return { label, value: g.first === null ? NaN : g.first };
+        return { label, value: g.n };
+      }).filter((x) => !isNaN(x.value)).map((x) => ({ ...x, value: Math.round(x.value * 100) / 100 }));
       list.sort((x, y) => (b.order === 'desc' ? y.value - x.value : x.value - y.value));
       out.push({ viewId: v.id, kind: 'ranking', first: list[0] ? `${list[0].label}=${list[0].value}` : '' });
     } else if (v.kind === 'bars' || v.kind === 'donut') {
@@ -201,8 +207,20 @@ export function contradicts(
   if (req.percent && view.bindings?.aggregate && view.bindings.aggregate.percent !== true) return 'pourcentage exigé absent';
   if (req.limit != null && view.bindings?.limit != null && view.bindings.limit !== req.limit) return `limite ${view.bindings.limit} au lieu de ${req.limit}`;
   if (req.order && view.bindings?.order && view.bindings.order !== req.order) return `ordre « ${view.bindings.order} » au lieu de « ${req.order} »`;
+  // Classement : le plan doit déclarer SORT+LIMIT (pas une somme déguisée).
+  const pipeline = (req as { pipeline?: { steps?: { op: string }[] } }).pipeline;
+  if ((wantView === 'ranking' || wantView === 'bars') && req.limit != null && pipeline?.steps?.length) {
+    const ops = pipeline.steps.map((s) => s.op);
+    if (ops.includes('LIMIT') && !ops.includes('SORT')) return 'classement sans SORT : LIMIT seul interdit';
+    if (ops.includes('SUM') && wantOp !== 'sum') return 'SUM dans le pipeline sans operation=sum';
+  }
   if (req.population && view.bindings?.population && !String(view.bindings.population).toLowerCase().includes(req.population.split(/\s+/)[0]?.toLowerCase() ?? '')) {
     return `population « ${view.bindings.population} » au lieu de « ${req.population} »`;
+  }
+  if (req.period && typeof view.bindings?.period === 'string' && view.bindings.period) {
+    const want = req.period.toLowerCase();
+    const got = String(view.bindings.period).toLowerCase();
+    if (!got.includes(want) && !want.includes(got)) return `période « ${view.bindings.period} » au lieu de « ${req.period} »`;
   }
   if (req.unit && view.bindings?.unit != null && view.bindings.unit !== null) {
     const u = String(view.bindings.unit).toLowerCase();

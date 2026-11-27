@@ -124,6 +124,16 @@ const ReqSchema = z.object({
   }, z.number().int().min(1).max(50).optional()),
   order: OrderEnum,
   covers: asStringArray(6, 120),
+  /** Plan d'opérateurs déclaratif (FILTER…NORMALIZE) — indépendant du graphique. */
+  pipeline: z.preprocess((v) => {
+    if (v == null || typeof v !== 'object' || Array.isArray(v)) return undefined;
+    return v;
+  }, z.object({
+    source: z.object({ collection: z.string().min(1).max(200) }),
+    steps: z.array(z.object({
+      op: z.enum(['FILTER', 'COUNT', 'SUM', 'AVG', 'RATIO', 'SORT', 'LIMIT', 'GROUP', 'JOIN', 'NORMALIZE']),
+    }).passthrough()).min(1).max(20),
+  }).optional()),
 });
 
 const AcquisitionGroupSchema = z.object({
@@ -248,7 +258,8 @@ Règles :
 7. toolHints = outils de DONNÉES. search_docs / documentation uniquement si demandé.
 8. covers[] sur chaque exigence = copie exacte d'une entrée de coverage analytique.
 9. Layout / refresh / design → constraints, pas requirements ni coverage.
-10. JSON uniquement. Tu n'exécutes rien. Omettre les propriétés facultatives non pertinentes ; ne pas émettre null, des objets fictifs ou des valeurs hors enum.`;
+10. pipeline (optionnel) : plan d'opérateurs {source:{collection}, steps:[{op:FILTER|COUNT|SUM|AVG|RATIO|SORT|LIMIT|GROUP|JOIN|NORMALIZE,...}]}. Un classement = SORT puis LIMIT, jamais une SUM implicite. Un ratio de parts = FILTER + COUNT + RATIO. Indépendant de visualization.
+11. JSON uniquement. Tu n'exécutes rien. Omettre les propriétés facultatives non pertinentes ; ne pas émettre null, des objets fictifs ou des valeurs hors enum.`;
 
 // Schéma de communication concret : les champs facultatifs de cet exemple ne doivent
 // être émis que lorsqu'ils correspondent au prompt. Les exemples ne sont pas des données.
@@ -259,7 +270,8 @@ visualization?:${VIEW_KINDS.join('|')}, operation?:${AGGS.join('|')}, measures?:
 population?:string, period?:string, grain?:string, unit?:string, transform?:"base100",
 filters?:[{field:string[],op:"eq"|"neq"|"current_month"|"gt"|"lt"|"gte"|"lte"|"in"|"between",value?:string|number|array de strings/nombres}],
 toolHints?:string[], argHints?:objet de valeurs string/number/boolean, certainty?:"certain"|"hypothesis",
-section?:string, limit?:entier 1..50, order?:"asc"|"desc", covers?:string[]}.
+section?:string, limit?:entier 1..50, order?:"asc"|"desc", covers?:string[],
+pipeline?:{source:{collection:string},steps:{op:"FILTER"|"COUNT"|"SUM"|"AVG"|"RATIO"|"SORT"|"LIMIT"|"GROUP"|"JOIN"|"NORMALIZE",...}[]}}.
 acquisitions facultatif (0..40 objets) : {id:string, purpose?:string, entity?:string, forRequirementIds:string[] non vide,
 toolHints?:string[], argHints?:objet de valeurs string/number/boolean, dataNotDocs?:boolean}.
 Tip : coverage[] = intentions analytiques uniquement (KPI, tableaux, courbes, mesures). Titre / design / layout / refresh / chrome UI → constraints (global|design|interactions), jamais coverage ni gaps MCP.
@@ -437,6 +449,7 @@ function aiReqToTpl(r: z.infer<typeof ReqSchema>, index: number, design?: string
     percent: agg === 'ratio',
     entities, population: r.population, period, grain: r.grain, unit: r.unit,
     transform: r.transform, limit: r.limit, order: r.order, section: r.section, design, covers,
+    pipeline: r.pipeline as ReqTemplate['pipeline'],
     label_: view === 'ranking' || view === 'donut' || view === 'bars' || view === 'table' ? ['nom', 'name', 'libelle', 'categorie', 'symbol', 'id'] : undefined,
     dimensions: view === 'ranking' || view === 'donut' || view === 'bars' || view === 'table' ? ['nom', 'name', 'libelle', 'categorie', 'symbol'] : undefined,
     acceptance: [

@@ -40,6 +40,13 @@ export const RequirementSchema = z.object({
   measures: z.array(z.string().max(80)).max(12).optional(),
   transform: z.enum(['base100']).optional(),
   covers: z.array(z.string().max(120)).max(12).optional(),
+  /** Plan de transformation déclaratif (validé strictement via TransformPlanSchema à l'exécution). */
+  pipeline: z.object({
+    source: z.object({ collection: z.string().min(1).max(200) }),
+    steps: z.array(z.object({ op: z.enum([
+      'FILTER', 'COUNT', 'SUM', 'AVG', 'RATIO', 'SORT', 'LIMIT', 'GROUP', 'JOIN', 'NORMALIZE',
+    ]) }).passthrough()).min(1).max(20),
+  }).optional(),
 });
 
 export const QuerySchema = z.object({
@@ -102,7 +109,8 @@ export const RankingView = z.object({
   kind: z.literal('ranking'), id: z.string(), title: z.string().max(80), queryId: z.string(),
   bindings: z.object({
     collection: Path, label: Path, metric: Path, den: Path.optional(), groupBy: z.boolean().default(false),
-    agg: z.enum(['sum', 'count', 'ratio']).default('sum'), unit: z.string().max(20).nullable(), unitPath: Path.optional(),
+    /** identity = SORT+LIMIT sur valeur brute ; sum/count/ratio uniquement si déclarés dans le plan. */
+    agg: z.enum(['sum', 'count', 'ratio', 'identity']).default('identity'), unit: z.string().max(20).nullable(), unitPath: Path.optional(),
     population: z.string().max(80), order: z.enum(['desc', 'asc']).default('desc'), limit: z.number().int().min(1).max(50).default(10),
   }),
   requirementIds: z.array(z.string()).default([]),

@@ -18,7 +18,8 @@ export type AcquisitionHints = {
 const isDocs = (name: string) => /search_docs|documentation|readme|^docs?$/i.test(name);
 
 /**
- * Planifie les lectures MCP.
+ * Planifie les lectures MCP (dimension « source » uniquement).
+ * Les transformations (FILTER/COUNT/SUM/…/NORMALIZE) s'exécutent après lecture, hors MCP.
  * Les groupes IA priorisent mutualisation et décomposition ; permissions / schéma / quotas restent déterministes.
  * Les outils documentaires sont exclus sauf si le groupe l'autorise explicitement.
  */
@@ -140,7 +141,9 @@ export async function planAcquisitions(
   // 2) Exigences non couvertes par un groupe.
   for (const req of reqs) {
     if (req.view === 'note' || covered.has(req.id)) continue;
-    const text = [req.label, req.population, req.period, ...(req.entities ?? []), ...(req.measures ?? req.measure ?? [])].filter(Boolean).join(' ');
+    // Toutes les exigences du contrat restent planifiées (pipeline inclus), même si la lecture échouera plus tard → status unavailable.
+    const ops = (req.pipeline?.steps ?? []).map((s) => s.op).join(' ');
+    const text = [req.label, req.population, req.period, ...(req.entities ?? []), ...(req.measures ?? req.measure ?? []), ops].filter(Boolean).join(' ');
     const scopeText = (req.operation ?? req.agg) === 'ratio' && req.scopeSize != null
       ? (req.entities ?? []).reduce((str, e) => str.replaceAll(e, '').replaceAll(e.toLowerCase(), ''), text)
       : text;
@@ -164,7 +167,8 @@ export async function planAcquisitions(
       ];
       const seed = { ...(hints.argHints?.get(req.id) ?? {}) };
       if (entity) {
-        const hasId = Object.keys(seed).some((k) => /id|coin|symbol|asset|slug|name/i.test(k));
+        // Pas de special-case fournisseur : clés génériques id/symbol/name uniquement.
+        const hasId = Object.keys(seed).some((k) => /^(id|symbol|name|slug|asset)$/i.test(k) || /(_id|Id)$/.test(k));
         if (!hasId) seed.id = entity;
       }
       const tried = new Set<string>();

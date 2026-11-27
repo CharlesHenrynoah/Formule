@@ -32,7 +32,8 @@ export function bindClauses(reqs: ReqTemplate[], datasets: Map<string, Dataset>)
       if (!resolved.ok) { reasons.push(`${ds.acq.queryId}: ${resolved.reason}`); continue; }
       const clash = contradicts(tpl, resolved.view);
       if (clash) { reasons.push(`${ds.acq.queryId}: ${clash}`); continue; }
-      return { tpl: raw, status: 'covered' as const, queryId: ds.acq.queryId, view: resolved.view, evidencePath: resolved.evidencePath, envelopeId: ds.acq.envelope.id };
+      const tplOut = resolved.pipeline ? { ...raw, pipeline: resolved.pipeline } : raw;
+      return { tpl: tplOut, status: 'covered' as const, queryId: ds.acq.queryId, view: resolved.view, evidencePath: resolved.evidencePath, envelopeId: ds.acq.envelope.id };
     }
     const fail = candidates[0].ds.acq.envelope.status === 'error' ? 'unavailable' as const : 'missing' as const;
     return { tpl: raw, status: fail, reason: reasons[0] ?? 'aucune acquisition compatible' };

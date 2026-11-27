@@ -390,6 +390,10 @@ export function freezeReqs(reqs: ReqTemplate[]): ReqTemplate[] {
     columns: r.columns ? Object.freeze([...r.columns]) : undefined,
     series: r.series ? Object.freeze(r.series.map((s) => Object.freeze([...s]))) : undefined,
     covers: r.covers ? Object.freeze([...r.covers]) : undefined,
+    pipeline: r.pipeline ? Object.freeze({
+      source: Object.freeze({ ...r.pipeline.source }),
+      steps: Object.freeze(r.pipeline.steps.map((s) => Object.freeze({ ...s }))),
+    }) : undefined,
     tool: Object.freeze([...r.tool]),
   }));
 }

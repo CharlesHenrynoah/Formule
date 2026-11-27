@@ -109,22 +109,26 @@ export function aggregate(raw: unknown, a: Aggregate, unitFallback: string | nul
 }
 
 export interface RankRow { label: string; value: number; count: number }
-export function rank(raw: unknown, b: { collection: string; label: string; metric: string; den?: string; groupBy: boolean; agg: 'sum' | 'count' | 'ratio'; order: 'asc' | 'desc'; limit: number }): { rows: RankRow[]; total: number; partial: boolean } {
+/** Classement : SUM/COUNT/RATIO uniquement si déclarés. `identity` = valeur brute puis SORT/LIMIT (jamais une somme implicite). */
+export function rank(raw: unknown, b: { collection: string; label: string; metric: string; den?: string; groupBy: boolean; agg: 'sum' | 'count' | 'ratio' | 'identity'; order: 'asc' | 'desc'; limit: number }): { rows: RankRow[]; total: number; partial: boolean } {
   const all = getCollection(raw, b.collection) ?? [];
-  const groups = new Map<string, { n: number; d: number; c: number }>();
+  const groups = new Map<string, { n: number; d: number; c: number; first: number | null }>();
   for (const r of all) {
     const label = String(getPath(r, b.label) ?? '—');
     const key = b.groupBy ? label : `${label}#${groups.size}`;
-    const g = groups.get(key) ?? { n: 0, d: 0, c: 0 };
+    const g = groups.get(key) ?? { n: 0, d: 0, c: 0, first: null };
     const mv = getPath(r, b.metric); const dv = b.den ? getPath(r, b.den) : undefined;
     if (b.agg === 'count') g.n += 1;
-    else if (typeof mv === 'number' && (b.agg !== 'ratio' || typeof dv === 'number')) { g.n += mv; if (typeof dv === 'number') g.d += dv; }
+    else if (b.agg === 'identity') {
+      if (typeof mv === 'number' && Number.isFinite(mv) && g.first === null) { g.first = mv; g.n = mv; }
+    } else if (typeof mv === 'number' && (b.agg !== 'ratio' || typeof dv === 'number')) { g.n += mv; if (typeof dv === 'number') g.d += dv; }
     g.c += 1; groups.set(key, g);
   }
   const rows: RankRow[] = [];
   for (const [k, g] of groups) {
     const label = b.groupBy ? k : k.replace(/#\d+$/, '');
     if (b.agg === 'ratio') { if (g.d > 0) rows.push({ label, value: round(g.n / g.d), count: g.c }); }
+    else if (b.agg === 'identity') { if (g.first !== null) rows.push({ label, value: round(g.first), count: g.c }); }
     else rows.push({ label, value: round(g.n), count: g.c });
   }
   rows.sort((x, y) => (b.order === 'desc' ? y.value - x.value : x.value - y.value));

@@ -1,5 +1,7 @@
 import {
-  collectionFields, inferContract, getCollection, getPath, parseTime, NON_ADDITIVE, type DataContract, type FieldContract, type ViewSpec,
+  collectionFields, inferContract, getCollection, getPath, parseTime, NON_ADDITIVE,
+  planFromIntent, validateTransformPlan,
+  type DataContract, type FieldContract, type TransformPlan, type ViewSpec,
 } from '@formule/contracts';
 import type { Acquired } from '../discovery/catalog.js';
 import { norm, type ClauseFilter, type ReqTemplate } from './lexicon.js';
@@ -41,8 +43,23 @@ const unitSibling = (fields: Dataset['fields'], rel: string) => {
 };
 
 export type Resolution =
-  | { ok: true; view: ViewSpec; evidencePath: string }
+  | { ok: true; view: ViewSpec; evidencePath: string; pipeline?: TransformPlan }
   | { ok: false; reason: string };
+
+/** Construit et valide un plan d'opérateurs ; refuse un plan invalide (pas d'exécution silencieuse). */
+function buildPipeline(
+  req: ReqTemplate,
+  intent: Parameters<typeof planFromIntent>[0],
+): TransformPlan | undefined {
+  if (req.pipeline) {
+    const v = validateTransformPlan(req.pipeline);
+    return v.ok && v.plan.steps.length ? v.plan : undefined;
+  }
+  const plan = planFromIntent(intent);
+  if (!plan.steps.length) return undefined;
+  const v = validateTransformPlan(plan);
+  return v.ok ? v.plan : undefined;
+}
 
 /** Lie une exigence aux champs RÉELLEMENT présents dans le brut. Aucune mesure inventée. */
 export function resolveRequirement(req: ReqTemplate, ds: Dataset, viewId: string, queryId: string): Resolution {
@@ -91,6 +108,15 @@ export function resolveRequirement(req: ReqTemplate, ds: Dataset, viewId: string
     if (agg === 'identity' && !measure) return { ok: false, reason: `identité sans mesure (${src})` };
     if (measure && (measure.units?.length ?? 0) > 1 && !unitSibling(F, measure.rel)) return { ok: false, reason: `unités multiples pour « ${measure.rel} » : pas de fusion implicite` };
     const us = measure ? unitSibling(F, measure.rel) : undefined;
+    const pipeline = buildPipeline(req, {
+      collection: coll,
+      operation: agg === 'sum' || agg === 'count' || agg === 'avg' || agg === 'ratio' || agg === 'last' || agg === 'top' || agg === 'identity' ? agg : 'count',
+      measure: measure?.rel,
+      den: den?.rel,
+      where: where.filters,
+      denWhere: denWhere?.ok ? denWhere.filters : undefined,
+      percent: !!req.percent,
+    });
     return {
       ok: true, evidencePath: `${coll}[].${measure?.rel ?? '*'}`,
       view: {
@@ -100,6 +126,7 @@ export function resolveRequirement(req: ReqTemplate, ds: Dataset, viewId: string
           aggregate: { collection: coll, agg, measure: measure?.rel, den: den?.rel, unitPath: agg === 'ratio' ? undefined : us?.rel, where: where.filters, ...(denWhere?.ok ? { denWhere: denWhere.filters } : {}), percent: !!req.percent },
         },
       },
+      pipeline,
     };
   }
   if (req.view === 'line' || req.view === 'simulation') {
@@ -121,12 +148,18 @@ export function resolveRequirement(req: ReqTemplate, ds: Dataset, viewId: string
         ], assumptions: ['scénario calculé localement, distinct des données observées'] },
       } };
     }
+    const pipeline = buildPipeline(req, {
+      collection: coll,
+      measure: series[0]?.path,
+      normalize: req.transform === 'base100' ? 'base100' : undefined,
+    });
     return {
       ok: true, evidencePath: `${coll}[].${series[0].path}`,
       view: {
         kind: 'line', id: viewId, title: req.title, queryId, requirementIds: [req.id],
         bindings: { collection: coll, t: t.rel, series, normalize: req.transform === 'base100' ? 'base100' as const : 'none' as const },
       },
+      pipeline,
     };
   }
   if (req.view === 'ranking') {
@@ -137,21 +170,42 @@ export function resolveRequirement(req: ReqTemplate, ds: Dataset, viewId: string
     const label = matchField(F, req.label_ ?? req.dimensions, ['dimension', 'text', 'identifier', 'state']);
     const miss = need(metric, measureKws?.[0] ?? 'mesure') || (req.den && need(den, req.den[0])) || need(label, req.label_?.[0] ?? 'libellé');
     if (miss) return { ok: false, reason: miss };
-    // Somme explicite ou regroupement : jamais sur une mesure non additive. Un classement ligne à ligne reste permis.
-    if ((op === 'sum' || !!req.groupBy) && (op ?? 'sum') === 'sum' && NON_ADDITIVE.test(norm(metric!.rel))) {
-      return { ok: false, reason: `somme interdite sur « ${metric!.rel} » : mesure non additive (${src})` };
+    // SUM explicite + GROUP uniquement : jamais de somme implicite sur non-additif.
+    // Classement ligne à ligne = SORT + LIMIT (plan), pas une somme.
+    if (op === 'sum' && NON_ADDITIVE.test(norm(metric!.rel))) {
+      return { ok: false, reason: `somme interdite sur « ${metric!.rel} » : mesure non additive — utiliser SORT/LIMIT (${src})` };
+    }
+    if (req.groupBy && (op ?? 'sum') === 'sum' && NON_ADDITIVE.test(norm(metric!.rel))) {
+      return { ok: false, reason: `somme groupée interdite sur « ${metric!.rel} » : mesure non additive (${src})` };
     }
     const us = unitSibling(F, metric!.rel);
-    const agg = op === 'ratio' ? 'ratio' : op === 'count' ? 'count' : 'sum';
+    const nonAdd = NON_ADDITIVE.test(norm(metric!.rel));
+    // Classement : SUM/COUNT/RATIO seulement si déclarés ; sinon identity (= SORT+LIMIT).
+    const agg = op === 'ratio' ? 'ratio' as const
+      : op === 'count' ? 'count' as const
+      : op === 'sum' ? 'sum' as const
+      : 'identity' as const;
+    const pipeline = buildPipeline(req, {
+      collection: coll,
+      operation: op === 'ratio' || op === 'count' || op === 'sum' || op === 'avg' ? op : 'identity',
+      measure: metric!.rel,
+      den: den?.rel,
+      groupBy: req.groupBy ? label!.rel : undefined,
+      order: req.order ?? 'desc',
+      limit: req.limit ?? 10,
+      ranking: true,
+    });
     return { ok: true, evidencePath: `${coll}[].${metric!.rel}`, view: {
       kind: 'ranking', id: viewId, title: req.title, queryId, requirementIds: [req.id],
       bindings: {
-        collection: coll, label: label!.rel, metric: metric!.rel, den: den?.rel, groupBy: !!req.groupBy, agg,
+        collection: coll, label: label!.rel, metric: metric!.rel, den: den?.rel,
+        // groupBy explicite uniquement ; non-additif → jamais de somme groupée implicite.
+        groupBy: !!req.groupBy && !(nonAdd && agg === 'sum'), agg,
         unit: agg === 'ratio' ? null : metric!.unit ?? null, unitPath: us?.rel,
         population: req.population ?? `${getCollection(ds.acq.raw, coll)?.length ?? 0} lignes de ${ds.acq.ref.tool.name}`,
         order: req.order ?? 'desc', limit: req.limit ?? 10,
       },
-    } };
+    }, pipeline };
   }
   if (req.view === 'bars' || req.view === 'donut') {
     const label = matchField(F, req.label_ ?? req.dimensions ?? ['nom', 'name', 'libelle', 'categorie', 'famille', 'type'], ['dimension', 'text', 'identifier', 'state']);
@@ -165,10 +219,20 @@ export function resolveRequirement(req: ReqTemplate, ds: Dataset, viewId: string
       if (!metric) return { ok: false, reason: `identité graphique sans mesure (${src})` };
       const where = bindFilters(F, req.filters ?? req.where, src);
       if (!where.ok) return where;
+      const lim = req.limit ?? Math.max(2, req.entities?.length ?? 8);
+      const pipeline = buildPipeline(req, {
+        collection: coll,
+        operation: 'identity',
+        measure: metric.rel,
+        where: where.filters,
+        order: req.order ?? 'desc',
+        limit: lim,
+        ranking: true,
+      });
       return { ok: true, evidencePath: `${coll}[].${metric.rel}`, view: {
         kind: req.view, id: viewId, title: req.title, queryId, requirementIds: [req.id],
-        bindings: { collection: coll, where: where.filters, label: label.rel, metric: metric.rel, agg: 'identity', unit: metric.unit ?? req.unit ?? null, limit: req.limit ?? Math.max(2, req.entities?.length ?? 8) },
-      } };
+        bindings: { collection: coll, where: where.filters, label: label.rel, metric: metric.rel, agg: 'identity', unit: metric.unit ?? req.unit ?? null, limit: lim },
+      }, pipeline };
     }
     if (metric && (op === 'sum' || op === undefined) && NON_ADDITIVE.test(norm(metric.rel))) {
       return { ok: false, reason: `somme interdite sur « ${metric.rel} » : mesure non additive (${src})` };
@@ -176,10 +240,20 @@ export function resolveRequirement(req: ReqTemplate, ds: Dataset, viewId: string
     const where = bindFilters(F, req.filters ?? req.where, src);
     if (!where.ok) return where;
     const agg = op === 'avg' ? 'avg' : op === 'count' || !metric ? 'count' : 'sum';
+    const pipeline = buildPipeline(req, {
+      collection: coll,
+      operation: agg,
+      measure: metric?.rel,
+      where: where.filters,
+      groupBy: label.rel,
+      order: req.order ?? 'desc',
+      limit: req.limit ?? 8,
+      ranking: true,
+    });
     return { ok: true, evidencePath: `${coll}[].${metric?.rel ?? label.rel}`, view: {
       kind: req.view, id: viewId, title: req.title, queryId, requirementIds: [req.id],
       bindings: { collection: coll, where: where.filters, label: label.rel, ...(metric && agg !== 'count' ? { metric: metric.rel } : {}), agg, unit: metric?.unit ?? req.unit ?? null, limit: req.limit ?? 8 },
-    } };
+    }, pipeline };
   }
   if (req.view === 'histogram') {
     const metric = matchField(F, req.measure, ['measure']);

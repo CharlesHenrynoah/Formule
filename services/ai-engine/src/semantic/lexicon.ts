@@ -57,6 +57,11 @@ export interface ReqTemplate {
   transform?: 'base100';
   /** Points de coverage portés explicitement (pas une détection lexicale). */
   covers?: string[];
+  /** Plan d'opérateurs (FILTER/COUNT/SUM/…/NORMALIZE) — indépendant du graphique. */
+  pipeline?: {
+    source: { collection: string };
+    steps: { op: string; [k: string]: unknown }[];
+  };
 }
 
 interface Recipe { match: RegExp; reqs: ReqTemplate[]; title: string; mission: string; commands: string[] }

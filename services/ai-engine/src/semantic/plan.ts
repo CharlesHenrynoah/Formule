@@ -32,8 +32,10 @@ export function planRequirements(u: Understanding, datasets: Map<string, Dataset
     const ds = datasets.get(qid);
     if (!ds) { out.push({ tpl, status: 'unavailable', reason: 'lecture non effectuée' }); continue; }
     const r = resolveRequirement(tpl, ds, `v${++i}_${tpl.view}`, qid);
-    if (r.ok) out.push({ tpl, status: 'covered', queryId: qid, view: r.view, evidencePath: r.evidencePath, envelopeId: ds.acq.envelope.id });
-    else out.push({ tpl, status: ds.acq.envelope.status === 'error' ? 'unavailable' : 'missing', reason: r.reason });
+    if (r.ok) {
+      const tplOut = r.pipeline ? { ...tpl, pipeline: r.pipeline } : tpl;
+      out.push({ tpl: tplOut, status: 'covered', queryId: qid, view: r.view, evidencePath: r.evidencePath, envelopeId: ds.acq.envelope.id });
+    } else out.push({ tpl, status: ds.acq.envelope.status === 'error' ? 'unavailable' : 'missing', reason: r.reason });
   }
   return out;
 }
@@ -134,6 +136,7 @@ export function assembleSpec(input: {
       ...(t.measures ?? t.measure ? { measures: [...(t.measures ?? t.measure ?? [])] } : {}),
       ...(t.transform ? { transform: t.transform } : {}),
       ...(t.covers?.length ? { covers: [...t.covers] } : {}),
+      ...(t.pipeline?.steps?.length ? { pipeline: t.pipeline as Requirement['pipeline'] } : {}),
     };
   });
   const styleBase = styleFromConstraints(constraints);

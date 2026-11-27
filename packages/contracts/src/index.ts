@@ -12,5 +12,6 @@ export * from './spec.js';
 export * from './certification.js';
 export * from './events.js';
 export * from './aggregate.js';
+export * from './transform.js';
 export * from './simulate.js';
 export * from './shapes.js';
